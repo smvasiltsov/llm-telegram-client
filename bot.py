@@ -760,6 +760,15 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             return
         if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1].strip()
+        if str(state.get("key", "")).lower() == "auth_token":
+            lowered = value.lower()
+            if lowered.startswith("cookie:"):
+                value = value.split(":", 1)[1].strip()
+            lowered = value.lower()
+            if lowered.startswith("sessionid="):
+                value = value.split("=", 1)[1].strip()
+            if ";" in value:
+                value = value.split(";", 1)[0].strip()
         pending_fields.delete(user.id)
         storage.set_provider_user_value(state["provider_id"], state["key"], state["role_id"], value)
         await update.message.reply_text("Проверяю значение и пытаюсь ответить на сообщение из группы.")

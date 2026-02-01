@@ -29,6 +29,7 @@ class AuthService:
         token: str,
         group_id: int | None,
     ) -> bool:
+        token = self._normalize_token(token)
         try:
             sessions = await self._llm_client.list_sessions(token)
         except ValueError:
@@ -71,3 +72,16 @@ class AuthService:
         self._storage.upsert_auth_token(telegram_user_id, encrypted)
         self._storage.set_user_authorized(telegram_user_id, True)
         return True
+
+    @staticmethod
+    def _normalize_token(token: str) -> str:
+        value = token.strip()
+        lowered = value.lower()
+        if lowered.startswith("cookie:"):
+            value = value.split(":", 1)[1].strip()
+            lowered = value.lower()
+        if lowered.startswith("sessionid="):
+            value = value.split("=", 1)[1].strip()
+        if ";" in value:
+            value = value.split(";", 1)[0].strip()
+        return value
