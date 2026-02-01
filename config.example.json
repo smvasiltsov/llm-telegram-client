@@ -1,0 +1,13 @@
+{
+  "telegram_bot_token": "REPLACE_ME",
+  "database_path": "./bot.sqlite3",
+  "encryption_key": "REPLACE_ME_FERNET_KEY",
+  "owner_user_id": 1234567890,
+  "routing": {
+    "require_bot_mention": false
+  },
+  "llm": {
+    "timeout_sec": 600
+  }
+
+}

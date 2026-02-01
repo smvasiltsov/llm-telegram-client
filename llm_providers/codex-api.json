@@ -1,0 +1,69 @@
+{
+  "id": "codex-api",
+  "label": "Codex API",
+  "base_url": "http://127.0.0.1:8002",
+  "tls": {
+    "ca_cert_path": null
+  },
+  "adapter": "generic",
+  "capabilities": {
+    "list_sessions": true,
+    "create_session": true,
+    "rename_session": false,
+    "model_select": false
+  },
+  "auth": {
+    "mode": "none"
+  },
+  "user_fields": {
+    "working_dir": {
+      "prompt": "Введите рабочую директорию для создания сессии. Пример: /Users/username/AI/example",
+      "scope": "role"
+    }
+  },
+  "endpoints": {
+    "list_sessions": {
+      "path": "/sessions",
+      "method": "GET",
+      "response": {
+        "list_path": "sessions",
+        "item_id_path": "session_id"
+      }
+    },
+    "create_session": {
+      "path": "/sessions",
+      "method": "POST",
+      "request": {
+        "body_template": {
+          "working_dir": "[[[working_dir]]]"
+        }
+      },
+      "response": {
+        "session_id_path": "session_id"
+      }
+    },
+    "send_message": {
+      "path": "/sessions/{session_id}/send-prompt",
+      "method": "POST",
+      "request": {
+        "body_template": {
+          "prompt": "{{content}}"
+        }
+      },
+      "response": {
+        "content_path": "answer"
+      }
+    },
+    "delete_session": {
+      "path": "/sessions/{session_id}",
+      "method": "DELETE"
+    }
+  },
+  "history": {
+    "enabled": false,
+    "max_messages": 20
+  },
+  "models": [
+    { "id": "default", "label": "default" }
+  ]
+}

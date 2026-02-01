@@ -1,0 +1,29 @@
+# Local development environment
+.env
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE settings
+.idea/
+.vscode/
+
+
+__pycache__/
+*.pyc
+*.sqlite3
+config.json
+alfagen.json
+corp-ca.pem
+*.log

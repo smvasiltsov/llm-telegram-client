@@ -1,0 +1,66 @@
+{
+  "id": "gemini-api",
+  "label": "Gemini API",
+  "base_url": "http://127.0.0.1:8001",
+  "tls": {
+    "ca_cert_path": null
+  },
+  "adapter": "generic",
+  "capabilities": {
+    "list_sessions": true,
+    "create_session": true,
+    "rename_session": false,
+    "model_select": false
+  },
+  "auth": {
+    "mode": "none"
+  },
+  "user_fields": {
+    "working_dir": {
+      "prompt": "Введите рабочую директорию для создания сессии. Пример: /Users/username/AI/example",
+      "scope": "role"
+    }
+  },
+  "endpoints": {
+    "list_sessions": {
+      "path": "/clients",
+      "method": "GET",
+      "response": {
+        "list_path": "active_clients",
+        "item_id_path": "client_id"
+      }
+    },
+    "create_session": {
+      "path": "/clients",
+      "method": "POST",
+      "request": {
+        "body_template": {
+          "working_dir": "[[[working_dir]]]"
+        }
+      },
+      "response": {
+        "session_id_path": "client_id"
+      }
+    },
+    "send_message": {
+      "path": "/clients/{session_id}/prompt",
+      "method": "POST",
+      "request": {
+        "body_template": {
+          "prompt": "{{content}}",
+          "debug": "false"
+        }
+      },
+      "response": {
+        "content_path": "answer"
+      }
+    }
+  },
+  "history": {
+    "enabled": false,
+    "max_messages": 20
+  },
+  "models": [
+    { "id": "default", "label": "default" }
+  ]
+}

@@ -1,0 +1,45 @@
+{
+  "id": "ollama",
+  "label": "Ollama",
+  "base_url": "http://localhost:11434",
+  "tls": {
+    "ca_cert_path": null
+  },
+  "adapter": "generic",
+  "capabilities": {
+    "list_sessions": false,
+    "create_session": false,
+    "rename_session": false,
+    "model_select": true
+  },
+  "auth": {
+    "mode": "none"
+  },
+  "user_fields": {},
+  "endpoints": {
+    "send_message": {
+      "path": "/api/chat",
+      "method": "POST",
+      "request": {
+        "body_template": {
+          "model": "{{model}}",
+          "messages": "{{messages}}",
+          "stream": true
+        }
+      },
+      "response": {
+        "stream": true,
+        "stream_content_path": "message.content",
+        "stream_done_path": "done"
+      }
+    }
+  },
+  "history": {
+    "enabled": false,
+    "max_messages": 20
+  },
+  "models": [
+    { "id": "qwen3:1.7b", "label": "qwen3:1.7b" },
+    { "id": "mistral:latest", "label": "mistral:latest" }
+  ]
+}
