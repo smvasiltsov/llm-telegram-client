@@ -58,6 +58,10 @@ pip install cryptography
 - `llm.timeout_sec` — таймаут запросов
 Прочие параметры LLM описываются в `llm_providers/*.json`.
 
+### Раздел formatting
+- `formatting.mode` — форматирование ответов: `markdown` или `html`.
+- `formatting.allow_raw_html` — отправлять «сырой» HTML от LLM (если Telegram API не примет — бот отправит экранированный текст). Актуально для `mode=html`.
+
 ## Запуск
 ```bash
 python bot.py

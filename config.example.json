@@ -8,6 +8,9 @@
   },
   "llm": {
     "timeout_sec": 600
+  },
+  "formatting": {
+    "allow_raw_html": true,
+    "mode": "markdown"
   }
-
 }

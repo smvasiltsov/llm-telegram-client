@@ -21,6 +21,7 @@ from telegram.ext import (
 )
 from telegram import BotCommandScopeAllPrivateChats
 from telegram.constants import ParseMode
+from telegram.error import BadRequest
  
 import re
 
@@ -77,6 +78,105 @@ def _format_with_header(header: str | None, text: str) -> str:
     if not header:
         return html.escape(text)
     return f"<b>{html.escape(header)}</b>\n\n{html.escape(text)}"
+
+
+def _format_with_header_raw(header: str | None, text: str) -> str:
+    if not header:
+        return text
+    return f"<b>{html.escape(header)}</b>\n\n{text}"
+
+
+def _markdown_to_html_simple(text: str) -> str:
+    escaped = html.escape(text)
+
+    codeblocks: list[str] = []
+
+    def _codeblock_repl(match: re.Match[str]) -> str:
+        codeblocks.append(match.group(1))
+        return f"__CODEBLOCK_{len(codeblocks) - 1}__"
+
+    escaped = re.sub(r"```(?:[^\n]*)\n?(.*?)```", _codeblock_repl, escaped, flags=re.S)
+
+    inline_codes: list[str] = []
+
+    def _inline_code_repl(match: re.Match[str]) -> str:
+        inline_codes.append(match.group(1))
+        return f"__INLINECODE_{len(inline_codes) - 1}__"
+
+    escaped = re.sub(r"`([^`]+)`", _inline_code_repl, escaped)
+
+    escaped = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"__(.+?)__", r"<b>\1</b>", escaped)
+    escaped = re.sub(r"~~(.+?)~~", r"<s>\1</s>", escaped)
+    escaped = re.sub(r"\*(.+?)\*", r"<i>\1</i>", escaped)
+    escaped = re.sub(r"_(.+?)_", r"<i>\1</i>", escaped)
+
+    for i, code in enumerate(inline_codes):
+        escaped = escaped.replace(f"__INLINECODE_{i}__", f"<code>{code}</code>")
+
+    for i, code in enumerate(codeblocks):
+        escaped = escaped.replace(f"__CODEBLOCK_{i}__", f"<pre><code>{code}</code></pre>")
+
+    return escaped
+
+
+def _render_llm_text(text: str, formatting_mode: str, allow_raw_html: bool) -> str:
+    if formatting_mode == "markdown":
+        return text
+    if not allow_raw_html:
+        return html.escape(text)
+    return _markdown_to_html_simple(text)
+
+
+async def _send_formatted_with_fallback(
+    bot: Any,
+    chat_id: int,
+    text: str,
+    reply_to_message_id: int | None = None,
+    allow_raw_html: bool = True,
+    formatting_mode: str = "html",
+) -> None:
+    mode = formatting_mode.lower()
+    if mode == "markdown":
+        try:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_to_message_id=reply_to_message_id,
+            )
+        except BadRequest:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=html.escape(text),
+                parse_mode=ParseMode.HTML,
+                reply_to_message_id=reply_to_message_id,
+            )
+        return
+
+    if not allow_raw_html:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=html.escape(text),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=reply_to_message_id,
+        )
+        return
+
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text,
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=reply_to_message_id,
+        )
+    except BadRequest:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=html.escape(text),
+            parse_mode=ParseMode.HTML,
+            reply_to_message_id=reply_to_message_id,
+        )
 
 
 async def handle_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -424,11 +524,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             }
             group_role = storage.get_group_role(group_id, role_id)
             current_suffix = group_role.user_prompt_suffix or "(не задано)"
-            await query.edit_message_text(
+            text = (
                 "Эта инструкция будет добавляться перед каждым сообщением пользователя и уходить в LLM одним сообщением.\n\n"
                 "Текущая инструкция к сообщениям:\n\n"
                 f"{current_suffix}\n\n"
-                "Хотите изменить? Отправьте новую инструкцию (или 'clear' чтобы убрать).",
+                "Хотите изменить? Отправьте новую инструкцию (или 'clear' чтобы убрать)."
+            )
+            chunks = list(split_message(text))
+            await query.edit_message_text(
+                chunks[0],
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [InlineKeyboardButton(text="🧹 Очистить", callback_data=f"act:clear_suffix:{group_id}:{role_id}")],
@@ -436,6 +540,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ]
                 ),
             )
+            for extra in chunks[1:]:
+                await context.bot.send_message(chat_id=query.message.chat.id, text=extra)
             await query.answer()
             return
         if action == "clear_suffix":
@@ -458,11 +564,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             }
             group_role = storage.get_group_role(group_id, role_id)
             current_prefix = group_role.user_reply_prefix or "(не задано)"
-            await query.edit_message_text(
+            text = (
                 "Эта инструкция будет добавляться перед текстом сообщения, на которое пользователь отвечает.\n\n"
                 "Текущая инструкция для реплаев:\n\n"
                 f"{current_prefix}\n\n"
-                "Хотите изменить? Отправьте новую инструкцию (или 'clear' чтобы убрать).",
+                "Хотите изменить? Отправьте новую инструкцию (или 'clear' чтобы убрать)."
+            )
+            chunks = list(split_message(text))
+            await query.edit_message_text(
+                chunks[0],
                 reply_markup=InlineKeyboardMarkup(
                     [
                         [InlineKeyboardButton(text="🧹 Очистить", callback_data=f"act:clear_reply_prefix:{group_id}:{role_id}")],
@@ -470,6 +580,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
                     ]
                 ),
             )
+            for extra in chunks[1:]:
+                await context.bot.send_message(chat_id=query.message.chat.id, text=extra)
             await query.answer()
             return
         if action == "clear_reply_prefix":
@@ -721,9 +833,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("Ошибка при запросе к LLM. Попробуй позже.")
             continue
 
-        full_text = _format_with_header(None, response_text)
+        allow_raw_html = bool(context.application.bot_data.get("allow_raw_html", True))
+        formatting_mode = str(context.application.bot_data.get("formatting_mode", "html"))
+        rendered = _render_llm_text(response_text, formatting_mode, allow_raw_html)
+        full_text = _format_with_header_raw(None, rendered)
         for chunk in split_message(full_text):
-            await update.message.reply_text(chunk, parse_mode=ParseMode.HTML)
+            await _send_formatted_with_fallback(
+                context.bot,
+                update.effective_chat.id,
+                chunk,
+                reply_to_message_id=update.message.message_id,
+                allow_raw_html=allow_raw_html,
+                formatting_mode=formatting_mode,
+            )
 
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -748,7 +870,12 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         bool(pending_field_state),
         bool(context.application.bot_data["pending_store"].peek(user.id)),
     )
-    if update.message.text.strip().startswith("/") and not pending_field_state:
+    if (
+        update.message.text.strip().startswith("/")
+        and not pending_field_state
+        and user.id not in pending_prompts
+        and user.id not in pending_roles
+    ):
         return
     pending_msg = context.application.bot_data["pending_store"].peek(user.id)
     auth = storage.get_auth_token(user.id)
@@ -808,21 +935,35 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
     if user.id in pending_prompts and (not pending_msg or (auth and auth.is_authorized)):
-        group_id, role_id = pending_prompts.pop(user.id)
-        raw_prompt = update.message.text.strip()
-        if not raw_prompt:
-            await update.message.reply_text("Промпт не может быть пустым.")
-            return
-        is_clear = raw_prompt.lower() in {"clear", "skip"}
-        prompt = "" if is_clear else raw_prompt
-        storage.set_group_role_prompt(group_id, role_id, prompt)
-        role = storage.get_role_by_id(role_id)
-        await update.message.reply_text(
-            f"Промпт роли @{role.role_name} для группы {group_id} обновлён."
+        private_buffer: MessageBuffer = context.application.bot_data["private_buffer"]
+        started = await private_buffer.add(
+            update.effective_chat.id,
+            user.id,
+            update.message.message_id,
+            update.message.text,
+            start=True,
         )
+        if started:
+            should_schedule = await private_buffer.mark_scheduled(update.effective_chat.id, user.id)
+            if should_schedule:
+                asyncio.create_task(_flush_private_buffered(update.effective_chat.id, user.id, context))
         return
     if user.id in pending_roles and (not pending_msg or (auth and auth.is_authorized)):
         state = pending_roles[user.id]
+        if state["step"] in {"suffix", "reply_prefix"}:
+            private_buffer: MessageBuffer = context.application.bot_data["private_buffer"]
+            started = await private_buffer.add(
+                update.effective_chat.id,
+                user.id,
+                update.message.message_id,
+                update.message.text,
+                start=True,
+            )
+            if started:
+                should_schedule = await private_buffer.mark_scheduled(update.effective_chat.id, user.id)
+                if should_schedule:
+                    asyncio.create_task(_flush_private_buffered(update.effective_chat.id, user.id, context))
+            return
         text = update.message.text.strip()
         if state["step"] == "name":
             role_name = text.lstrip("@").strip()
@@ -1167,14 +1308,94 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
             logger.exception("LLM request failed user_id=%s role=%s", user_id, role.role_name)
             await context.bot.send_message(chat_id=chat_id, text="Ошибка при запросе к LLM. Попробуй позже.")
             continue
-        full_text = _format_with_header(None, response_text)
+        allow_raw_html = bool(context.application.bot_data.get("allow_raw_html", True))
+        formatting_mode = str(context.application.bot_data.get("formatting_mode", "html"))
+        rendered = _render_llm_text(response_text, formatting_mode, allow_raw_html)
+        full_text = _format_with_header_raw(None, rendered)
         for chunk in split_message(full_text):
+            await _send_formatted_with_fallback(
+                context.bot,
+                chat_id,
+                chunk,
+                reply_to_message_id=reply_to_message_id,
+                allow_raw_html=allow_raw_html,
+                formatting_mode=formatting_mode,
+            )
+
+
+async def _flush_private_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    private_buffer: MessageBuffer = context.application.bot_data["private_buffer"]
+    items = await private_buffer.wait_and_collect(chat_id, user_id)
+    if not items:
+        return
+    combined_text = "\n".join(item.content for item in items).strip()
+    if not combined_text:
+        return
+    await _process_pending_private_text(user_id, chat_id, combined_text, context)
+
+
+async def _process_pending_private_text(
+    user_id: int,
+    chat_id: int,
+    text: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> bool:
+    storage: Storage = context.application.bot_data["storage"]
+    pending_prompts = context.application.bot_data["pending_prompts"]
+    pending_roles = context.application.bot_data["pending_role_ops"]
+    pending_msg = context.application.bot_data["pending_store"].peek(user_id)
+    auth = storage.get_auth_token(user_id)
+
+    if user_id in pending_prompts and (not pending_msg or (auth and auth.is_authorized)):
+        group_id, role_id = pending_prompts.pop(user_id)
+        raw_prompt = text.strip()
+        if not raw_prompt:
+            await context.bot.send_message(chat_id=chat_id, text="Промпт не может быть пустым.")
+            return True
+        is_clear = raw_prompt.lower() in {"clear", "skip"}
+        prompt = "" if is_clear else raw_prompt
+        storage.set_group_role_prompt(group_id, role_id, prompt)
+        role = storage.get_role_by_id(role_id)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Промпт роли @{role.role_name} для группы {group_id} обновлён.",
+        )
+        return True
+
+    if user_id in pending_roles and (not pending_msg or (auth and auth.is_authorized)):
+        state = pending_roles[user_id]
+        if state["step"] == "suffix":
+            suffix = text.strip()
+            if not suffix:
+                await context.bot.send_message(chat_id=chat_id, text="Инструкция не может быть пустой.")
+                return True
+            if suffix.lower() == "clear":
+                suffix = None
+            storage.set_group_role_user_prompt_suffix(state["target_group_id"], state["role_id"], suffix)
+            pending_roles.pop(user_id, None)
+            role = storage.get_role_by_id(state["role_id"])
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=chunk,
-                parse_mode=ParseMode.HTML,
-                reply_to_message_id=reply_to_message_id,
+                text=f"Инструкция к сообщениям для @{role.role_name} обновлена.",
             )
+            return True
+        if state["step"] == "reply_prefix":
+            reply_prefix = text.strip()
+            if not reply_prefix:
+                await context.bot.send_message(chat_id=chat_id, text="Инструкция не может быть пустой.")
+                return True
+            if reply_prefix.lower() == "clear":
+                reply_prefix = None
+            storage.set_group_role_user_reply_prefix(state["target_group_id"], state["role_id"], reply_prefix)
+            pending_roles.pop(user_id, None)
+            role = storage.get_role_by_id(state["role_id"])
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"Инструкция для реплаев для @{role.role_name} обновлена.",
+            )
+            return True
+
+    return False
 
 
 async def _request_token(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1503,7 +1724,15 @@ async def main() -> None:
     pending_store = PendingStore(config.database_path)
     pending_user_fields = PendingUserFieldStore(config.database_path)
     message_buffer = MessageBuffer(window_seconds=2.0)
-    auth_service = AuthService(storage, cipher, llm_router, session_resolver)
+    private_buffer = MessageBuffer(window_seconds=2.0)
+    auth_service = AuthService(
+        storage,
+        cipher,
+        llm_router,
+        session_resolver,
+        provider_registry,
+        default_provider_id,
+    )
     storage.reset_authorizations()
     application.bot_data.update(
         {
@@ -1515,6 +1744,7 @@ async def main() -> None:
             "session_resolver": session_resolver,
             "pending_store": pending_store,
             "message_buffer": message_buffer,
+            "private_buffer": private_buffer,
             "auth_service": auth_service,
             "owner_user_id": config.owner_user_id,
             "require_bot_mention": config.require_bot_mention,
@@ -1525,6 +1755,8 @@ async def main() -> None:
             "provider_models": provider_models,
             "provider_model_map": {m.full_id: m for m in provider_models},
             "default_provider_id": default_provider_id,
+            "allow_raw_html": config.allow_raw_html,
+            "formatting_mode": config.formatting_mode,
         }
     )
 
