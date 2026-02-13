@@ -373,6 +373,11 @@ class LLMRouter:
             result = "".join(parts).strip()
             if not result:
                 raise ValueError("stream response empty")
+            self._logger.info(
+                "LLM generic response provider=%s chars=%s",
+                provider.provider_id,
+                len(result),
+            )
             return result
         self._logger.info(
             "LLM generic send_message provider=%s method=%s path=%s headers=%s payload=%s",
@@ -394,4 +399,10 @@ class LLMRouter:
         content_value = self._extract_path(data, content_path) if content_path else data
         if not content_value:
             raise ValueError("send_message response missing content")
-        return str(content_value)
+        result = str(content_value)
+        self._logger.info(
+            "LLM generic response provider=%s chars=%s",
+            provider.provider_id,
+            len(result),
+        )
+        return result

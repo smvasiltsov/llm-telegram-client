@@ -91,3 +91,8 @@ class PendingStore:
         if not row:
             return None
         return (row["chat_id"], row["message_id"], row["role_name"], row["content"], row["reply_text"])
+
+    def clear_all(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM pending_messages")
+        self._conn.commit()

@@ -12,5 +12,10 @@
   "formatting": {
     "allow_raw_html": true,
     "mode": "markdown"
+  },
+  "plugin_server": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8015
   }
 }

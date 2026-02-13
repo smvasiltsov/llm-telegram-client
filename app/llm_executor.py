@@ -25,13 +25,15 @@ class LLMExecutor:
         last_exc: Exception | None = None
         while attempt <= retries:
             try:
-                return await self._client.send_message(
+                response_text = await self._client.send_message(
                     session_id=session_id,
                     session_token=session_token,
                     content=content,
                     model_override=model_override or role.llm_model,
                     role_id=role.role_id,
                 )
+                self._logger.info("LLM response received role=%s chars=%s", role.role_name, len(response_text))
+                return response_text
             except Exception as exc:
                 last_exc = exc
                 self._logger.exception("LLM send failed attempt=%s", attempt + 1)
@@ -40,3 +42,6 @@ class LLMExecutor:
                 await asyncio.sleep(0.5 * (attempt + 1))
                 attempt += 1
         raise last_exc if last_exc else RuntimeError("LLM send failed")
+
+    def provider_id_for_model(self, model_override: str | None) -> str:
+        return self._client.provider_id_for_model(model_override)

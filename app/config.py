@@ -15,6 +15,9 @@ class AppConfig:
     require_bot_mention: bool
     allow_raw_html: bool
     formatting_mode: str
+    plugin_server_host: str
+    plugin_server_port: int
+    plugin_server_enabled: bool
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -22,6 +25,7 @@ def load_config(path: str | Path) -> AppConfig:
     routing_raw = raw.get("routing", {})
     llm_raw = raw.get("llm", {})
     formatting_raw = raw.get("formatting", {})
+    plugin_server_raw = raw.get("plugin_server", {})
 
     return AppConfig(
         telegram_bot_token=raw["telegram_bot_token"],
@@ -32,4 +36,7 @@ def load_config(path: str | Path) -> AppConfig:
         require_bot_mention=bool(routing_raw.get("require_bot_mention", True)),
         allow_raw_html=bool(formatting_raw.get("allow_raw_html", True)),
         formatting_mode=str(formatting_raw.get("mode", "html")).lower(),
+        plugin_server_host=str(plugin_server_raw.get("host", "127.0.0.1")),
+        plugin_server_port=int(plugin_server_raw.get("port", 8015)),
+        plugin_server_enabled=bool(plugin_server_raw.get("enabled", True)),
     )

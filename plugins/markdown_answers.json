@@ -1,0 +1,9 @@
+{
+  "enabled": false,
+  "web_app_url": "https://smvasiltsov.github.io/",
+  "api_base_url": "http://127.0.0.1:8015",
+  "id_query_param": "id",
+  "max_inline_chars": 1000,
+  "min_chars_for_button": 800,
+  "button_text": "Открыть полностью"
+}

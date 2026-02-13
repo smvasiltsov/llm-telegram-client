@@ -115,3 +115,4 @@ python bot.py
 ## Документация
 - Навигация по разделам: `docs/index.md`
 - Провайдеры LLM: `docs/providers.md`
+- Плагины: `docs/plugins.md`

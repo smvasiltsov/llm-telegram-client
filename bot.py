@@ -7,7 +7,7 @@ import httpx
 from pathlib import Path
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram import BotCommand
 from telegram import BotCommandScopeAllGroupChats, BotCommandScopeDefault
 from telegram.ext import (
@@ -31,6 +31,8 @@ from app.llm_executor import LLMExecutor
 from app.llm_router import LLMRouter, MissingUserField
 from app.llm_providers import ProviderConfig, ProviderUserField, load_provider_registry, model_label
 from app.message_buffer import MessageBuffer
+from app.plugin_server import PluginServerConfig, PluginTextServer
+from app.plugins import PluginManager, load_plugins
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
 from app.roles_registry import seed_group_roles, seed_roles
@@ -133,6 +135,7 @@ async def _send_formatted_with_fallback(
     chat_id: int,
     text: str,
     reply_to_message_id: int | None = None,
+    reply_markup: Any | None = None,
     allow_raw_html: bool = True,
     formatting_mode: str = "html",
 ) -> None:
@@ -144,6 +147,7 @@ async def _send_formatted_with_fallback(
                 text=text,
                 parse_mode=ParseMode.MARKDOWN,
                 reply_to_message_id=reply_to_message_id,
+                reply_markup=reply_markup,
             )
         except BadRequest:
             await bot.send_message(
@@ -151,6 +155,7 @@ async def _send_formatted_with_fallback(
                 text=html.escape(text),
                 parse_mode=ParseMode.HTML,
                 reply_to_message_id=reply_to_message_id,
+                reply_markup=reply_markup,
             )
         return
 
@@ -160,6 +165,7 @@ async def _send_formatted_with_fallback(
             text=html.escape(text),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=reply_to_message_id,
+            reply_markup=reply_markup,
         )
         return
 
@@ -169,6 +175,7 @@ async def _send_formatted_with_fallback(
             text=text,
             parse_mode=ParseMode.HTML,
             reply_to_message_id=reply_to_message_id,
+            reply_markup=reply_markup,
         )
     except BadRequest:
         await bot.send_message(
@@ -176,7 +183,34 @@ async def _send_formatted_with_fallback(
             text=html.escape(text),
             parse_mode=ParseMode.HTML,
             reply_to_message_id=reply_to_message_id,
+            reply_markup=reply_markup,
         )
+
+
+def _build_plugin_reply_markup(
+    reply_markup: Any | None,
+    is_private: bool,
+    logger: logging.Logger,
+    log_ctx: dict[str, Any],
+) -> Any | None:
+    if not isinstance(reply_markup, dict) or reply_markup.get("type") != "web_app_button":
+        return reply_markup
+
+    button_text = str(reply_markup.get("text") or "Открыть полностью")
+    url = str(reply_markup.get("url") or "")
+    if not url:
+        logger.info("plugin button skipped: empty url %s", log_ctx)
+        return None
+    if len(url) > 1000:
+        logger.info("plugin button skipped: url too long len=%s %s", len(url), log_ctx)
+        return None
+
+    if is_private:
+        logger.info("plugin button private web_app url_len=%s %s", len(url), log_ctx)
+        return InlineKeyboardMarkup([[InlineKeyboardButton(text=button_text, web_app=WebAppInfo(url=url))]])
+
+    logger.info("plugin button group url_len=%s %s", len(url), log_ctx)
+    return InlineKeyboardMarkup([[InlineKeyboardButton(text=button_text, url=url)]])
 
 
 async def handle_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -274,6 +308,16 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
     storage: Storage = context.application.bot_data["storage"]
     role = storage.get_role_by_name(role_name)
     storage.delete_user_role_session(update.effective_user.id, group_id, role.role_id)
+    provider_registry = context.application.bot_data["provider_registry"]
+    default_provider_id = context.application.bot_data["default_provider_id"]
+    group_role = storage.get_group_role(group_id, role.role_id)
+    model_override = group_role.model_override or role.llm_model
+    provider_id = _provider_id_from_model(model_override, default_provider_id, provider_registry)
+    provider = provider_registry.get(provider_id)
+    if provider:
+        for field in provider.user_fields.values():
+            if field.scope == "role":
+                storage.delete_provider_user_value(provider_id, field.key, role.role_id)
     await update.message.reply_text(
         f"Сессия для роли @{role.role_name} в группе {group_id} сброшена. Новый чат будет создан при следующем запросе."
     )
@@ -596,6 +640,16 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         if action == "reset_session":
             storage.delete_user_role_session(query.from_user.id, group_id, role_id)
+            provider_registry = context.application.bot_data["provider_registry"]
+            default_provider_id = context.application.bot_data["default_provider_id"]
+            group_role = storage.get_group_role(group_id, role_id)
+            model_override = group_role.model_override or role.llm_model
+            provider_id = _provider_id_from_model(model_override, default_provider_id, provider_registry)
+            provider = provider_registry.get(provider_id)
+            if provider:
+                for field in provider.user_fields.values():
+                    if field.scope == "role":
+                        storage.delete_provider_user_value(provider_id, field.key, role_id)
             await query.edit_message_text(
                 f"Сессия для роли @{role.role_name} в группе {group_id} сброшена.",
             )
@@ -835,14 +889,54 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         allow_raw_html = bool(context.application.bot_data.get("allow_raw_html", True))
         formatting_mode = str(context.application.bot_data.get("formatting_mode", "html"))
+        plugin_manager: PluginManager = context.application.bot_data["plugin_manager"]
+        payload = {
+            "text": response_text,
+            "parse_mode": formatting_mode,
+            "reply_markup": None,
+        }
+        logger.info(
+            "plugin pre user_id=%s role=%s provider=%s text_len=%s",
+            user.id,
+            role.role_name,
+            llm_executor.provider_id_for_model(model_override),
+            len(response_text),
+        )
+        ctx_payload = {
+            "chat_id": update.effective_chat.id,
+            "user_id": user.id,
+            "role_id": role.role_id,
+            "role_name": role.role_name,
+            "provider_id": llm_executor.provider_id_for_model(model_override),
+            "model_id": model_override,
+            "store_text": storage.save_plugin_text,
+        }
+        payload = plugin_manager.apply_postprocess(payload, ctx_payload)
+        response_text = str(payload.get("text", ""))
+        reply_markup = payload.get("reply_markup")
+        logger.info(
+            "plugin post user_id=%s role=%s text_len=%s reply_markup=%s",
+            user.id,
+            role.role_name,
+            len(response_text),
+            bool(reply_markup),
+        )
+        final_reply_markup = _build_plugin_reply_markup(
+            reply_markup,
+            update.effective_chat.type == "private",
+            logger,
+            {"user_id": user.id, "role": role.role_name},
+        )
+
         rendered = _render_llm_text(response_text, formatting_mode, allow_raw_html)
         full_text = _format_with_header_raw(None, rendered)
-        for chunk in split_message(full_text):
+        for idx, chunk in enumerate(split_message(full_text)):
             await _send_formatted_with_fallback(
                 context.bot,
                 update.effective_chat.id,
                 chunk,
                 reply_to_message_id=update.message.message_id,
+                reply_markup=final_reply_markup if idx == 0 else None,
                 allow_raw_html=allow_raw_html,
                 formatting_mode=formatting_mode,
             )
@@ -948,7 +1042,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             if should_schedule:
                 asyncio.create_task(_flush_private_buffered(update.effective_chat.id, user.id, context))
         return
-    if user.id in pending_roles and (not pending_msg or (auth and auth.is_authorized)):
+    if user.id in pending_roles:
         state = pending_roles[user.id]
         if state["step"] in {"suffix", "reply_prefix"}:
             private_buffer: MessageBuffer = context.application.bot_data["private_buffer"]
@@ -1310,14 +1404,53 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
             continue
         allow_raw_html = bool(context.application.bot_data.get("allow_raw_html", True))
         formatting_mode = str(context.application.bot_data.get("formatting_mode", "html"))
+        plugin_manager: PluginManager = context.application.bot_data["plugin_manager"]
+        payload = {
+            "text": response_text,
+            "parse_mode": formatting_mode,
+            "reply_markup": None,
+        }
+        logger.info(
+            "plugin pre buffered user_id=%s role=%s provider=%s text_len=%s",
+            user_id,
+            role.role_name,
+            llm_executor.provider_id_for_model(model_override),
+            len(response_text),
+        )
+        ctx_payload = {
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "role_id": role.role_id,
+            "role_name": role.role_name,
+            "provider_id": llm_executor.provider_id_for_model(model_override),
+            "model_id": model_override,
+            "store_text": storage.save_plugin_text,
+        }
+        payload = plugin_manager.apply_postprocess(payload, ctx_payload)
+        response_text = str(payload.get("text", ""))
+        reply_markup = payload.get("reply_markup")
+        logger.info(
+            "plugin post buffered user_id=%s role=%s text_len=%s reply_markup=%s",
+            user_id,
+            role.role_name,
+            len(response_text),
+            bool(reply_markup),
+        )
+        final_reply_markup = _build_plugin_reply_markup(
+            reply_markup,
+            chat_id > 0,
+            logger,
+            {"user_id": user_id, "role": role.role_name},
+        )
         rendered = _render_llm_text(response_text, formatting_mode, allow_raw_html)
         full_text = _format_with_header_raw(None, rendered)
-        for chunk in split_message(full_text):
+        for idx, chunk in enumerate(split_message(full_text)):
             await _send_formatted_with_fallback(
                 context.bot,
                 chat_id,
                 chunk,
                 reply_to_message_id=reply_to_message_id,
+                reply_markup=final_reply_markup if idx == 0 else None,
                 allow_raw_html=allow_raw_html,
                 formatting_mode=formatting_mode,
             )
@@ -1723,6 +1856,8 @@ async def main() -> None:
 
     pending_store = PendingStore(config.database_path)
     pending_user_fields = PendingUserFieldStore(config.database_path)
+    pending_store.clear_all()
+    pending_user_fields.clear_all()
     message_buffer = MessageBuffer(window_seconds=2.0)
     private_buffer = MessageBuffer(window_seconds=2.0)
     auth_service = AuthService(
@@ -1733,6 +1868,16 @@ async def main() -> None:
         provider_registry,
         default_provider_id,
     )
+    plugin_manager = load_plugins(Path("plugins"))
+    plugin_server = PluginTextServer(
+        storage,
+        PluginServerConfig(
+            host=config.plugin_server_host,
+            port=config.plugin_server_port,
+            enabled=config.plugin_server_enabled,
+        ),
+    )
+    plugin_server.start()
     storage.reset_authorizations()
     application.bot_data.update(
         {
@@ -1757,6 +1902,8 @@ async def main() -> None:
             "default_provider_id": default_provider_id,
             "allow_raw_html": config.allow_raw_html,
             "formatting_mode": config.formatting_mode,
+            "plugin_manager": plugin_manager,
+            "plugin_server": plugin_server,
         }
     )
 
@@ -1785,6 +1932,7 @@ async def main() -> None:
         logger.info("Release bot started as @%s", me.username)
         await asyncio.Event().wait()
     finally:
+        plugin_server.stop()
         for client in llm_clients.values():
             await client.aclose()
         await application.stop()

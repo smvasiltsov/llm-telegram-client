@@ -85,3 +85,7 @@ class PendingUserFieldStore:
         )
         self._conn.commit()
 
+    def clear_all(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM pending_user_fields")
+        self._conn.commit()

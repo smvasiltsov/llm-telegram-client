@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -141,6 +142,16 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plugin_texts (
+                text_id TEXT PRIMARY KEY,
+                plugin_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
         self._conn.commit()
 
         # Backwards-compatible migrations for existing DBs
@@ -181,6 +192,45 @@ class Storage:
             cur.execute("DROP TABLE user_role_sessions")
             cur.execute("ALTER TABLE user_role_sessions_v2 RENAME TO user_role_sessions")
             self._conn.commit()
+
+    def save_plugin_text(self, plugin_id: str, text: str) -> str:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        for _ in range(5):
+            text_id = secrets.token_urlsafe(12)
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO plugin_texts (text_id, plugin_id, text, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (text_id, plugin_id, text, now),
+                )
+                self._conn.commit()
+                return text_id
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError("Failed to generate unique text_id")
+
+    def get_plugin_text(self, plugin_id: str, text_id: str) -> dict[str, str] | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT text_id, plugin_id, text, created_at
+            FROM plugin_texts
+            WHERE plugin_id = ? AND text_id = ?
+            """,
+            (plugin_id, text_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return {
+            "text_id": row["text_id"],
+            "plugin_id": row["plugin_id"],
+            "text": row["text"],
+            "created_at": row["created_at"],
+        }
 
     def upsert_user(self, telegram_user_id: int, username: str | None) -> None:
         now = _utc_now()
