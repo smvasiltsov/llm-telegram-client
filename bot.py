@@ -9,7 +9,7 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram import BotCommand
-from telegram import BotCommandScopeAllGroupChats, BotCommandScopeDefault
+from telegram import BotCommandScopeAllGroupChats, BotCommandScopeDefault, BotCommandScopeChat
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -26,7 +26,7 @@ from telegram.error import BadRequest
 import re
 
 from app.auth import AuthService
-from app.config import load_config
+from app.config import load_config, load_dotenv
 from app.llm_executor import LLMExecutor
 from app.llm_router import LLMRouter, MissingUserField
 from app.llm_providers import ProviderConfig, ProviderUserField, load_provider_registry, model_label
@@ -40,6 +40,16 @@ from app.router import route_message
 from app.security import TokenCipher
 from app.session_resolver import SessionResolver
 from app.storage import Storage
+from app.tools import (
+    BashTool,
+    ToolAuthRequiredError,
+    ToolContext,
+    ToolMCPAdapter,
+    ToolService,
+    ToolTimeoutError,
+    ToolValidationError,
+)
+from app.tools.registry import ToolRegistry
 from app.utils import split_message
 
 
@@ -320,6 +330,203 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
                 storage.delete_provider_user_value(provider_id, field.key, role.role_id)
     await update.message.reply_text(
         f"Сессия для роли @{role.role_name} в группе {group_id} сброшена. Новый чат будет создан при следующем запросе."
+    )
+
+
+async def handle_bash(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user or not update.effective_chat:
+        return
+    if not bool(context.application.bot_data.get("tools_bash_enabled", False)):
+        await update.message.reply_text("Инструмент /bash отключён в конфиге.")
+        return
+    owner_user_id = context.application.bot_data["owner_user_id"]
+    if update.effective_user.id != owner_user_id:
+        return
+
+    text = update.message.text or ""
+    cmd = text.split(" ", 1)[1].strip() if " " in text else ""
+    if not cmd:
+        await update.message.reply_text("Использование: /bash <команда>")
+        return
+
+    executed = await _execute_bash_command(
+        cmd=cmd,
+        caller_id=update.effective_user.id,
+        chat_id=update.effective_chat.id,
+        message_id=update.message.message_id,
+        context=context,
+        trusted=False,
+    )
+    if executed:
+        return
+
+    pending_bash_auth: dict[int, dict[str, Any]] = context.application.bot_data["pending_bash_auth"]
+    pending_bash_auth[update.effective_user.id] = {
+        "cmd": cmd,
+        "chat_id": update.effective_chat.id,
+        "message_id": update.message.message_id,
+    }
+    await _request_bash_password(update.effective_chat.id, context)
+
+
+async def handle_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message or not update.effective_user:
+        return
+    owner_user_id = context.application.bot_data["owner_user_id"]
+    if update.effective_user.id != owner_user_id:
+        return
+    tool_service: ToolService = context.application.bot_data["tool_service"]
+    tools = tool_service.list_tools()
+    if not tools:
+        await update.message.reply_text("Инструменты не настроены.")
+        return
+    safe_commands = context.application.bot_data.get("tools_bash_safe_commands", [])
+    lines = ["Доступные инструменты:"]
+    for item in tools:
+        lines.append(f"- {item['name']}: {item['description']}")
+    if safe_commands:
+        lines.append("")
+        lines.append("Safe bash commands:")
+        lines.append(", ".join(str(cmd) for cmd in safe_commands))
+    for chunk in split_message("\n".join(lines)):
+        await update.message.reply_text(chunk)
+
+
+async def _execute_bash_command(
+    *,
+    cmd: str,
+    caller_id: int,
+    chat_id: int,
+    message_id: int,
+    context: ContextTypes.DEFAULT_TYPE,
+    trusted: bool,
+) -> bool:
+    tool_service: ToolService = context.application.bot_data["tool_service"]
+    storage: Storage = context.application.bot_data["storage"]
+    bash_cwd_by_user: dict[int, str] = context.application.bot_data["bash_cwd_by_user"]
+    tool_ctx = ToolContext(
+        caller_id=caller_id,
+        chat_id=chat_id,
+        source="telegram",
+        request_id=f"tg:{chat_id}:{message_id}",
+    )
+    tool_input: dict[str, Any] = {"cmd": cmd, "trusted": trusted}
+    current_cwd = bash_cwd_by_user.get(caller_id)
+    if current_cwd:
+        tool_input["cwd"] = current_cwd
+    try:
+        result = await tool_service.execute("bash", tool_input, tool_ctx)
+    except ToolAuthRequiredError:
+        storage.log_tool_run(
+            telegram_user_id=caller_id,
+            chat_id=chat_id,
+            source="telegram",
+            tool_name="bash",
+            command_text=cmd,
+            role="privileged",
+            requires_password=True,
+            trusted=trusted,
+            status="auth_required",
+        )
+        return False
+    except ToolValidationError as exc:
+        storage.log_tool_run(
+            telegram_user_id=caller_id,
+            chat_id=chat_id,
+            source="telegram",
+            tool_name="bash",
+            command_text=cmd,
+            role=None,
+            requires_password=False,
+            trusted=trusted,
+            status="validation_error",
+            error_text=str(exc),
+        )
+        await context.bot.send_message(chat_id=chat_id, text=f"Ошибка в параметрах: {exc}")
+        return True
+    except ToolTimeoutError as exc:
+        storage.log_tool_run(
+            telegram_user_id=caller_id,
+            chat_id=chat_id,
+            source="telegram",
+            tool_name="bash",
+            command_text=cmd,
+            role=None,
+            requires_password=False,
+            trusted=trusted,
+            status="timeout",
+            error_text=str(exc),
+        )
+        await context.bot.send_message(chat_id=chat_id, text=f"Таймаут: {exc}")
+        return True
+    except Exception:
+        storage.log_tool_run(
+            telegram_user_id=caller_id,
+            chat_id=chat_id,
+            source="telegram",
+            tool_name="bash",
+            command_text=cmd,
+            role=None,
+            requires_password=False,
+            trusted=trusted,
+            status="error",
+            error_text="unexpected_error",
+        )
+        logger.exception("bash tool failed")
+        await context.bot.send_message(chat_id=chat_id, text="Ошибка выполнения команды.")
+        return True
+
+    result_cwd = result.meta.get("cwd")
+    if isinstance(result_cwd, str) and result_cwd.strip():
+        bash_cwd_by_user[caller_id] = result_cwd
+
+    body = _render_bash_result(cmd, result)
+    storage.log_tool_run(
+        telegram_user_id=caller_id,
+        chat_id=chat_id,
+        source="telegram",
+        tool_name="bash",
+        command_text=cmd,
+        role=str(result.meta.get("role") or ""),
+        requires_password=bool(result.meta.get("requires_password", False)),
+        trusted=trusted,
+        status="ok" if result.ok else "non_zero_exit",
+        exit_code=result.exit_code,
+        duration_ms=int(result.meta.get("duration_ms", 0)),
+    )
+    for chunk in split_message(body):
+        await context.bot.send_message(chat_id=chat_id, text=chunk)
+    return True
+
+
+def _render_bash_result(cmd: str, result: Any) -> str:
+    duration_ms = result.meta.get("duration_ms")
+    role = result.meta.get("role")
+    cwd = result.meta.get("cwd")
+    lines = [
+        f"$ {cmd}",
+        f"role: {role}",
+        f"cwd: {cwd}",
+        f"exit_code: {result.exit_code}",
+        f"duration_ms: {duration_ms}",
+    ]
+    if result.meta.get("truncated_stdout"):
+        lines.append("stdout: truncated")
+    if result.meta.get("truncated_stderr"):
+        lines.append("stderr: truncated")
+    header = "\n".join(lines).strip()
+    stdout = result.stdout.strip() or "<empty>"
+    stderr = result.stderr.strip()
+    body = f"{header}\n\nSTDOUT:\n{stdout}"
+    if stderr:
+        body = f"{body}\n\nSTDERR:\n{stderr}"
+    return body
+
+
+async def _request_bash_password(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="Команда требует подтверждение. Введите пароль из .env (BASH_DANGEROUS_PASSWORD).",
     )
 
 
@@ -953,6 +1160,71 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     logger.info("private msg user_id=%s text=%r", user.id, update.message.text)
     storage.upsert_user(user.id, user.username)
+    pending_bash_auth: dict[int, dict[str, Any]] = context.application.bot_data["pending_bash_auth"]
+    pending_bash = pending_bash_auth.get(user.id)
+    if pending_bash:
+        pending_cmd = str(pending_bash.get("cmd", ""))
+        pending_chat_id = int(pending_bash.get("chat_id", user.id))
+        password_value = update.message.text.strip()
+        if password_value.startswith("/") and password_value.lower() not in {"cancel", "/cancel"}:
+            return
+        if password_value.lower() in {"cancel", "/cancel"}:
+            storage.log_tool_run(
+                telegram_user_id=user.id,
+                chat_id=pending_chat_id,
+                source="telegram",
+                tool_name="bash",
+                command_text=pending_cmd,
+                role="privileged",
+                requires_password=True,
+                trusted=False,
+                status="auth_cancelled",
+            )
+            pending_bash_auth.pop(user.id, None)
+            await update.message.reply_text("Подтверждение команды отменено.")
+            return
+        expected_password = str(context.application.bot_data.get("tools_bash_password", "")).strip()
+        if not expected_password:
+            storage.log_tool_run(
+                telegram_user_id=user.id,
+                chat_id=pending_chat_id,
+                source="telegram",
+                tool_name="bash",
+                command_text=pending_cmd,
+                role="privileged",
+                requires_password=True,
+                trusted=False,
+                status="auth_not_configured",
+                error_text="BASH_DANGEROUS_PASSWORD is empty",
+            )
+            pending_bash_auth.pop(user.id, None)
+            await update.message.reply_text("Пароль не настроен. Укажите BASH_DANGEROUS_PASSWORD в .env.")
+            return
+        if password_value != expected_password:
+            storage.log_tool_run(
+                telegram_user_id=user.id,
+                chat_id=pending_chat_id,
+                source="telegram",
+                tool_name="bash",
+                command_text=pending_cmd,
+                role="privileged",
+                requires_password=True,
+                trusted=False,
+                status="auth_failed",
+            )
+            await update.message.reply_text("Неверный пароль. Попробуйте ещё раз или отправьте /cancel.")
+            return
+        pending_bash_auth.pop(user.id, None)
+        await update.message.reply_text("Пароль принят. Выполняю команду.")
+        await _execute_bash_command(
+            cmd=pending_cmd,
+            caller_id=user.id,
+            chat_id=pending_chat_id,
+            message_id=int(pending_bash["message_id"]),
+            context=context,
+            trusted=True,
+        )
+        return
 
     pending_prompts = context.application.bot_data["pending_prompts"]
     pending_roles = context.application.bot_data["pending_role_ops"]
@@ -1824,6 +2096,8 @@ def _build_llm_content(
 async def main() -> None:
     config_path = Path(__file__).with_name("config.json")
     config = load_config(config_path)
+    env_values = load_dotenv(Path(__file__).with_name(".env"))
+    tools_bash_password = env_values.get("BASH_DANGEROUS_PASSWORD", "").strip()
 
     providers_dir = Path(__file__).with_name("llm_providers")
     provider_registry, provider_models = load_provider_registry(providers_dir)
@@ -1868,6 +2142,35 @@ async def main() -> None:
         provider_registry,
         default_provider_id,
     )
+    tool_registry = ToolRegistry()
+    tools_bash_enabled = bool(config.tools_enabled and config.tools_bash_enabled)
+    if tools_bash_enabled:
+        if not tools_bash_password:
+            logger.warning("BASH_DANGEROUS_PASSWORD is empty; privileged bash commands will be blocked")
+        default_cwd = Path(config.tools_bash_default_cwd).expanduser()
+        if not default_cwd.is_absolute():
+            default_cwd = (Path.cwd() / default_cwd).resolve()
+        else:
+            default_cwd = default_cwd.resolve()
+        allowed_workdirs = []
+        for item in config.tools_bash_allowed_workdirs:
+            path = Path(item).expanduser()
+            if not path.is_absolute():
+                path = (Path.cwd() / path).resolve()
+            else:
+                path = path.resolve()
+            allowed_workdirs.append(path)
+        tool_registry.register(
+            BashTool(
+                default_cwd=default_cwd,
+                max_timeout_sec=config.tools_bash_max_timeout_sec,
+                max_output_chars=config.tools_bash_max_output_chars,
+                safe_commands=config.tools_bash_safe_commands,
+                allowed_workdirs=allowed_workdirs or [default_cwd],
+            )
+        )
+    tool_service = ToolService(tool_registry)
+    tool_mcp_adapter = ToolMCPAdapter(tool_service)
     plugin_manager = load_plugins(Path("plugins"))
     plugin_server = PluginTextServer(
         storage,
@@ -1904,10 +2207,20 @@ async def main() -> None:
             "formatting_mode": config.formatting_mode,
             "plugin_manager": plugin_manager,
             "plugin_server": plugin_server,
+            "tool_service": tool_service,
+            "tools_bash_enabled": tools_bash_enabled,
+            "tools_bash_password": tools_bash_password,
+            "tools_bash_safe_commands": list(config.tools_bash_safe_commands),
+            "pending_bash_auth": {},
+            "bash_cwd_by_user": {},
+            "tool_mcp_adapter": tool_mcp_adapter,
         }
     )
 
     application.add_handler(CommandHandler("groups", handle_groups, filters=filters.ChatType.PRIVATE))
+    application.add_handler(CommandHandler("tools", handle_tools, filters=filters.ChatType.PRIVATE))
+    if tools_bash_enabled:
+        application.add_handler(CommandHandler("bash", handle_bash, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("roles", handle_group_roles, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("role_set_prompt", handle_role_set_prompt, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("role_reset_session", handle_role_reset_session, filters=filters.ChatType.PRIVATE))
@@ -1919,12 +2232,14 @@ async def main() -> None:
 
     try:
         await application.initialize()
-        await application.bot.set_my_commands(
-            [
-                BotCommand("groups", "Список групп и выбор"),
-            ],
-            scope=BotCommandScopeAllPrivateChats(),
-        )
+        owner_commands = [
+            BotCommand("groups", "Список групп и выбор"),
+            BotCommand("tools", "Список инструментов"),
+        ]
+        if tools_bash_enabled:
+            owner_commands.append(BotCommand("bash", "Выполнить bash команду"))
+        await application.bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=config.owner_user_id))
+        await application.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
         await application.bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
         await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
         await application.start()

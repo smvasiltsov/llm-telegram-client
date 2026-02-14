@@ -17,5 +17,33 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 8015
+  },
+  "tools": {
+    "enabled": true,
+    "bash": {
+      "enabled": true,
+      "default_cwd": ".",
+      "max_timeout_sec": 30,
+      "max_output_chars": 12000,
+      "safe_commands": [
+        "pwd",
+        "ls",
+        "whoami",
+        "date",
+        "echo",
+        "cat",
+        "touch",
+        "cp",
+        "mkdir",
+        "tee",
+        "printf",
+        "rg",
+        "git",
+        "python3"
+      ],
+      "allowed_workdirs": [
+        "."
+      ]
+    }
   }
 }

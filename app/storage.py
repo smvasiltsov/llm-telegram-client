@@ -152,6 +152,28 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tool_runs (
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                telegram_user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                tool_name TEXT NOT NULL,
+                command_text TEXT NOT NULL,
+                role TEXT,
+                requires_password INTEGER NOT NULL DEFAULT 0,
+                trusted INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                exit_code INTEGER,
+                duration_ms INTEGER,
+                error_text TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_user_created ON tool_runs(telegram_user_id, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_tool_created ON tool_runs(tool_name, created_at)")
         self._conn.commit()
 
         # Backwards-compatible migrations for existing DBs
@@ -231,6 +253,60 @@ class Storage:
             "text": row["text"],
             "created_at": row["created_at"],
         }
+
+    def log_tool_run(
+        self,
+        *,
+        telegram_user_id: int,
+        chat_id: int,
+        source: str,
+        tool_name: str,
+        command_text: str,
+        role: str | None,
+        requires_password: bool,
+        trusted: bool,
+        status: str,
+        exit_code: int | None = None,
+        duration_ms: int | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO tool_runs (
+                telegram_user_id,
+                chat_id,
+                source,
+                tool_name,
+                command_text,
+                role,
+                requires_password,
+                trusted,
+                status,
+                exit_code,
+                duration_ms,
+                error_text,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                telegram_user_id,
+                chat_id,
+                source,
+                tool_name,
+                command_text,
+                role,
+                1 if requires_password else 0,
+                1 if trusted else 0,
+                status,
+                exit_code,
+                duration_ms,
+                error_text,
+                now,
+            ),
+        )
+        self._conn.commit()
 
     def upsert_user(self, telegram_user_id: int, username: str | None) -> None:
         now = _utc_now()
