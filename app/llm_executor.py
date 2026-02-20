@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import httpx
+
 from app.llm_router import LLMRouter
 from app.models import Role
 
@@ -36,6 +38,8 @@ class LLMExecutor:
                 return response_text
             except Exception as exc:
                 last_exc = exc
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code == 404:
+                    break
                 self._logger.exception("LLM send failed attempt=%s", attempt + 1)
                 if attempt == retries:
                     break

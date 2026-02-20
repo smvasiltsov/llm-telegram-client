@@ -25,6 +25,7 @@ from app.storage import Storage
 from app.utils import split_message
 from app.handlers.messages_common import (
     _handle_missing_user_field,
+    _recover_stale_session_and_resend,
     _is_unauthorized,
     _request_token_for_user,
     _request_user_field_for_user,
@@ -335,7 +336,41 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     auth_service: AuthService = _runtime(context).auth_service
     pending: PendingStore = _runtime(context).pending_store
     pending_msg = pending.peek(user.id)
-    group_id = pending_msg[0] if pending_msg else None
+    if not pending_msg:
+        # Ignore free-form private messages when bot is not waiting for token.
+        return
+
+    group_id, _, role_name, _, _ = pending_msg
+    roles_for_group = storage.list_roles_for_group(group_id)
+    if role_name == "__all__":
+        target_roles = roles_for_group
+    else:
+        target_roles = [role for role in roles_for_group if role.role_name == role_name]
+    if not target_roles:
+        return
+
+    provider_registry = _runtime(context).provider_registry
+    default_provider_id = _runtime(context).default_provider_id
+    provider_models = _runtime(context).provider_models
+    provider_model_map = _runtime(context).provider_model_map
+    requires_auth = False
+    for role in target_roles:
+        group_role = storage.get_group_role(group_id, role.role_id)
+        if provider_models:
+            model_override = resolve_provider_model(
+                provider_models,
+                provider_model_map,
+                provider_registry,
+                group_role.model_override or role.llm_model,
+            )
+        else:
+            model_override = group_role.model_override or role.llm_model
+        if role_requires_auth(provider_registry, model_override, default_provider_id):
+            requires_auth = True
+            break
+    if not requires_auth:
+        return
+
     ok = await auth_service.validate_and_store(user.id, token, group_id)
     if not ok:
         await update.message.reply_text("Токен не прошел проверку. Попробуй еще раз.")
@@ -473,6 +508,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
 
     had_error = False
     for role in target_roles:
+        session_id: str | None = None
         try:
             group_role = storage.get_group_role(chat_id, role.role_id)
             if provider_models:
@@ -518,18 +554,48 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
             )
             return False
         except Exception as exc:
-            if _is_unauthorized(exc):
+            recovery = None
+            if session_id is not None:
+                try:
+                    recovery = await _recover_stale_session_and_resend(
+                        exc=exc,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        role=role,
+                        session_id=session_id,
+                        session_token=session_token,
+                        model_override=model_override,
+                        content=content_with_context,
+                        context=context,
+                    )
+                except Exception:
+                    recovery = None
+            if recovery is not None:
+                response_text = recovery.response_text
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Обновил session_id для роли @{role.role_name}: {recovery.old_session_id} -> {recovery.new_session_id}",
+                    reply_to_message_id=message_id,
+                )
+                logger.info(
+                    "Recovered stale session for pending message role=%s old_session_id=%s new_session_id=%s",
+                    role.role_name,
+                    recovery.old_session_id,
+                    recovery.new_session_id,
+                )
+            elif _is_unauthorized(exc):
                 storage.set_user_authorized(user_id, False)
                 await _request_token_for_user(chat_id, user_id, context)
                 return False
-            logger.exception("LLM request failed for pending message user_id=%s role=%s", user_id, role.role_name)
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text="Ошибка при запросе к LLM. Попробуй позже.",
-                reply_to_message_id=message_id,
-            )
-            had_error = True
-            continue
+            else:
+                logger.exception("LLM request failed for pending message user_id=%s role=%s", user_id, role.role_name)
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="Ошибка при запросе к LLM. Попробуй позже.",
+                    reply_to_message_id=message_id,
+                )
+                had_error = True
+                continue
 
         full_text = format_with_header(None, response_text)
         for chunk in split_message(full_text):

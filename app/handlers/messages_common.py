@@ -1,17 +1,26 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import httpx
 from telegram.ext import ContextTypes
 
 from app.llm_router import MissingUserField
+from app.models import Role
 from app.llm_providers import ProviderUserField
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
 from app.runtime import RuntimeContext
 
 logger = logging.getLogger("bot")
+
+
+@dataclass(frozen=True)
+class SessionRecoveryResult:
+    response_text: str
+    old_session_id: str
+    new_session_id: str
 
 
 def _runtime(context: ContextTypes.DEFAULT_TYPE) -> RuntimeContext:
@@ -97,3 +106,80 @@ def _is_unauthorized(exc: Exception) -> bool:
         return False
     response = exc.response
     return response is not None and response.status_code == 401
+
+
+def _is_not_found(exc: Exception) -> bool:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    response = exc.response
+    return response is not None and response.status_code == 404
+
+
+async def _recover_stale_session_and_resend(
+    *,
+    exc: Exception,
+    user_id: int,
+    chat_id: int,
+    role: Role,
+    session_id: str,
+    session_token: str,
+    model_override: str | None,
+    content: str,
+    context: ContextTypes.DEFAULT_TYPE,
+) -> SessionRecoveryResult | None:
+    if not _is_not_found(exc):
+        return None
+
+    runtime = _runtime(context)
+    llm_router = runtime.llm_router
+    if not llm_router.supports(model_override, "list_sessions"):
+        return None
+
+    logger.warning(
+        "Session send failed with 404. Trying one-time recovery user_id=%s chat_id=%s role=%s session_id=%s",
+        user_id,
+        chat_id,
+        role.role_name,
+        session_id,
+    )
+    session_ids = await llm_router.list_sessions(session_token, model_override=model_override)
+    existing_session_ids = set(session_ids)
+    if session_id in existing_session_ids:
+        logger.warning(
+            "Session %s still exists in provider list, skip recovery role=%s",
+            session_id,
+            role.role_name,
+        )
+        return None
+
+    resolver = runtime.session_resolver
+    llm_executor = runtime.llm_executor
+    new_session_id = await resolver.ensure_session(
+        telegram_user_id=user_id,
+        group_id=chat_id,
+        role=role,
+        session_token=session_token,
+        model_override=model_override,
+        existing_session_ids=existing_session_ids,
+    )
+    if new_session_id == session_id:
+        logger.warning(
+            "Session recovery returned same session_id=%s role=%s",
+            session_id,
+            role.role_name,
+        )
+        return None
+
+    response_text = await llm_executor.send_with_retries(
+        session_id=new_session_id,
+        session_token=session_token,
+        content=content,
+        role=role,
+        model_override=model_override,
+        retries=0,
+    )
+    return SessionRecoveryResult(
+        response_text=response_text,
+        old_session_id=session_id,
+        new_session_id=new_session_id,
+    )

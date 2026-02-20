@@ -22,6 +22,7 @@ from app.storage import Storage
 from app.utils import split_message
 from app.handlers.messages_common import (
     _handle_missing_user_field,
+    _recover_stale_session_and_resend,
     _is_unauthorized,
     _request_token_for_user,
     _runtime,
@@ -175,6 +176,7 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
     provider_model_map = _runtime(context).provider_model_map
     reply_to_message_id = items[0].message_id
     for role in route.roles:
+        session_id: str | None = None
         try:
             group_role = storage.get_group_role(chat_id, role.role_id)
             if provider_models:
@@ -226,7 +228,38 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
             )
             return
         except Exception as exc:
-            if _is_unauthorized(exc):
+            recovery = None
+            if session_id is not None:
+                try:
+                    recovery = await _recover_stale_session_and_resend(
+                        exc=exc,
+                        user_id=user_id,
+                        chat_id=chat_id,
+                        role=role,
+                        session_id=session_id,
+                        session_token=session_token,
+                        model_override=model_override,
+                        content=content,
+                        context=context,
+                    )
+                except Exception:
+                    recovery = None
+            if recovery is not None:
+                response_text = recovery.response_text
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"Обновил session_id для роли @{role.role_name}: {recovery.old_session_id} -> {recovery.new_session_id}",
+                    reply_to_message_id=reply_to_message_id,
+                )
+                logger.info(
+                    "Recovered stale session role=%s old_session_id=%s new_session_id=%s",
+                    role.role_name,
+                    recovery.old_session_id,
+                    recovery.new_session_id,
+                )
+                # Continue normal flow with recovered response.
+                pass
+            elif _is_unauthorized(exc):
                 pending: PendingStore = _runtime(context).pending_store
                 role_name = "__all__" if route.is_all else route.roles[0].role_name
                 pending.save(
@@ -240,9 +273,10 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
                 storage.set_user_authorized(user_id, False)
                 await _request_token_for_user(chat_id, user_id, context)
                 return
-            logger.exception("LLM request failed user_id=%s role=%s", user_id, role.role_name)
-            await context.bot.send_message(chat_id=chat_id, text="Ошибка при запросе к LLM. Попробуй позже.")
-            continue
+            else:
+                logger.exception("LLM request failed user_id=%s role=%s", user_id, role.role_name)
+                await context.bot.send_message(chat_id=chat_id, text="Ошибка при запросе к LLM. Попробуй позже.")
+                continue
         allow_raw_html = bool(_runtime(context).allow_raw_html)
         formatting_mode = str(_runtime(context).formatting_mode)
         plugin_manager: PluginManager = _runtime(context).plugin_manager
