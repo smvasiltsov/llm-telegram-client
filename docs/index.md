@@ -7,3 +7,5 @@
 - Управление ботом в Telegram: `docs/bot-ui.md`
 - Troubleshooting: `docs/troubleshooting.md`
 - Разработка: `docs/dev.md`
+- Ручной регрессионный чек-лист: `docs/manual-regression-checklist.md`
+- План рефакторинга (manual QA): `docs/refactor-plan-manual.md`

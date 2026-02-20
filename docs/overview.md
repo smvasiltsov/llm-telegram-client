@@ -2,6 +2,25 @@
 
 Этот документ даёт краткое понимание архитектуры и ключевых сущностей.
 
+## Структура приложения
+- `bot.py` — entrypoint: загрузка конфигурации, инициализация runtime, lifecycle Telegram application.
+- `app/app_factory.py` — сборка runtime и регистрация Telegram handlers.
+- `app/runtime.py` — единый контейнер зависимостей (`RuntimeContext`), который хранится в `bot_data["runtime"]`.
+- `app/handlers/` — слой Telegram-обработчиков:
+- `app/handlers/commands.py` — `/groups`, `/roles`, `/tools`, `/bash`, reset/set prompt.
+- `app/handlers/callbacks.py` — inline UI callbacks (`/groups` навигация и действия по ролям).
+- `app/handlers/membership.py` — события добавления/удаления бота, учет групп.
+- `app/handlers/messages_private.py` — private flow (pending token/user_fields, password flow bash, приватные шаги UI).
+- `app/handlers/messages_group.py` — групповой flow (буферизация, маршрутизация по ролям, ответы в группу).
+- `app/handlers/messages_common.py` — общие helper-функции для private/group handlers.
+- `app/services/` — бизнес-утилиты, не привязанные к конкретному handler:
+- `app/services/formatting.py` — рендер и безопасная отправка форматированного ответа.
+- `app/services/prompt_builder.py` — выбор модели/провайдера и сборка финального prompt.
+- `app/services/plugin_pipeline.py` — сборка Telegram reply_markup для plugin postprocess.
+- `app/services/tool_exec.py` — выполнение tool-команд (bash), логирование и рендер результата.
+- `app/tools/` — реестр/адаптер/реализации инструментов.
+- `app/storage.py` + `app/models.py` — работа с SQLite и доменными сущностями.
+
 ## Основной поток
 1) Бот добавляется в группу.
 2) Сообщения пользователя маршрутизируются на роль.
