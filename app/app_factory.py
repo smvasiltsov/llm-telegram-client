@@ -201,6 +201,7 @@ def build_runtime(
         auth_service=auth_service,
         owner_user_id=config.owner_user_id,
         require_bot_mention=config.require_bot_mention,
+        orchestrator_max_chain_auto_steps=config.orchestrator_max_chain_auto_steps,
         pending_prompts={},
         pending_role_ops={},
         pending_user_fields=pending_user_fields,

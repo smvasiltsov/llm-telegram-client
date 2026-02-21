@@ -6,24 +6,15 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from app.llm_executor import LLMExecutor
-from app.llm_router import MissingUserField
 from app.message_buffer import MessageBuffer
 from app.pending_store import PendingStore
-from app.plugins import PluginManager
-from app.services.formatting import format_with_header_raw, render_llm_text, send_formatted_with_fallback
-from app.services.plugin_pipeline import build_plugin_reply_markup
-from app.services.prompt_builder import build_llm_content, resolve_provider_model, role_requires_auth
+from app.services.role_pipeline import roles_require_auth, run_chain
 from app.roles_registry import seed_group_roles
-from app.router import route_message
+from app.router import RouteResult, route_message
 from app.security import TokenCipher
-from app.session_resolver import SessionResolver
 from app.storage import Storage
-from app.utils import split_message
+from app.utils import extract_role_mentions, strip_bot_mention
 from app.handlers.messages_common import (
-    _handle_missing_user_field,
-    _recover_stale_session_and_resend,
-    _is_unauthorized,
     _request_token_for_user,
     _runtime,
 )
@@ -35,6 +26,8 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
     if not update.message or not update.message.text:
         return
     if not update.effective_chat or not update.effective_user:
+        return
+    if update.effective_user.is_bot:
         return
     chat = update.effective_chat
     if chat.type == "private":
@@ -50,6 +43,15 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
     storage: Storage = _runtime(context).storage
     storage.upsert_group(chat.id, chat.title)
     seed_group_roles(storage, chat.id)
+    orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat.id)
+    orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id) if orchestrator_group_role else None
+    if orchestrator_role is not None:
+        logger.info(
+            "orchestrator active chat_id=%s role=%s role_id=%s",
+            chat.id,
+            orchestrator_role.role_name,
+            orchestrator_role.role_id,
+        )
     owner_user_id = _runtime(context).owner_user_id
     logger.info(
         "group msg owner_user_id=%s matched=%s",
@@ -63,7 +65,9 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
     text = update.message.text
     require_bot_mention = _runtime(context).require_bot_mention
     mentioned = f"@{bot_username.lower()}" in text.lower()
-    if require_bot_mention:
+    if orchestrator_role is not None:
+        should_start = True
+    elif require_bot_mention:
         should_start = mentioned
     else:
         roles = storage.list_roles_for_group(chat.id)
@@ -116,14 +120,54 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
     roles = storage.list_roles_for_group(chat_id)
     owner_user_id = _runtime(context).owner_user_id
     require_bot_mention = _runtime(context).require_bot_mention
-    route = route_message(
-        combined_text,
-        bot_username,
-        roles,
-        owner_user_id=owner_user_id,
-        author_user_id=user_id,
-        require_bot_mention=require_bot_mention,
-    )
+    orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
+    orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id) if orchestrator_group_role else None
+    if orchestrator_role is not None:
+        cleaned = strip_bot_mention(combined_text, bot_username)
+        role_map = {r.role_name.lower(): r for r in roles}
+        is_all = "@all" in cleaned.lower()
+        mentioned_names = extract_role_mentions(cleaned, set(role_map.keys()))
+        selected_roles: list = []
+        if is_all:
+            selected_roles = [r for r in roles if r.role_id != orchestrator_role.role_id]
+        else:
+            seen_ids: set[int] = set()
+            for name in mentioned_names:
+                target = role_map.get(name.lower())
+                if not target:
+                    continue
+                if target.role_id == orchestrator_role.role_id:
+                    continue
+                if target.role_id in seen_ids:
+                    continue
+                selected_roles.append(target)
+                seen_ids.add(target.role_id)
+        should_route_to_orchestrator = len(selected_roles) == 0
+        if should_route_to_orchestrator:
+            selected_roles = [orchestrator_role]
+        logger.info(
+            "orchestrator route chat_id=%s orchestrator_role=%s mentioned_roles=%s is_all=%s fanout=%s direct_to_orchestrator=%s",
+            chat_id,
+            orchestrator_role.role_name,
+            mentioned_names,
+            is_all,
+            [r.role_name for r in selected_roles],
+            should_route_to_orchestrator,
+        )
+        route = RouteResult(
+            roles=selected_roles,
+            content=combined_text.strip(),
+            is_all=is_all,
+        )
+    else:
+        route = route_message(
+            combined_text,
+            bot_username,
+            roles,
+            owner_user_id=owner_user_id,
+            author_user_id=user_id,
+            require_bot_mention=require_bot_mention,
+        )
     logger.info("flush route result=%s", "ok" if route else "none")
     if not route:
         return
@@ -132,26 +176,13 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
         return
 
     storage.upsert_user(user_id, None)
+    actor = storage.get_user(user_id)
     auth = storage.get_auth_token(user_id)
-    provider_registry = _runtime(context).provider_registry
-    default_provider_id = _runtime(context).default_provider_id
-    provider_models = _runtime(context).provider_models
-    provider_model_map = _runtime(context).provider_model_map
-    requires_auth = False
-    for role in route.roles:
-        group_role = storage.get_group_role(chat_id, role.role_id)
-        if provider_models:
-            model_override = resolve_provider_model(
-                provider_models,
-                provider_model_map,
-                provider_registry,
-                group_role.model_override or role.llm_model,
-            )
-        else:
-            model_override = group_role.model_override or role.llm_model
-        if role_requires_auth(provider_registry, model_override, default_provider_id):
-            requires_auth = True
-            break
+    requires_auth = roles_require_auth(
+        context=context,
+        chat_id=chat_id,
+        roles=route.roles,
+    )
 
     if requires_auth and (not auth or not auth.is_authorized):
         pending: PendingStore = _runtime(context).pending_store
@@ -169,163 +200,21 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
 
     cipher: TokenCipher = _runtime(context).cipher
     session_token = cipher.decrypt(auth.encrypted_token) if auth and auth.encrypted_token else ""
-    llm_executor: LLMExecutor = _runtime(context).llm_executor
-    resolver: SessionResolver = _runtime(context).session_resolver
-
-    provider_models = _runtime(context).provider_models
-    provider_model_map = _runtime(context).provider_model_map
     reply_to_message_id = items[0].message_id
-    for role in route.roles:
-        session_id: str | None = None
-        try:
-            group_role = storage.get_group_role(chat_id, role.role_id)
-            if provider_models:
-                model_override = resolve_provider_model(
-                    provider_models,
-                    provider_model_map,
-                    provider_registry,
-                    group_role.model_override or role.llm_model,
-                )
-            else:
-                logger.warning("Provider model list is empty for role=%s", role.role_name)
-                model_override = group_role.model_override or role.llm_model
-            logger.info(
-                "flush role=%s model_override=%s",
-                role.role_name,
-                model_override,
-            )
-            content = build_llm_content(
-                route.content,
-                group_role.user_prompt_suffix,
-                group_role.user_reply_prefix,
-                reply_text,
-            )
-            session_id = await resolver.resolve(
-                user_id,
-                chat_id,
-                role,
-                session_token,
-                model_override=model_override,
-            )
-            response_text = await llm_executor.send_with_retries(
-                session_id=session_id,
-                session_token=session_token,
-                content=content,
-                role=role,
-                model_override=model_override,
-            )
-        except MissingUserField as exc:
-            role_name = "__all__" if route.is_all else role.role_name
-            await _handle_missing_user_field(
-                user_id,
-                chat_id,
-                reply_to_message_id,
-                role_name,
-                route.content,
-                reply_text,
-                exc,
-                context,
-            )
-            return
-        except Exception as exc:
-            recovery = None
-            if session_id is not None:
-                try:
-                    recovery = await _recover_stale_session_and_resend(
-                        exc=exc,
-                        user_id=user_id,
-                        chat_id=chat_id,
-                        role=role,
-                        session_id=session_id,
-                        session_token=session_token,
-                        model_override=model_override,
-                        content=content,
-                        context=context,
-                    )
-                except Exception:
-                    recovery = None
-            if recovery is not None:
-                response_text = recovery.response_text
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Обновил session_id для роли @{role.role_name}: {recovery.old_session_id} -> {recovery.new_session_id}",
-                    reply_to_message_id=reply_to_message_id,
-                )
-                logger.info(
-                    "Recovered stale session role=%s old_session_id=%s new_session_id=%s",
-                    role.role_name,
-                    recovery.old_session_id,
-                    recovery.new_session_id,
-                )
-                # Continue normal flow with recovered response.
-                pass
-            elif _is_unauthorized(exc):
-                pending: PendingStore = _runtime(context).pending_store
-                role_name = "__all__" if route.is_all else route.roles[0].role_name
-                pending.save(
-                    user_id,
-                    chat_id,
-                    reply_to_message_id,
-                    role_name,
-                    route.content,
-                    reply_text=reply_text,
-                )
-                storage.set_user_authorized(user_id, False)
-                await _request_token_for_user(chat_id, user_id, context)
-                return
-            else:
-                logger.exception("LLM request failed user_id=%s role=%s", user_id, role.role_name)
-                await context.bot.send_message(chat_id=chat_id, text="Ошибка при запросе к LLM. Попробуй позже.")
-                continue
-        allow_raw_html = bool(_runtime(context).allow_raw_html)
-        formatting_mode = str(_runtime(context).formatting_mode)
-        plugin_manager: PluginManager = _runtime(context).plugin_manager
-        payload = {
-            "text": response_text,
-            "parse_mode": formatting_mode,
-            "reply_markup": None,
-        }
-        logger.info(
-            "plugin pre buffered user_id=%s role=%s provider=%s text_len=%s",
-            user_id,
-            role.role_name,
-            llm_executor.provider_id_for_model(model_override),
-            len(response_text),
-        )
-        ctx_payload = {
-            "chat_id": chat_id,
-            "user_id": user_id,
-            "role_id": role.role_id,
-            "role_name": role.role_name,
-            "provider_id": llm_executor.provider_id_for_model(model_override),
-            "model_id": model_override,
-            "store_text": storage.save_plugin_text,
-        }
-        payload = plugin_manager.apply_postprocess(payload, ctx_payload)
-        response_text = str(payload.get("text", ""))
-        reply_markup = payload.get("reply_markup")
-        logger.info(
-            "plugin post buffered user_id=%s role=%s text_len=%s reply_markup=%s",
-            user_id,
-            role.role_name,
-            len(response_text),
-            bool(reply_markup),
-        )
-        final_reply_markup = build_plugin_reply_markup(
-            reply_markup,
-            is_private=chat_id > 0,
-            logger=logger,
-            log_ctx={"user_id": user_id, "role": role.role_name},
-        )
-        rendered = render_llm_text(response_text, formatting_mode, allow_raw_html)
-        full_text = format_with_header_raw(None, rendered)
-        for idx, chunk in enumerate(split_message(full_text)):
-            await send_formatted_with_fallback(
-                context.bot,
-                chat_id,
-                chunk,
-                reply_to_message_id=reply_to_message_id,
-                reply_markup=final_reply_markup if idx == 0 else None,
-                allow_raw_html=allow_raw_html,
-                formatting_mode=formatting_mode,
-            )
+    await run_chain(
+        context=context,
+        chat_id=chat_id,
+        user_id=user_id,
+        session_token=session_token,
+        roles=route.roles,
+        user_text=route.content,
+        reply_text=reply_text,
+        actor_username=actor.username if actor else None,
+        reply_to_message_id=reply_to_message_id,
+        is_all=route.is_all,
+        apply_plugins=True,
+        save_pending_on_unauthorized=True,
+        pending_role_name="__all__" if route.is_all else route.roles[0].role_name,
+        allow_orchestrator_post_event=True,
+        chain_origin="group",
+    )

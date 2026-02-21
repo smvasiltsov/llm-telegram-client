@@ -11,13 +11,13 @@ from telegram.error import BadRequest
 def format_with_header(header: str | None, text: str) -> str:
     if not header:
         return html.escape(text)
-    return f"<b>{html.escape(header)}</b>\n\n{html.escape(text)}"
+    return f"*{html.escape(header)}*\n\n{html.escape(text)}"
 
 
 def format_with_header_raw(header: str | None, text: str) -> str:
     if not header:
         return text
-    return f"<b>{html.escape(header)}</b>\n\n{text}"
+    return f"*{html.escape(header)}*\n\n{text}"
 
 
 def _markdown_to_html_simple(text: str) -> str:

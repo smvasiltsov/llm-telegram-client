@@ -49,6 +49,8 @@ class GroupRole:
     model_override: str | None
     user_prompt_suffix: str | None
     user_reply_prefix: str | None
+    enabled: bool
+    mode: str
     is_active: bool
 
 

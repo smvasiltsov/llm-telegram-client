@@ -6,27 +6,18 @@ import re
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from app.auth import AuthService
-from app.llm_executor import LLMExecutor
-from app.llm_router import MissingUserField
 from app.llm_providers import ProviderUserField, model_label
 from app.message_buffer import MessageBuffer
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
-from app.services.formatting import format_with_header
-from app.services.prompt_builder import build_llm_content, resolve_provider_model, role_requires_auth
+from app.services.role_pipeline import roles_require_auth, run_chain
 from app.services.tool_exec import execute_bash_command
 from app.security import TokenCipher
-from app.session_resolver import SessionResolver
 from app.storage import Storage
-from app.utils import split_message
 from app.handlers.messages_common import (
-    _handle_missing_user_field,
-    _recover_stale_session_and_resend,
-    _is_unauthorized,
     _request_token_for_user,
     _request_user_field_for_user,
     _runtime,
@@ -349,25 +340,11 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     if not target_roles:
         return
 
-    provider_registry = _runtime(context).provider_registry
-    default_provider_id = _runtime(context).default_provider_id
-    provider_models = _runtime(context).provider_models
-    provider_model_map = _runtime(context).provider_model_map
-    requires_auth = False
-    for role in target_roles:
-        group_role = storage.get_group_role(group_id, role.role_id)
-        if provider_models:
-            model_override = resolve_provider_model(
-                provider_models,
-                provider_model_map,
-                provider_registry,
-                group_role.model_override or role.llm_model,
-            )
-        else:
-            model_override = group_role.model_override or role.llm_model
-        if role_requires_auth(provider_registry, model_override, default_provider_id):
-            requires_auth = True
-            break
+    requires_auth = roles_require_auth(
+        context=context,
+        chat_id=group_id,
+        roles=target_roles,
+    )
     if not requires_auth:
         return
 
@@ -465,8 +442,10 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     if not pending_msg:
         logger.info("pending message not found user_id=%s", user_id)
         return False
+    original_pending_msg = pending_msg
     chat_id, message_id, role_name, content, reply_text = pending_msg
     storage: Storage = _runtime(context).storage
+    actor = storage.get_user(user_id)
     roles = storage.list_roles_for_group(chat_id)
     if role_name == "__all__":
         target_roles = roles
@@ -477,136 +456,46 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
             return False
         target_roles = [role]
 
-    provider_registry = _runtime(context).provider_registry
-    default_provider_id = _runtime(context).default_provider_id
-    provider_models = _runtime(context).provider_models
-    provider_model_map = _runtime(context).provider_model_map
     auth = storage.get_auth_token(user_id)
-    requires_auth = False
-    for role in target_roles:
-        group_role = storage.get_group_role(chat_id, role.role_id)
-        if provider_models:
-            model_override = resolve_provider_model(
-                provider_models,
-                provider_model_map,
-                provider_registry,
-                group_role.model_override or role.llm_model,
-            )
-        else:
-            model_override = group_role.model_override or role.llm_model
-        if role_requires_auth(provider_registry, model_override, default_provider_id):
-            requires_auth = True
-            break
+    requires_auth = roles_require_auth(
+        context=context,
+        chat_id=chat_id,
+        roles=target_roles,
+    )
     if requires_auth and (not auth or not auth.is_authorized):
         await _request_token_for_user(chat_id, user_id, context)
         return False
 
     cipher: TokenCipher = _runtime(context).cipher
     session_token = cipher.decrypt(auth.encrypted_token) if auth and auth.encrypted_token else ""
-    llm_executor: LLMExecutor = _runtime(context).llm_executor
-    resolver: SessionResolver = _runtime(context).session_resolver
+    chain_result = await run_chain(
+        context=context,
+        chat_id=chat_id,
+        user_id=user_id,
+        session_token=session_token,
+        roles=target_roles,
+        user_text=content,
+        reply_text=reply_text,
+        actor_username=actor.username if actor else None,
+        reply_to_message_id=message_id,
+        is_all=role_name == "__all__",
+        apply_plugins=False,
+        save_pending_on_unauthorized=False,
+        pending_role_name=role_name,
+        allow_orchestrator_post_event=chat_id < 0,
+        chain_origin="pending",
+    )
 
-    had_error = False
-    for role in target_roles:
-        session_id: str | None = None
-        try:
-            group_role = storage.get_group_role(chat_id, role.role_id)
-            if provider_models:
-                model_override = resolve_provider_model(
-                    provider_models,
-                    provider_model_map,
-                    provider_registry,
-                    group_role.model_override or role.llm_model,
-                )
-            else:
-                logger.warning("Provider model list is empty for role=%s", role.role_name)
-                model_override = group_role.model_override or role.llm_model
-            session_id = await resolver.resolve(
+    if not chain_result.had_error:
+        current_pending_msg = pending.peek(user_id)
+        if current_pending_msg == original_pending_msg:
+            pending.pop(user_id)
+        elif current_pending_msg is not None:
+            logger.info(
+                "pending message preserved user_id=%s old_role=%s new_role=%s",
                 user_id,
-                chat_id,
-                role,
-                session_token,
-                model_override=model_override,
+                original_pending_msg[2],
+                current_pending_msg[2],
             )
-            content_with_context = build_llm_content(
-                content,
-                group_role.user_prompt_suffix,
-                group_role.user_reply_prefix,
-                reply_text,
-            )
-            response_text = await llm_executor.send_with_retries(
-                session_id=session_id,
-                session_token=session_token,
-                content=content_with_context,
-                role=role,
-                model_override=model_override,
-            )
-        except MissingUserField as exc:
-            await _handle_missing_user_field(
-                user_id,
-                chat_id,
-                message_id,
-                role_name,
-                content,
-                reply_text,
-                exc,
-                context,
-            )
-            return False
-        except Exception as exc:
-            recovery = None
-            if session_id is not None:
-                try:
-                    recovery = await _recover_stale_session_and_resend(
-                        exc=exc,
-                        user_id=user_id,
-                        chat_id=chat_id,
-                        role=role,
-                        session_id=session_id,
-                        session_token=session_token,
-                        model_override=model_override,
-                        content=content_with_context,
-                        context=context,
-                    )
-                except Exception:
-                    recovery = None
-            if recovery is not None:
-                response_text = recovery.response_text
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text=f"Обновил session_id для роли @{role.role_name}: {recovery.old_session_id} -> {recovery.new_session_id}",
-                    reply_to_message_id=message_id,
-                )
-                logger.info(
-                    "Recovered stale session for pending message role=%s old_session_id=%s new_session_id=%s",
-                    role.role_name,
-                    recovery.old_session_id,
-                    recovery.new_session_id,
-                )
-            elif _is_unauthorized(exc):
-                storage.set_user_authorized(user_id, False)
-                await _request_token_for_user(chat_id, user_id, context)
-                return False
-            else:
-                logger.exception("LLM request failed for pending message user_id=%s role=%s", user_id, role.role_name)
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="Ошибка при запросе к LLM. Попробуй позже.",
-                    reply_to_message_id=message_id,
-                )
-                had_error = True
-                continue
-
-        full_text = format_with_header(None, response_text)
-        for chunk in split_message(full_text):
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=chunk,
-                reply_to_message_id=message_id,
-                parse_mode=ParseMode.HTML,
-            )
-
-    if not had_error:
-        pending.pop(user_id)
         return True
     return False

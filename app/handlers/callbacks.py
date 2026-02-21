@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -9,15 +11,61 @@ from app.services.prompt_builder import provider_id_from_model, resolve_provider
 from app.storage import Storage
 from app.utils import split_message
 
+logger = logging.getLogger("bot")
+
+
+def _group_role_caption(storage: Storage, group_id: int, role_id: int) -> str:
+    role = storage.get_role_by_id(role_id)
+    group_role = storage.get_group_role(group_id, role_id)
+    status = "on" if group_role.enabled else "off"
+    mode = "orch" if group_role.mode == "orchestrator" else "normal"
+    return f"@{role.role_name} [{status}|{mode}]"
+
+
+def _group_roles_keyboard(storage: Storage, group_id: int) -> list[list[InlineKeyboardButton]]:
+    rows: list[list[InlineKeyboardButton]] = []
+    for group_role in storage.list_group_roles(group_id):
+        role = storage.get_role_by_id(group_role.role_id)
+        status = "ON" if group_role.enabled else "OFF"
+        mode = "ORCH" if group_role.mode == "orchestrator" else "ROLE"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"@{role.role_name} [{status}|{mode}]",
+                    callback_data=f"role:{group_id}:{role.role_id}",
+                )
+            ]
+        )
+    return rows
+
+
+def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: str) -> InlineKeyboardMarkup:
+    toggle_enabled_text = "⏸ Отключить роль" if enabled else "▶️ Включить роль"
+    toggle_mode_text = "🎯 Снять оркестратор" if mode == "orchestrator" else "🎯 Сделать оркестратором"
+    toggle_mode_cb = (
+        f"act:set_mode_normal:{group_id}:{role_id}"
+        if mode == "orchestrator"
+        else f"act:set_mode_orchestrator:{group_id}:{role_id}"
+    )
+    keyboard = [
+        [InlineKeyboardButton(text=toggle_enabled_text, callback_data=f"act:toggle_enabled:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text=toggle_mode_text, callback_data=toggle_mode_cb)],
+        [InlineKeyboardButton(text="Системный промпт", callback_data=f"act:set_prompt:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="Инструкция к сообщениям", callback_data=f"act:set_suffix:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="Инструкция для реплаев", callback_data=f"act:set_reply_prefix:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="LLM-модель", callback_data=f"act:set_model:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="Переименовать роль", callback_data=f"act:rename_role:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="Сбросить сессию", callback_data=f"act:reset_session:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="Удалить роль", callback_data=f"act:delete_role:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 
 async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: Storage) -> bool:
     if data.startswith("grp:"):
         group_id = int(data.split(":", 1)[1])
-        roles = storage.list_roles_for_group(group_id)
-        keyboard = [
-            [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"role:{group_id}:{role.role_id}")]
-            for role in roles
-        ]
+        keyboard = _group_roles_keyboard(storage, group_id)
         keyboard.append([InlineKeyboardButton(text="➕ Добавить роль", callback_data=f"addrole:{group_id}")])
         keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="back:groups")])
         await query.edit_message_text(
@@ -43,19 +91,16 @@ async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: St
         group_id = int(group_id_str)
         role_id = int(role_id_str)
         role = storage.get_role_by_id(role_id)
-        keyboard = [
-            [InlineKeyboardButton(text="Системный промпт", callback_data=f"act:set_prompt:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="Инструкция к сообщениям", callback_data=f"act:set_suffix:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="Инструкция для реплаев", callback_data=f"act:set_reply_prefix:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="LLM-модель", callback_data=f"act:set_model:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="Переименовать роль", callback_data=f"act:rename_role:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="Сбросить сессию", callback_data=f"act:reset_session:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="Удалить роль", callback_data=f"act:delete_role:{group_id}:{role_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")],
-        ]
+        group_role = storage.get_group_role(group_id, role_id)
+        state = f"enabled={'yes' if group_role.enabled else 'no'}, mode={group_role.mode}"
         await query.edit_message_text(
-            f"Роль @{role.role_name}. Выбери действие:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+            f"Роль @{role.role_name} ({state}). Выбери действие:",
+            reply_markup=_role_actions_keyboard(
+                group_id,
+                role_id,
+                enabled=group_role.enabled,
+                mode=group_role.mode,
+            ),
         )
         await query.answer()
         return True
@@ -94,10 +139,15 @@ async def _handle_add_role(query: CallbackQuery, data: str, context: ContextType
         _, target_group_id_str, source_group_id_str = data.split(":", 2)
         target_group_id = int(target_group_id_str)
         source_group_id = int(source_group_id_str)
-        roles = storage.list_roles_for_group(source_group_id)
+        roles = storage.list_group_roles(source_group_id)
         keyboard = [
-            [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"addrole_srcrole:{target_group_id}:{source_group_id}:{role.role_id}")]
-            for role in roles
+            [
+                InlineKeyboardButton(
+                    text=_group_role_caption(storage, source_group_id, group_role.role_id),
+                    callback_data=f"addrole_srcrole:{target_group_id}:{source_group_id}:{group_role.role_id}",
+                )
+            ]
+            for group_role in roles
         ]
         keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"addrole_copy:{target_group_id}")])
         await query.edit_message_text(
@@ -154,8 +204,114 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
     group_id = int(group_id_str)
     role_id = int(role_id_str)
     role = storage.get_role_by_id(role_id)
+    group_role = storage.get_group_role(group_id, role_id)
+    if action == "toggle_enabled":
+        try:
+            storage.set_group_role_enabled(group_id, role_id, not group_role.enabled)
+        except ValueError as exc:
+            await query.edit_message_text(
+                f"Не удалось изменить статус роли: {exc}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
+                ),
+            )
+            await query.answer()
+            return True
+        updated = storage.get_group_role(group_id, role_id)
+        logger.info(
+            "group_role toggle_enabled group_id=%s role_id=%s role=%s enabled=%s mode=%s actor_user_id=%s",
+            group_id,
+            role_id,
+            role.role_name,
+            updated.enabled,
+            updated.mode,
+            query.from_user.id,
+        )
+        note = "Роль включена." if updated.enabled else "Роль отключена."
+        if not updated.enabled and updated.mode == "orchestrator":
+            note = f"{note} Оркестратор неактивен до повторного включения."
+        await query.edit_message_text(
+            f"{note}\n\nРоль @{role.role_name} (enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
+            reply_markup=_role_actions_keyboard(
+                group_id,
+                role_id,
+                enabled=updated.enabled,
+                mode=updated.mode,
+            ),
+        )
+        await query.answer()
+        return True
+    if action == "set_mode_orchestrator":
+        previous_orchestrator = storage.get_enabled_orchestrator_for_group(group_id)
+        try:
+            storage.set_group_role_mode(group_id, role_id, "orchestrator")
+        except ValueError as exc:
+            await query.edit_message_text(
+                f"Не удалось изменить режим роли: {exc}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
+                ),
+            )
+            await query.answer()
+            return True
+        updated = storage.get_group_role(group_id, role_id)
+        logger.info(
+            "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s previous_orchestrator_role_id=%s",
+            group_id,
+            role_id,
+            role.role_name,
+            updated.mode,
+            query.from_user.id,
+            previous_orchestrator.role_id if previous_orchestrator else None,
+        )
+        note = "Роль назначена оркестратором."
+        if previous_orchestrator and previous_orchestrator.role_id != role_id:
+            previous_role = storage.get_role_by_id(previous_orchestrator.role_id)
+            note = f"{note}\nПредыдущий оркестратор @{previous_role.role_name} переведен в normal."
+        await query.edit_message_text(
+            f"{note}\n\nРоль @{role.role_name} (enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
+            reply_markup=_role_actions_keyboard(
+                group_id,
+                role_id,
+                enabled=updated.enabled,
+                mode=updated.mode,
+            ),
+        )
+        await query.answer()
+        return True
+    if action == "set_mode_normal":
+        try:
+            storage.set_group_role_mode(group_id, role_id, "normal")
+        except ValueError as exc:
+            await query.edit_message_text(
+                f"Не удалось изменить режим роли: {exc}",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
+                ),
+            )
+            await query.answer()
+            return True
+        updated = storage.get_group_role(group_id, role_id)
+        logger.info(
+            "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s",
+            group_id,
+            role_id,
+            role.role_name,
+            updated.mode,
+            query.from_user.id,
+        )
+        await query.edit_message_text(
+            f"Роль переведена в normal.\n\nРоль @{role.role_name} (enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
+            reply_markup=_role_actions_keyboard(
+                group_id,
+                role_id,
+                enabled=updated.enabled,
+                mode=updated.mode,
+            ),
+        )
+        await query.answer()
+        return True
     if action == "set_prompt":
-        group_role = storage.get_group_role(group_id, role_id)
         if group_role.system_prompt_override is not None:
             prompt = group_role.system_prompt_override
         else:

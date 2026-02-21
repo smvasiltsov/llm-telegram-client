@@ -51,7 +51,7 @@ class AuthService:
 
         existing_session_ids = set(sessions)
         if group_id is not None:
-            group_roles = self._storage.list_group_roles(group_id)
+            group_roles = self._storage.list_enabled_roles_for_group(group_id)
             for group_role in group_roles:
                 role = self._storage.get_role_by_id(group_role.role_id)
                 try:

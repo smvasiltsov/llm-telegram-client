@@ -6,6 +6,7 @@
   "routing": {
     "require_bot_mention": false
   },
+  "orchestrator_max_chain_auto_steps": 30,
   "llm": {
     "timeout_sec": 600
   },

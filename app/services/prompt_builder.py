@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -77,3 +78,51 @@ def build_llm_content(
     parts.append("#USER_REQUEST")
     parts.append(user_text)
     return "\n\n".join(part for part in parts if part).strip()
+
+
+def build_llm_payload_json_text(
+    user_text: str,
+    user_prompt_suffix: str | None,
+    user_reply_prefix: str | None,
+    reply_text: str | None,
+    *,
+    username: str | None,
+    recipient: str,
+    trigger_type: str,
+    mentioned_roles: list[str] | None = None,
+    system_prompt: str | None = None,
+    llm_answer_text: str | None = None,
+    llm_answer_role_name: str | None = None,
+) -> str:
+    payload = {
+        "actor": {
+            "username": username,
+        },
+        "instruction": {
+            "system": system_prompt,
+            "message": user_prompt_suffix,
+            "reply": user_reply_prefix,
+        },
+        "context": {
+            "routing": {
+                "trigger_type": trigger_type,
+                "mentioned_roles": mentioned_roles or [],
+            },
+            "reply": {
+                "is_reply": bool(reply_text),
+                "previous_message": reply_text,
+            },
+        },
+        "user_request": {
+            "text": user_text,
+            "recipient": recipient,
+        },
+        "llm_answer": {
+            "text": llm_answer_text,
+            "role_name": llm_answer_role_name,
+        },
+        "tools": {
+            "available": [],
+        },
+    }
+    return "INPUT_JSON:\n" + json.dumps(payload, ensure_ascii=False)

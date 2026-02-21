@@ -33,6 +33,7 @@ class RuntimeContext:
     auth_service: AuthService
     owner_user_id: int
     require_bot_mention: bool
+    orchestrator_max_chain_auto_steps: int
     pending_prompts: dict[int, tuple[int, int]]
     pending_role_ops: dict[int, dict[str, Any]]
     pending_user_fields: PendingUserFieldStore

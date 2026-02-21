@@ -19,6 +19,8 @@ class MissingUserField(Exception):
 
 
 class LLMRouter:
+    _RESPONSE_PREVIEW_LIMIT = 300
+
     def __init__(
         self,
         provider_registry: dict[str, ProviderConfig],
@@ -374,9 +376,10 @@ class LLMRouter:
             if not result:
                 raise ValueError("stream response empty")
             self._logger.info(
-                "LLM generic response provider=%s chars=%s",
+                "LLM generic response provider=%s chars=%s preview=%r",
                 provider.provider_id,
                 len(result),
+                result[: self._RESPONSE_PREVIEW_LIMIT],
             )
             return result
         self._logger.info(
@@ -401,8 +404,9 @@ class LLMRouter:
             raise ValueError("send_message response missing content")
         result = str(content_value)
         self._logger.info(
-            "LLM generic response provider=%s chars=%s",
+            "LLM generic response provider=%s chars=%s preview=%r",
             provider.provider_id,
             len(result),
+            result[: self._RESPONSE_PREVIEW_LIMIT],
         )
         return result

@@ -30,6 +30,7 @@ class AppConfig:
     llm_timeout_sec: int
     owner_user_id: int
     require_bot_mention: bool
+    orchestrator_max_chain_auto_steps: int
     allow_raw_html: bool
     formatting_mode: str
     plugin_server_host: str
@@ -67,6 +68,7 @@ def load_dotenv(path: str | Path) -> dict[str, str]:
 def load_config(path: str | Path) -> AppConfig:
     raw = json.loads(Path(path).read_text())
     routing_raw = raw.get("routing", {})
+    orchestrator_raw = raw.get("orchestrator", {})
     llm_raw = raw.get("llm", {})
     formatting_raw = raw.get("formatting", {})
     plugin_server_raw = raw.get("plugin_server", {})
@@ -92,6 +94,12 @@ def load_config(path: str | Path) -> AppConfig:
         llm_timeout_sec=int(llm_raw.get("timeout_sec", 600)),
         owner_user_id=int(raw["owner_user_id"]),
         require_bot_mention=bool(routing_raw.get("require_bot_mention", True)),
+        orchestrator_max_chain_auto_steps=int(
+            raw.get(
+                "orchestrator_max_chain_auto_steps",
+                orchestrator_raw.get("max_chain_auto_steps", 30),
+            )
+        ),
         allow_raw_html=bool(formatting_raw.get("allow_raw_html", True)),
         formatting_mode=str(formatting_raw.get("mode", "html")).lower(),
         plugin_server_host=str(plugin_server_raw.get("host", "127.0.0.1")),

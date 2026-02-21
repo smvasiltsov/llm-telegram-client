@@ -83,6 +83,8 @@ class Storage:
                 model_override TEXT,
                 user_prompt_suffix TEXT,
                 user_reply_prefix TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                mode TEXT NOT NULL DEFAULT 'normal',
                 is_active INTEGER NOT NULL DEFAULT 1,
                 PRIMARY KEY (group_id, role_id),
                 FOREIGN KEY (group_id) REFERENCES groups(group_id),
@@ -182,6 +184,8 @@ class Storage:
         self._ensure_column("group_roles", "model_override", "model_override TEXT")
         self._ensure_column("group_roles", "user_prompt_suffix", "user_prompt_suffix TEXT")
         self._ensure_column("group_roles", "user_reply_prefix", "user_reply_prefix TEXT")
+        self._ensure_column("group_roles", "enabled", "enabled INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("group_roles", "mode", "mode TEXT NOT NULL DEFAULT 'normal'")
         self._migrate_user_role_sessions()
 
     def _migrate_user_role_sessions(self) -> None:
@@ -637,9 +641,11 @@ class Storage:
                 model_override,
                 user_prompt_suffix,
                 user_reply_prefix,
+                enabled,
+                mode,
                 is_active
             )
-            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, 1)
+            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, 1, 'normal', 1)
             ON CONFLICT(group_id, role_id) DO NOTHING
             """,
             (group_id, role_id),
@@ -651,7 +657,7 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT group_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, is_active
+            SELECT group_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
             FROM group_roles
             WHERE group_id = ? AND role_id = ?
             """,
@@ -668,6 +674,8 @@ class Storage:
             model_override=row["model_override"],
             user_prompt_suffix=row["user_prompt_suffix"],
             user_reply_prefix=row["user_reply_prefix"],
+            enabled=bool(row["enabled"]),
+            mode=str(row["mode"] or "normal"),
             is_active=bool(row["is_active"]),
         )
 
@@ -675,7 +683,7 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT group_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, is_active
+            SELECT group_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
             FROM group_roles
             WHERE group_id = ? AND is_active = 1
             ORDER BY role_id
@@ -692,10 +700,71 @@ class Storage:
                 model_override=row["model_override"],
                 user_prompt_suffix=row["user_prompt_suffix"],
                 user_reply_prefix=row["user_reply_prefix"],
+                enabled=bool(row["enabled"]),
+                mode=str(row["mode"] or "normal"),
                 is_active=bool(row["is_active"]),
             )
             for row in rows
         ]
+
+    def list_enabled_roles_for_group(self, group_id: int) -> list[GroupRole]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT group_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            FROM group_roles
+            WHERE group_id = ? AND is_active = 1 AND enabled = 1
+            ORDER BY role_id
+            """,
+            (group_id,),
+        )
+        rows = cur.fetchall()
+        return [
+            GroupRole(
+                group_id=row["group_id"],
+                role_id=row["role_id"],
+                system_prompt_override=row["system_prompt_override"],
+                display_name=row["display_name"],
+                model_override=row["model_override"],
+                user_prompt_suffix=row["user_prompt_suffix"],
+                user_reply_prefix=row["user_reply_prefix"],
+                enabled=bool(row["enabled"]),
+                mode=str(row["mode"] or "normal"),
+                is_active=bool(row["is_active"]),
+            )
+            for row in rows
+        ]
+
+    def get_enabled_orchestrator_for_group(self, group_id: int) -> GroupRole | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT group_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            FROM group_roles
+            WHERE group_id = ? AND is_active = 1 AND enabled = 1 AND mode = 'orchestrator'
+            ORDER BY role_id
+            LIMIT 2
+            """,
+            (group_id,),
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return None
+        if len(rows) > 1:
+            raise ValueError(f"Multiple enabled orchestrators found for group_id={group_id}")
+        row = rows[0]
+        return GroupRole(
+            group_id=row["group_id"],
+            role_id=row["role_id"],
+            system_prompt_override=row["system_prompt_override"],
+            display_name=row["display_name"],
+            model_override=row["model_override"],
+            user_prompt_suffix=row["user_prompt_suffix"],
+            user_reply_prefix=row["user_reply_prefix"],
+            enabled=bool(row["enabled"]),
+            mode=str(row["mode"] or "normal"),
+            is_active=bool(row["is_active"]),
+        )
 
     def list_roles_for_group(self, group_id: int) -> list[Role]:
         cur = self._conn.cursor()
@@ -704,7 +773,7 @@ class Storage:
             SELECT r.role_id, r.role_name, r.description, r.base_system_prompt, r.extra_instruction, r.llm_model, r.is_active
             FROM roles r
             JOIN group_roles gr ON gr.role_id = r.role_id
-            WHERE gr.group_id = ? AND gr.is_active = 1 AND r.is_active = 1
+            WHERE gr.group_id = ? AND gr.is_active = 1 AND gr.enabled = 1 AND r.is_active = 1
             ORDER BY r.role_name
             """,
             (group_id,),
@@ -802,10 +871,46 @@ class Storage:
         )
         self._conn.commit()
 
+    def set_group_role_enabled(self, group_id: int, role_id: int, enabled: bool) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE group_roles
+            SET enabled = ?
+            WHERE group_id = ? AND role_id = ?
+            """,
+            (1 if enabled else 0, group_id, role_id),
+        )
+        self._conn.commit()
+
+    def set_group_role_mode(self, group_id: int, role_id: int, mode: str) -> None:
+        mode_value = str(mode).strip().lower()
+        if mode_value not in {"normal", "orchestrator"}:
+            raise ValueError(f"Unsupported group role mode: {mode!r}")
+        cur = self._conn.cursor()
+        if mode_value == "orchestrator":
+            cur.execute(
+                """
+                UPDATE group_roles
+                SET mode = 'normal'
+                WHERE group_id = ? AND role_id != ?
+                """,
+                (group_id, role_id),
+            )
+        cur.execute(
+            """
+            UPDATE group_roles
+            SET mode = ?, enabled = CASE WHEN ? = 'orchestrator' THEN 1 ELSE enabled END
+            WHERE group_id = ? AND role_id = ?
+            """,
+            (mode_value, mode_value, group_id, role_id),
+        )
+        self._conn.commit()
+
     def deactivate_group_role(self, group_id: int, role_id: int) -> None:
         cur = self._conn.cursor()
         cur.execute(
-            "UPDATE group_roles SET is_active = 0 WHERE group_id = ? AND role_id = ?",
+            "UPDATE group_roles SET is_active = 0, enabled = 0, mode = 'normal' WHERE group_id = ? AND role_id = ?",
             (group_id, role_id),
         )
         self._conn.commit()

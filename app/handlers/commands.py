@@ -54,14 +54,23 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text("group_id должен быть числом.")
         return
     storage: Storage = runtime.storage
-    roles = storage.list_roles_for_group(group_id)
-    if not roles:
+    group_roles = storage.list_group_roles(group_id)
+    if not group_roles:
         await update.message.reply_text("Роли для группы не настроены.")
         return
-    keyboard = [
-        [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"role:{group_id}:{role.role_id}")]
-        for role in roles
-    ]
+    keyboard = []
+    for group_role in group_roles:
+        role = storage.get_role_by_id(group_role.role_id)
+        status = "ON" if group_role.enabled else "OFF"
+        mode = "ORCH" if group_role.mode == "orchestrator" else "ROLE"
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=f"@{role.role_name} [{status}|{mode}]",
+                    callback_data=f"role:{group_id}:{role.role_id}",
+                )
+            ]
+        )
     keyboard.append([InlineKeyboardButton(text="➕ Добавить роль", callback_data=f"addrole:{group_id}")])
     await update.message.reply_text(
         f"Роли группы {group_id}:",
