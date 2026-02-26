@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import secrets
 import sqlite3
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.models import AuthToken, Group, GroupRole, Role, User, UserRoleSession
+from app.models import AuthToken, Group, GroupRole, Role, RoleSkill, User, UserRoleSession
 
 
 @dataclass
@@ -174,6 +175,23 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_skills (
+                group_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
+                skill_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                config_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, role_id, skill_id),
+                FOREIGN KEY (group_id) REFERENCES groups(group_id),
+                FOREIGN KEY (role_id) REFERENCES roles(role_id)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_role_skills_role ON role_skills(group_id, role_id, enabled)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_user_created ON tool_runs(telegram_user_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_tool_created ON tool_runs(tool_name, created_at)")
         self._conn.commit()
@@ -984,3 +1002,129 @@ class Storage:
             (telegram_user_id,),
         )
         return [row["session_id"] for row in cur.fetchall()]
+
+    def upsert_role_skill(
+        self,
+        group_id: int,
+        role_id: int,
+        skill_id: str,
+        *,
+        enabled: bool = True,
+        config: dict | None = None,
+    ) -> RoleSkill:
+        now = _utc_now()
+        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO role_skills (group_id, role_id, skill_id, enabled, config_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(group_id, role_id, skill_id) DO UPDATE SET
+                enabled=excluded.enabled,
+                config_json=excluded.config_json,
+                updated_at=excluded.updated_at
+            """,
+            (group_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
+        )
+        self._conn.commit()
+        role_skill = self.get_role_skill(group_id, role_id, skill_id)
+        if role_skill is None:
+            raise RuntimeError("Failed to upsert role skill")
+        return role_skill
+
+    def get_role_skill(self, group_id: int, role_id: int, skill_id: str) -> RoleSkill | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+            FROM role_skills
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (group_id, role_id, skill_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return RoleSkill(
+            group_id=row["group_id"],
+            role_id=row["role_id"],
+            skill_id=row["skill_id"],
+            enabled=bool(row["enabled"]),
+            config_json=row["config_json"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_role_skills(self, group_id: int, role_id: int, *, enabled_only: bool = False) -> list[RoleSkill]:
+        cur = self._conn.cursor()
+        if enabled_only:
+            cur.execute(
+                """
+                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills
+                WHERE group_id = ? AND role_id = ? AND enabled = 1
+                ORDER BY skill_id
+                """,
+                (group_id, role_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills
+                WHERE group_id = ? AND role_id = ?
+                ORDER BY skill_id
+                """,
+                (group_id, role_id),
+            )
+        rows = cur.fetchall()
+        return [
+            RoleSkill(
+                group_id=row["group_id"],
+                role_id=row["role_id"],
+                skill_id=row["skill_id"],
+                enabled=bool(row["enabled"]),
+                config_json=row["config_json"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def set_role_skill_enabled(self, group_id: int, role_id: int, skill_id: str, enabled: bool) -> None:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE role_skills
+            SET enabled = ?, updated_at = ?
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (1 if enabled else 0, now, group_id, role_id, skill_id),
+        )
+        self._conn.commit()
+
+    def set_role_skill_config(self, group_id: int, role_id: int, skill_id: str, config: dict | None) -> None:
+        now = _utc_now()
+        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE role_skills
+            SET config_json = ?, updated_at = ?
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (config_json, now, group_id, role_id, skill_id),
+        )
+        self._conn.commit()
+
+    def delete_role_skill(self, group_id: int, role_id: int, skill_id: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM role_skills
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (group_id, role_id, skill_id),
+        )
+        self._conn.commit()

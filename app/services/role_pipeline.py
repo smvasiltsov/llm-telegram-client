@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass, field, replace
 from typing import Awaitable, Callable, Literal
@@ -16,6 +18,7 @@ from app.handlers.messages_common import (
     _request_token_for_user,
     _runtime,
 )
+from app.mcp.skills_contract import SkillContext, SkillResult
 from app.llm_executor import LLMExecutor
 from app.llm_router import MissingUserField
 from app.models import GroupRole, Role
@@ -32,6 +35,16 @@ DelegationKey = tuple[int, int, str]
 logger = logging.getLogger("bot")
 DEFAULT_ORCHESTRATOR_MAX_CHAIN_AUTO_STEPS = 30
 MAX_SAME_DELEGATION_REPEATS = 3
+DEFAULT_SKILL_TIMEOUT_SEC = 30
+MAX_SKILL_TIMEOUT_SEC = 120
+MAX_SKILL_OUTPUT_CHARS = 12000
+ALLOWED_SKILL_PERMISSIONS = frozenset(
+    {
+        "read_context",
+        "transform_prompt",
+        "transform_response",
+    }
+)
 
 
 def normalize_delegation_text(text: str) -> str:
@@ -140,6 +153,163 @@ def roles_require_auth(
     return False
 
 
+async def _run_role_skills_phase(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    user_id: int,
+    role: Role,
+    phase: str,
+    payload: dict[str, object],
+    chain_id: str,
+) -> dict[str, object]:
+    runtime = _runtime(context)
+    storage: Storage = runtime.storage
+    registry = runtime.skill_registry
+    role_skills = storage.list_role_skills(chat_id, role.role_id, enabled_only=True)
+    if not role_skills:
+        return payload
+
+    current = dict(payload)
+    for role_skill in role_skills:
+        record = registry.get(role_skill.skill_id)
+        if record is None:
+            logger.info(
+                "skill skip: not discovered group_id=%s role=%s skill_id=%s phase=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                phase,
+            )
+            continue
+        manifest_permissions = record.manifest.get("permissions")
+        if isinstance(manifest_permissions, list):
+            declared_permissions = tuple(str(item).strip() for item in manifest_permissions if str(item).strip())
+        else:
+            declared_permissions = tuple(record.spec.permissions)
+        denied_permissions = [perm for perm in declared_permissions if perm not in ALLOWED_SKILL_PERMISSIONS]
+        if denied_permissions:
+            logger.info(
+                "skill skip: unsupported permissions group_id=%s role=%s skill_id=%s phase=%s denied=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                phase,
+                denied_permissions,
+            )
+            continue
+
+        config: dict[str, object] = {}
+        if role_skill.config_json:
+            try:
+                loaded = json.loads(role_skill.config_json)
+                if isinstance(loaded, dict):
+                    config = loaded
+            except Exception:
+                logger.exception(
+                    "skill config parse failed group_id=%s role=%s skill_id=%s",
+                    chat_id,
+                    role.role_name,
+                    role_skill.skill_id,
+                )
+                continue
+
+        errors = record.instance.validate_config(config)
+        if errors:
+            logger.info(
+                "skill skip: invalid config group_id=%s role=%s skill_id=%s errors=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                errors,
+            )
+            continue
+
+        skill_ctx = SkillContext(
+            chain_id=chain_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            role_id=role.role_id,
+            role_name=role.role_name,
+        )
+        skill_input = {
+            "phase": phase,
+            "config": config,
+            "data": dict(current),
+        }
+        timeout_sec = record.manifest.get("timeout_sec", record.spec.timeout_sec)
+        try:
+            timeout_sec = int(timeout_sec)
+        except Exception:
+            timeout_sec = DEFAULT_SKILL_TIMEOUT_SEC
+        timeout_sec = min(MAX_SKILL_TIMEOUT_SEC, max(1, timeout_sec))
+        try:
+            result: SkillResult = await asyncio.wait_for(
+                asyncio.to_thread(record.instance.run, skill_ctx, skill_input),
+                timeout=timeout_sec,
+            )
+        except asyncio.TimeoutError:
+            logger.info(
+                "skill timeout group_id=%s role=%s skill_id=%s phase=%s timeout_sec=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                phase,
+                timeout_sec,
+            )
+            continue
+        except Exception:
+            logger.exception(
+                "skill failed group_id=%s role=%s skill_id=%s phase=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                phase,
+            )
+            continue
+
+        if result.status != "ok":
+            logger.info(
+                "skill skipped status group_id=%s role=%s skill_id=%s phase=%s status=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                phase,
+                result.status,
+            )
+            continue
+
+        output = result.output if isinstance(result.output, dict) else {}
+        output_chars = len(json.dumps(output, ensure_ascii=False, default=str))
+        if output_chars > MAX_SKILL_OUTPUT_CHARS:
+            logger.info(
+                "skill skip: output too large group_id=%s role=%s skill_id=%s phase=%s chars=%s",
+                chat_id,
+                role.role_name,
+                role_skill.skill_id,
+                phase,
+                output_chars,
+            )
+            continue
+        if phase == "pre":
+            if isinstance(output.get("user_text"), str):
+                current["user_text"] = output["user_text"]
+            if "reply_text" in output and (isinstance(output["reply_text"], str) or output["reply_text"] is None):
+                current["reply_text"] = output["reply_text"]
+        elif phase == "post":
+            if isinstance(output.get("response_text"), str):
+                current["response_text"] = output["response_text"]
+
+        logger.info(
+            "skill ok group_id=%s role=%s skill_id=%s phase=%s",
+            chat_id,
+            role.role_name,
+            role_skill.skill_id,
+            phase,
+        )
+    return current
+
+
 async def execute_role_request(
     *,
     context: ContextTypes.DEFAULT_TYPE,
@@ -181,11 +351,29 @@ async def execute_role_request(
 
     base_prompt = group_role.system_prompt_override if group_role.system_prompt_override is not None else role.base_system_prompt
     system_prompt = f"{(base_prompt or '').strip()}\n\n{(role.extra_instruction or '').strip()}".strip() or None
+    skill_chain_id = uuid4().hex[:8]
+    pre_data = await _run_role_skills_phase(
+        context=context,
+        chat_id=chat_id,
+        user_id=user_id,
+        role=role,
+        phase="pre",
+        payload={
+            "user_text": user_text,
+            "reply_text": reply_text,
+        },
+        chain_id=skill_chain_id,
+    )
+    effective_user_text = str(pre_data.get("user_text", user_text))
+    effective_reply_text = pre_data.get("reply_text", reply_text)
+    if not (isinstance(effective_reply_text, str) or effective_reply_text is None):
+        effective_reply_text = reply_text
+
     content = build_llm_payload_json_text(
-        user_text,
+        effective_user_text,
         group_role.user_prompt_suffix,
         group_role.user_reply_prefix,
-        reply_text,
+        effective_reply_text,
         username=actor_username,
         recipient=recipient,
         trigger_type=trigger_type,
@@ -235,6 +423,23 @@ async def execute_role_request(
         if recovery is None:
             raise
         response_text = recovery.response_text
+
+    post_data = await _run_role_skills_phase(
+        context=context,
+        chat_id=chat_id,
+        user_id=user_id,
+        role=role,
+        phase="post",
+        payload={
+            "user_text": effective_user_text,
+            "reply_text": effective_reply_text,
+            "response_text": response_text,
+        },
+        chain_id=skill_chain_id,
+    )
+    effective_response_text = post_data.get("response_text", response_text)
+    if isinstance(effective_response_text, str):
+        response_text = effective_response_text
 
     return RoleRequestResult(
         response_text=response_text,

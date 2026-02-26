@@ -1,0 +1,7 @@
+id: echo
+version: 0.1.0
+entrypoint: skill:create_skill
+enabled_by_default: false
+timeout_sec: 10
+permissions: []
+description: "Returns normalized payload fields for smoke testing."

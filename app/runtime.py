@@ -13,6 +13,7 @@ from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
 from app.plugin_server import PluginTextServer
 from app.plugins import PluginManager
+from app.mcp.registry import SkillRegistry
 from app.security import TokenCipher
 from app.session_resolver import SessionResolver
 from app.storage import Storage
@@ -43,6 +44,7 @@ class RuntimeContext:
     default_provider_id: str
     allow_raw_html: bool
     formatting_mode: str
+    skill_registry: SkillRegistry
     plugin_manager: PluginManager
     plugin_server: PluginTextServer
     tool_service: ToolService

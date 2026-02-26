@@ -50,6 +50,7 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
     keyboard = [
         [InlineKeyboardButton(text=toggle_enabled_text, callback_data=f"act:toggle_enabled:{group_id}:{role_id}")],
         [InlineKeyboardButton(text=toggle_mode_text, callback_data=toggle_mode_cb)],
+        [InlineKeyboardButton(text="🧩 Навыки роли", callback_data=f"act:skills:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Системный промпт", callback_data=f"act:set_prompt:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Инструкция к сообщениям", callback_data=f"act:set_suffix:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Инструкция для реплаев", callback_data=f"act:set_reply_prefix:{group_id}:{role_id}")],
@@ -60,6 +61,24 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def _role_skills_keyboard(runtime: RuntimeContext, storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    current = {item.skill_id: item for item in storage.list_role_skills(group_id, role_id)}
+    for spec in sorted(runtime.skill_registry.list_specs(), key=lambda x: x.skill_id):
+        enabled = bool(current.get(spec.skill_id).enabled) if spec.skill_id in current else False
+        mark = "ON" if enabled else "OFF"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"[{mark}] {spec.name} ({spec.skill_id})",
+                    callback_data=f"sktoggle:{group_id}:{role_id}:{spec.skill_id}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")])
+    return InlineKeyboardMarkup(rows)
 
 
 async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: Storage) -> bool:
@@ -333,6 +352,14 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         )
         await query.answer()
         return True
+    if action == "skills":
+        role = storage.get_role_by_id(role_id)
+        await query.edit_message_text(
+            f"Навыки для роли @{role.role_name}:",
+            reply_markup=_role_skills_keyboard(runtime, storage, group_id, role_id),
+        )
+        await query.answer()
+        return True
     if action == "clear_prompt":
         storage.set_group_role_prompt(group_id, role_id, "")
         await query.edit_message_text(
@@ -507,6 +534,37 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
     return False
 
 
+async def _handle_skill_toggle(query: CallbackQuery, data: str, storage: Storage, runtime: RuntimeContext) -> bool:
+    if not data.startswith("sktoggle:"):
+        return False
+    _, group_id_str, role_id_str, skill_id = data.split(":", 3)
+    group_id = int(group_id_str)
+    role_id = int(role_id_str)
+    if runtime.skill_registry.get(skill_id) is None:
+        await query.edit_message_text(
+            f"Навык {skill_id} не найден в реестре.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
+            ),
+        )
+        await query.answer()
+        return True
+    role = storage.get_role_by_id(role_id)
+    current = storage.get_role_skill(group_id, role_id, skill_id)
+    if current is None:
+        storage.upsert_role_skill(group_id, role_id, skill_id, enabled=True, config=None)
+        state_note = f"Навык {skill_id} включен."
+    else:
+        storage.set_role_skill_enabled(group_id, role_id, skill_id, not current.enabled)
+        state_note = f"Навык {skill_id} {'включен' if not current.enabled else 'выключен'}."
+    await query.edit_message_text(
+        f"{state_note}\n\nНавыки для роли @{role.role_name}:",
+        reply_markup=_role_skills_keyboard(runtime, storage, group_id, role_id),
+    )
+    await query.answer()
+    return True
+
+
 async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, runtime: RuntimeContext) -> bool:
     if not data.startswith("setmodel:"):
         return False
@@ -618,6 +676,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if await _handle_add_role(query, data, context, storage, runtime):
         return
     if await _handle_action(query, data, context, storage, runtime):
+        return
+    if await _handle_skill_toggle(query, data, storage, runtime):
         return
     if await _handle_set_model(query, data, storage, runtime):
         return

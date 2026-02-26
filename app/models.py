@@ -61,3 +61,14 @@ class AuthToken:
     created_at: str
     updated_at: str
     is_authorized: bool
+
+
+@dataclass
+class RoleSkill:
+    group_id: int
+    role_id: int
+    skill_id: str
+    enabled: bool
+    config_json: str | None
+    created_at: str
+    updated_at: str
