@@ -1,13 +1,17 @@
 from __future__ import annotations
 
-from app.mcp.skills_contract import SkillContext, SkillResult, SkillSpec
+from prepost_processing_sdk.contract import (
+    PrePostProcessingContext,
+    PrePostProcessingResult,
+    PrePostProcessingSpec,
+)
 
 
-class EchoSkill:
-    def describe(self) -> SkillSpec:
-        return SkillSpec(
-            skill_id="echo",
-            name="Echo Skill",
+class EchoPrePostProcessing:
+    def describe(self) -> PrePostProcessingSpec:
+        return PrePostProcessingSpec(
+            prepost_processing_id="echo",
+            name="Echo Pre/Post Processing",
             version="0.1.0",
             description="Echoes selected payload fields for integration smoke.",
             permissions=(),
@@ -19,8 +23,8 @@ class EchoSkill:
             return ["config must be an object"]
         return []
 
-    def run(self, ctx: SkillContext, payload: dict) -> SkillResult:
-        return SkillResult(
+    def run(self, ctx: PrePostProcessingContext, payload: dict) -> PrePostProcessingResult:
+        return PrePostProcessingResult(
             status="ok",
             output={
                 "chain_id": ctx.chain_id,
@@ -30,5 +34,5 @@ class EchoSkill:
         )
 
 
-def create_skill() -> EchoSkill:
-    return EchoSkill()
+def create_processor() -> EchoPrePostProcessing:
+    return EchoPrePostProcessing()

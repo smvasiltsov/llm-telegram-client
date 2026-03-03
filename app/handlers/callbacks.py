@@ -14,25 +14,27 @@ from app.utils import split_message
 logger = logging.getLogger("bot")
 
 
+def _role_public_name(storage: Storage, group_id: int, role_id: int) -> str:
+    return storage.get_group_role_name(group_id, role_id)
+
+
 def _group_role_caption(storage: Storage, group_id: int, role_id: int) -> str:
-    role = storage.get_role_by_id(role_id)
     group_role = storage.get_group_role(group_id, role_id)
     status = "on" if group_role.enabled else "off"
     mode = "orch" if group_role.mode == "orchestrator" else "normal"
-    return f"@{role.role_name} [{status}|{mode}]"
+    return f"@{_role_public_name(storage, group_id, role_id)} [{status}|{mode}]"
 
 
 def _group_roles_keyboard(storage: Storage, group_id: int) -> list[list[InlineKeyboardButton]]:
     rows: list[list[InlineKeyboardButton]] = []
     for group_role in storage.list_group_roles(group_id):
-        role = storage.get_role_by_id(group_role.role_id)
         status = "ON" if group_role.enabled else "OFF"
         mode = "ORCH" if group_role.mode == "orchestrator" else "ROLE"
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"@{role.role_name} [{status}|{mode}]",
-                    callback_data=f"role:{group_id}:{role.role_id}",
+                    text=f"@{_role_public_name(storage, group_id, group_role.role_id)} [{status}|{mode}]",
+                    callback_data=f"role:{group_id}:{group_role.role_id}",
                 )
             ]
         )
@@ -50,7 +52,7 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
     keyboard = [
         [InlineKeyboardButton(text=toggle_enabled_text, callback_data=f"act:toggle_enabled:{group_id}:{role_id}")],
         [InlineKeyboardButton(text=toggle_mode_text, callback_data=toggle_mode_cb)],
-        [InlineKeyboardButton(text="🧩 Навыки роли", callback_data=f"act:skills:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="🧩 Pre/Post Processing", callback_data=f"act:prepost_processing:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Системный промпт", callback_data=f"act:set_prompt:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Инструкция к сообщениям", callback_data=f"act:set_suffix:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Инструкция для реплаев", callback_data=f"act:set_reply_prefix:{group_id}:{role_id}")],
@@ -63,17 +65,17 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
     return InlineKeyboardMarkup(keyboard)
 
 
-def _role_skills_keyboard(runtime: RuntimeContext, storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
+def _role_prepost_processing_keyboard(runtime: RuntimeContext, storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    current = {item.skill_id: item for item in storage.list_role_skills(group_id, role_id)}
-    for spec in sorted(runtime.skill_registry.list_specs(), key=lambda x: x.skill_id):
-        enabled = bool(current.get(spec.skill_id).enabled) if spec.skill_id in current else False
+    current = {item.prepost_processing_id: item for item in storage.list_role_prepost_processing(group_id, role_id)}
+    for spec in sorted(runtime.prepost_processing_registry.list_specs(), key=lambda x: x.prepost_processing_id):
+        enabled = bool(current.get(spec.prepost_processing_id).enabled) if spec.prepost_processing_id in current else False
         mark = "ON" if enabled else "OFF"
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"[{mark}] {spec.name} ({spec.skill_id})",
-                    callback_data=f"sktoggle:{group_id}:{role_id}:{spec.skill_id}",
+                    text=f"[{mark}] {spec.name} ({spec.prepost_processing_id})",
+                    callback_data=f"pptoggle:{group_id}:{role_id}:{spec.prepost_processing_id}",
                 )
             ]
         )
@@ -109,11 +111,10 @@ async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: St
         _, group_id_str, role_id_str = data.split(":", 2)
         group_id = int(group_id_str)
         role_id = int(role_id_str)
-        role = storage.get_role_by_id(role_id)
         group_role = storage.get_group_role(group_id, role_id)
         state = f"enabled={'yes' if group_role.enabled else 'no'}, mode={group_role.mode}"
         await query.edit_message_text(
-            f"Роль @{role.role_name} ({state}). Выбери действие:",
+            f"Роль @{_role_public_name(storage, group_id, role_id)} ({state}). Выбери действие:",
             reply_markup=_role_actions_keyboard(
                 group_id,
                 role_id,
@@ -188,9 +189,8 @@ async def _handle_add_role(query: CallbackQuery, data: str, context: ContextType
             "source_group_id": source_group_id,
             "source_role_id": role_id,
         }
-        role = storage.get_role_by_id(role_id)
         await query.edit_message_text(
-            f"Отправь новое имя роли для копии @{role.role_name}.",
+            f"Отправь новое имя роли для копии @{_role_public_name(storage, source_group_id, role_id)}.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"addrole_copy:{target_group_id}")]]
             ),
@@ -241,7 +241,7 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             "group_role toggle_enabled group_id=%s role_id=%s role=%s enabled=%s mode=%s actor_user_id=%s",
             group_id,
             role_id,
-            role.role_name,
+            _role_public_name(storage, group_id, role_id),
             updated.enabled,
             updated.mode,
             query.from_user.id,
@@ -250,7 +250,8 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         if not updated.enabled and updated.mode == "orchestrator":
             note = f"{note} Оркестратор неактивен до повторного включения."
         await query.edit_message_text(
-            f"{note}\n\nРоль @{role.role_name} (enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
+            f"{note}\n\nРоль @{_role_public_name(storage, group_id, role_id)} "
+            f"(enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
             reply_markup=_role_actions_keyboard(
                 group_id,
                 role_id,
@@ -278,17 +279,20 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s previous_orchestrator_role_id=%s",
             group_id,
             role_id,
-            role.role_name,
+            _role_public_name(storage, group_id, role_id),
             updated.mode,
             query.from_user.id,
             previous_orchestrator.role_id if previous_orchestrator else None,
         )
         note = "Роль назначена оркестратором."
         if previous_orchestrator and previous_orchestrator.role_id != role_id:
-            previous_role = storage.get_role_by_id(previous_orchestrator.role_id)
-            note = f"{note}\nПредыдущий оркестратор @{previous_role.role_name} переведен в normal."
+            note = (
+                f"{note}\nПредыдущий оркестратор "
+                f"@{_role_public_name(storage, group_id, previous_orchestrator.role_id)} переведен в normal."
+            )
         await query.edit_message_text(
-            f"{note}\n\nРоль @{role.role_name} (enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
+            f"{note}\n\nРоль @{_role_public_name(storage, group_id, role_id)} "
+            f"(enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
             reply_markup=_role_actions_keyboard(
                 group_id,
                 role_id,
@@ -315,12 +319,13 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s",
             group_id,
             role_id,
-            role.role_name,
+            _role_public_name(storage, group_id, role_id),
             updated.mode,
             query.from_user.id,
         )
         await query.edit_message_text(
-            f"Роль переведена в normal.\n\nРоль @{role.role_name} (enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
+            f"Роль переведена в normal.\n\nРоль @{_role_public_name(storage, group_id, role_id)} "
+            f"(enabled={'yes' if updated.enabled else 'no'}, mode={updated.mode}). Выбери действие:",
             reply_markup=_role_actions_keyboard(
                 group_id,
                 role_id,
@@ -352,11 +357,10 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         )
         await query.answer()
         return True
-    if action == "skills":
-        role = storage.get_role_by_id(role_id)
+    if action == "prepost_processing":
         await query.edit_message_text(
-            f"Навыки для роли @{role.role_name}:",
-            reply_markup=_role_skills_keyboard(runtime, storage, group_id, role_id),
+            f"Pre/Post Processing для роли @{_role_public_name(storage, group_id, role_id)}:",
+            reply_markup=_role_prepost_processing_keyboard(runtime, storage, group_id, role_id),
         )
         await query.answer()
         return True
@@ -379,7 +383,8 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             "role_id": role_id,
         }
         await query.edit_message_text(
-            f"Отправь новое имя для роли @{role.role_name} (латиница, цифры, underscore).",
+            f"Отправь новое имя для роли @{_role_public_name(storage, group_id, role_id)} "
+            "(латиница, цифры, underscore).",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
             ),
@@ -518,7 +523,7 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
                 if field.scope == "role":
                     storage.delete_provider_user_value(provider_id, field.key, role_id)
         await query.edit_message_text(
-            f"Сессия для роли @{role.role_name} в группе {group_id} сброшена.",
+            f"Сессия для роли @{_role_public_name(storage, group_id, role_id)} в группе {group_id} сброшена.",
         )
         await query.answer()
         return True
@@ -527,39 +532,43 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         storage.delete_user_role_session(query.from_user.id, group_id, role_id)
         storage.delete_role_if_unused(role_id)
         await query.edit_message_text(
-            f"Роль @{role.role_name} удалена из группы {group_id}.",
+            f"Роль @{_role_public_name(storage, group_id, role_id)} удалена из группы {group_id}.",
         )
         await query.answer()
         return True
     return False
 
 
-async def _handle_skill_toggle(query: CallbackQuery, data: str, storage: Storage, runtime: RuntimeContext) -> bool:
-    if not data.startswith("sktoggle:"):
+async def _handle_prepost_processing_toggle(
+    query: CallbackQuery,
+    data: str,
+    storage: Storage,
+    runtime: RuntimeContext,
+) -> bool:
+    if not data.startswith("pptoggle:"):
         return False
-    _, group_id_str, role_id_str, skill_id = data.split(":", 3)
+    _, group_id_str, role_id_str, prepost_processing_id = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    if runtime.skill_registry.get(skill_id) is None:
+    if runtime.prepost_processing_registry.get(prepost_processing_id) is None:
         await query.edit_message_text(
-            f"Навык {skill_id} не найден в реестре.",
+            f"Pre/Post Processing {prepost_processing_id} не найден в реестре.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
             ),
         )
         await query.answer()
         return True
-    role = storage.get_role_by_id(role_id)
-    current = storage.get_role_skill(group_id, role_id, skill_id)
+    current = storage.get_role_prepost_processing(group_id, role_id, prepost_processing_id)
     if current is None:
-        storage.upsert_role_skill(group_id, role_id, skill_id, enabled=True, config=None)
-        state_note = f"Навык {skill_id} включен."
+        storage.upsert_role_prepost_processing(group_id, role_id, prepost_processing_id, enabled=True, config=None)
+        state_note = f"Pre/Post Processing {prepost_processing_id} включен."
     else:
-        storage.set_role_skill_enabled(group_id, role_id, skill_id, not current.enabled)
-        state_note = f"Навык {skill_id} {'включен' if not current.enabled else 'выключен'}."
+        storage.set_role_prepost_processing_enabled(group_id, role_id, prepost_processing_id, not current.enabled)
+        state_note = f"Pre/Post Processing {prepost_processing_id} {'включен' if not current.enabled else 'выключен'}."
     await query.edit_message_text(
-        f"{state_note}\n\nНавыки для роли @{role.role_name}:",
-        reply_markup=_role_skills_keyboard(runtime, storage, group_id, role_id),
+        f"{state_note}\n\nPre/Post Processing для роли @{_role_public_name(storage, group_id, role_id)}:",
+        reply_markup=_role_prepost_processing_keyboard(runtime, storage, group_id, role_id),
     )
     await query.answer()
     return True
@@ -623,8 +632,9 @@ async def _handle_add_role_model(query: CallbackQuery, data: str, storage: Stora
     role_name = state["role_name"]
     prompt = state["prompt"]
     if state["mode"] == "create":
+        internal_name = storage.generate_internal_role_name()
         role = storage.upsert_role(
-            role_name=role_name,
+            role_name=internal_name,
             description=f"Роль {role_name}",
             base_system_prompt=prompt,
             extra_instruction="",
@@ -633,8 +643,9 @@ async def _handle_add_role_model(query: CallbackQuery, data: str, storage: Stora
         )
     else:
         source_role = storage.get_role_by_id(state["source_role_id"])
+        internal_name = storage.generate_internal_role_name()
         role = storage.upsert_role(
-            role_name=role_name,
+            role_name=internal_name,
             description=source_role.description,
             base_system_prompt=source_role.base_system_prompt,
             extra_instruction=source_role.extra_instruction,
@@ -642,11 +653,12 @@ async def _handle_add_role_model(query: CallbackQuery, data: str, storage: Stora
             is_active=True,
         )
     storage.ensure_group_role(target_group_id, role.role_id)
+    storage.set_group_role_display_name(target_group_id, role.role_id, role_name)
     if model is not None:
         storage.set_group_role_model(target_group_id, role.role_id, model)
     pending_roles.pop(query.from_user.id, None)
     await query.edit_message_text(
-        f"Роль @{role.role_name} добавлена в группу {target_group_id}.",
+        f"Роль @{_role_public_name(storage, target_group_id, role.role_id)} добавлена в группу {target_group_id}.",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{target_group_id}")]]
         ),
@@ -677,7 +689,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if await _handle_action(query, data, context, storage, runtime):
         return
-    if await _handle_skill_toggle(query, data, storage, runtime):
+    if await _handle_prepost_processing_toggle(query, data, storage, runtime):
         return
     if await _handle_set_model(query, data, storage, runtime):
         return

@@ -27,3 +27,4 @@ config.json
 alfagen.json
 corp-ca.pem
 *.log
+_for_agent_/

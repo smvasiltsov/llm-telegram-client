@@ -1,0 +1,7 @@
+id: template
+version: 0.1.0
+entrypoint: processor:create_processor
+enabled_by_default: false
+timeout_sec: 15
+permissions: []
+description: "Template pre/post processing for local development."

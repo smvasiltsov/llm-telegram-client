@@ -1,0 +1,7 @@
+id: exec-processing
+version: 0.1.0
+entrypoint: processor:create_processor
+enabled_by_default: false
+timeout_sec: 20
+permissions: []
+description: "Safe command execution with whitelist inside configured root directory."

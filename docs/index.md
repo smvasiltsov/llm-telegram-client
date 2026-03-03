@@ -1,6 +1,7 @@
 # Документация
 
 - Обзор архитектуры: `docs/overview.md`
+- Разработка model-callable skills: `docs/skills_dev/README.md`
 - Провайдеры LLM: `docs/providers.md`
 - Шаблон конфига провайдера: `docs/provider_template.md`
 - Плагины: `docs/plugins.md`

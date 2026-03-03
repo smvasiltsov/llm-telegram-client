@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.models import AuthToken, Group, GroupRole, Role, RoleSkill, User, UserRoleSession
+from app.models import AuthToken, Group, GroupRole, Role, RolePrePostProcessing, User, UserRoleSession
 
 
 @dataclass
@@ -177,21 +177,31 @@ class Storage:
         )
         cur.execute(
             """
-            CREATE TABLE IF NOT EXISTS role_skills (
+            CREATE TABLE IF NOT EXISTS role_prepost_processing (
                 group_id INTEGER NOT NULL,
                 role_id INTEGER NOT NULL,
-                skill_id TEXT NOT NULL,
+                prepost_processing_id TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 config_json TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                PRIMARY KEY (group_id, role_id, skill_id),
+                PRIMARY KEY (group_id, role_id, prepost_processing_id),
                 FOREIGN KEY (group_id) REFERENCES groups(group_id),
                 FOREIGN KEY (role_id) REFERENCES roles(role_id)
             )
             """
         )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_role_skills_role ON role_skills(group_id, role_id, enabled)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_role_prepost_processing_role "
+            "ON role_prepost_processing(group_id, role_id, enabled)"
+        )
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_group_roles_unique_display_name
+            ON group_roles(group_id, lower(display_name))
+            WHERE is_active = 1 AND display_name IS NOT NULL AND display_name <> ''
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_user_created ON tool_runs(telegram_user_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_tool_created ON tool_runs(tool_name, created_at)")
         self._conn.commit()
@@ -205,6 +215,7 @@ class Storage:
         self._ensure_column("group_roles", "enabled", "enabled INTEGER NOT NULL DEFAULT 1")
         self._ensure_column("group_roles", "mode", "mode TEXT NOT NULL DEFAULT 'normal'")
         self._migrate_user_role_sessions()
+        self._migrate_role_prepost_processing()
 
     def _migrate_user_role_sessions(self) -> None:
         if not self._table_has_column("user_role_sessions", "group_id"):
@@ -236,6 +247,36 @@ class Storage:
             cur.execute("DROP TABLE user_role_sessions")
             cur.execute("ALTER TABLE user_role_sessions_v2 RENAME TO user_role_sessions")
             self._conn.commit()
+
+    def _migrate_role_prepost_processing(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='role_skills'")
+        if cur.fetchone() is None:
+            pass
+        else:
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO role_prepost_processing
+                    (group_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at)
+                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills
+                """
+            )
+
+        id_renames = {
+            "crud-skill": "crud-processing",
+            "exec-skill": "exec-processing",
+        }
+        for old_id, new_id in id_renames.items():
+            cur.execute(
+                """
+                UPDATE OR IGNORE role_prepost_processing
+                SET prepost_processing_id = ?
+                WHERE prepost_processing_id = ?
+                """,
+                (new_id, old_id),
+            )
+        self._conn.commit()
 
     def save_plugin_text(self, plugin_id: str, text: str) -> str:
         now = _utc_now()
@@ -577,6 +618,12 @@ class Storage:
         cur.execute("SELECT 1 FROM roles WHERE role_name = ?", (role_name,))
         return cur.fetchone() is not None
 
+    def generate_internal_role_name(self, prefix: str = "role") -> str:
+        while True:
+            candidate = f"{prefix}_{secrets.token_hex(6)}"
+            if not self.role_exists(candidate):
+                return candidate
+
     def get_role_by_name(self, role_name: str) -> Role:
         cur = self._conn.cursor()
         cur.execute(
@@ -788,7 +835,15 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT r.role_id, r.role_name, r.description, r.base_system_prompt, r.extra_instruction, r.llm_model, r.is_active
+            SELECT
+                r.role_id,
+                r.role_name,
+                r.description,
+                r.base_system_prompt,
+                r.extra_instruction,
+                r.llm_model,
+                r.is_active,
+                COALESCE(NULLIF(gr.display_name, ''), r.role_name) AS mention_name
             FROM roles r
             JOIN group_roles gr ON gr.role_id = r.role_id
             WHERE gr.group_id = ? AND gr.is_active = 1 AND gr.enabled = 1 AND r.is_active = 1
@@ -806,9 +861,93 @@ class Storage:
                 extra_instruction=row["extra_instruction"],
                 llm_model=row["llm_model"],
                 is_active=bool(row["is_active"]),
+                mention_name=row["mention_name"],
             )
             for row in rows
         ]
+
+    def get_group_role_name(self, group_id: int, role_id: int) -> str:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT COALESCE(NULLIF(gr.display_name, ''), r.role_name) AS name
+            FROM group_roles gr
+            JOIN roles r ON r.role_id = gr.role_id
+            WHERE gr.group_id = ? AND gr.role_id = ?
+            """,
+            (group_id, role_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Group role not found: group_id={group_id} role_id={role_id}")
+        return str(row["name"])
+
+    def get_role_for_group_by_name(self, group_id: int, role_name: str) -> Role:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                r.role_id,
+                r.role_name,
+                r.description,
+                r.base_system_prompt,
+                r.extra_instruction,
+                r.llm_model,
+                r.is_active,
+                COALESCE(NULLIF(gr.display_name, ''), r.role_name) AS mention_name
+            FROM roles r
+            JOIN group_roles gr ON gr.role_id = r.role_id
+            WHERE gr.group_id = ?
+              AND gr.is_active = 1
+              AND lower(COALESCE(NULLIF(gr.display_name, ''), r.role_name)) = lower(?)
+            LIMIT 1
+            """,
+            (group_id, role_name),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Role not found in group: group_id={group_id} role_name={role_name}")
+        return Role(
+            role_id=row["role_id"],
+            role_name=row["role_name"],
+            description=row["description"],
+            base_system_prompt=row["base_system_prompt"],
+            extra_instruction=row["extra_instruction"],
+            llm_model=row["llm_model"],
+            is_active=bool(row["is_active"]),
+            mention_name=row["mention_name"],
+        )
+
+    def group_role_name_exists(self, group_id: int, role_name: str, exclude_role_id: int | None = None) -> bool:
+        cur = self._conn.cursor()
+        if exclude_role_id is None:
+            cur.execute(
+                """
+                SELECT 1
+                FROM group_roles gr
+                JOIN roles r ON r.role_id = gr.role_id
+                WHERE gr.group_id = ?
+                  AND gr.is_active = 1
+                  AND lower(COALESCE(NULLIF(gr.display_name, ''), r.role_name)) = lower(?)
+                LIMIT 1
+                """,
+                (group_id, role_name),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT 1
+                FROM group_roles gr
+                JOIN roles r ON r.role_id = gr.role_id
+                WHERE gr.group_id = ?
+                  AND gr.is_active = 1
+                  AND gr.role_id != ?
+                  AND lower(COALESCE(NULLIF(gr.display_name, ''), r.role_name)) = lower(?)
+                LIMIT 1
+                """,
+                (group_id, exclude_role_id, role_name),
+            )
+        return cur.fetchone() is not None
 
     def update_role_name(self, role_id: int, role_name: str) -> None:
         cur = self._conn.cursor()
@@ -1003,86 +1142,86 @@ class Storage:
         )
         return [row["session_id"] for row in cur.fetchall()]
 
-    def upsert_role_skill(
+    def upsert_role_prepost_processing(
         self,
         group_id: int,
         role_id: int,
-        skill_id: str,
+        prepost_processing_id: str,
         *,
         enabled: bool = True,
         config: dict | None = None,
-    ) -> RoleSkill:
+    ) -> RolePrePostProcessing:
         now = _utc_now()
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
         cur = self._conn.cursor()
         cur.execute(
             """
-            INSERT INTO role_skills (group_id, role_id, skill_id, enabled, config_json, created_at, updated_at)
+            INSERT INTO role_prepost_processing (group_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(group_id, role_id, skill_id) DO UPDATE SET
+            ON CONFLICT(group_id, role_id, prepost_processing_id) DO UPDATE SET
                 enabled=excluded.enabled,
                 config_json=excluded.config_json,
                 updated_at=excluded.updated_at
             """,
-            (group_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
+            (group_id, role_id, prepost_processing_id, 1 if enabled else 0, config_json, now, now),
         )
         self._conn.commit()
-        role_skill = self.get_role_skill(group_id, role_id, skill_id)
-        if role_skill is None:
-            raise RuntimeError("Failed to upsert role skill")
-        return role_skill
+        role_prepost_processing = self.get_role_prepost_processing(group_id, role_id, prepost_processing_id)
+        if role_prepost_processing is None:
+            raise RuntimeError("Failed to upsert role pre/post processing")
+        return role_prepost_processing
 
-    def get_role_skill(self, group_id: int, role_id: int, skill_id: str) -> RoleSkill | None:
+    def get_role_prepost_processing(self, group_id: int, role_id: int, prepost_processing_id: str) -> RolePrePostProcessing | None:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-            FROM role_skills
-            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            SELECT group_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+            FROM role_prepost_processing
+            WHERE group_id = ? AND role_id = ? AND prepost_processing_id = ?
             """,
-            (group_id, role_id, skill_id),
+            (group_id, role_id, prepost_processing_id),
         )
         row = cur.fetchone()
         if not row:
             return None
-        return RoleSkill(
+        return RolePrePostProcessing(
             group_id=row["group_id"],
             role_id=row["role_id"],
-            skill_id=row["skill_id"],
+            prepost_processing_id=row["prepost_processing_id"],
             enabled=bool(row["enabled"]),
             config_json=row["config_json"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
 
-    def list_role_skills(self, group_id: int, role_id: int, *, enabled_only: bool = False) -> list[RoleSkill]:
+    def list_role_prepost_processing(self, group_id: int, role_id: int, *, enabled_only: bool = False) -> list[RolePrePostProcessing]:
         cur = self._conn.cursor()
         if enabled_only:
             cur.execute(
                 """
-                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-                FROM role_skills
+                SELECT group_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                FROM role_prepost_processing
                 WHERE group_id = ? AND role_id = ? AND enabled = 1
-                ORDER BY skill_id
+                ORDER BY prepost_processing_id
                 """,
                 (group_id, role_id),
             )
         else:
             cur.execute(
                 """
-                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-                FROM role_skills
+                SELECT group_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                FROM role_prepost_processing
                 WHERE group_id = ? AND role_id = ?
-                ORDER BY skill_id
+                ORDER BY prepost_processing_id
                 """,
                 (group_id, role_id),
             )
         rows = cur.fetchall()
         return [
-            RoleSkill(
+            RolePrePostProcessing(
                 group_id=row["group_id"],
                 role_id=row["role_id"],
-                skill_id=row["skill_id"],
+                prepost_processing_id=row["prepost_processing_id"],
                 enabled=bool(row["enabled"]),
                 config_json=row["config_json"],
                 created_at=row["created_at"],
@@ -1091,40 +1230,40 @@ class Storage:
             for row in rows
         ]
 
-    def set_role_skill_enabled(self, group_id: int, role_id: int, skill_id: str, enabled: bool) -> None:
+    def set_role_prepost_processing_enabled(self, group_id: int, role_id: int, prepost_processing_id: str, enabled: bool) -> None:
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
             """
-            UPDATE role_skills
+            UPDATE role_prepost_processing
             SET enabled = ?, updated_at = ?
-            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            WHERE group_id = ? AND role_id = ? AND prepost_processing_id = ?
             """,
-            (1 if enabled else 0, now, group_id, role_id, skill_id),
+            (1 if enabled else 0, now, group_id, role_id, prepost_processing_id),
         )
         self._conn.commit()
 
-    def set_role_skill_config(self, group_id: int, role_id: int, skill_id: str, config: dict | None) -> None:
+    def set_role_prepost_processing_config(self, group_id: int, role_id: int, prepost_processing_id: str, config: dict | None) -> None:
         now = _utc_now()
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
         cur = self._conn.cursor()
         cur.execute(
             """
-            UPDATE role_skills
+            UPDATE role_prepost_processing
             SET config_json = ?, updated_at = ?
-            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            WHERE group_id = ? AND role_id = ? AND prepost_processing_id = ?
             """,
-            (config_json, now, group_id, role_id, skill_id),
+            (config_json, now, group_id, role_id, prepost_processing_id),
         )
         self._conn.commit()
 
-    def delete_role_skill(self, group_id: int, role_id: int, skill_id: str) -> None:
+    def delete_role_prepost_processing(self, group_id: int, role_id: int, prepost_processing_id: str) -> None:
         cur = self._conn.cursor()
         cur.execute(
             """
-            DELETE FROM role_skills
-            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            DELETE FROM role_prepost_processing
+            WHERE group_id = ? AND role_id = ? AND prepost_processing_id = ?
             """,
-            (group_id, role_id, skill_id),
+            (group_id, role_id, prepost_processing_id),
         )
         self._conn.commit()

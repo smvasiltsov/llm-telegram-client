@@ -66,7 +66,7 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=f"@{role.role_name} [{status}|{mode}]",
+                    text=f"@{storage.get_group_role_name(group_id, role.role_id)} [{status}|{mode}]",
                     callback_data=f"role:{group_id}:{role.role_id}",
                 )
             ]
@@ -98,10 +98,12 @@ async def handle_role_set_prompt(update: Update, context: ContextTypes.DEFAULT_T
         await update.message.reply_text("Prompt не может быть пустым.")
         return
     storage: Storage = runtime.storage
-    role = storage.get_role_by_name(role_name)
+    role = storage.get_role_for_group_by_name(group_id, role_name)
     storage.ensure_group_role(group_id, role.role_id)
     storage.set_group_role_prompt(group_id, role.role_id, prompt)
-    await update.message.reply_text(f"Промпт роли @{role.role_name} для группы {group_id} обновлён.")
+    await update.message.reply_text(
+        f"Промпт роли @{storage.get_group_role_name(group_id, role.role_id)} для группы {group_id} обновлён."
+    )
 
 
 async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -120,7 +122,7 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
         return
     role_name = context.args[1].lstrip("@")
     storage: Storage = runtime.storage
-    role = storage.get_role_by_name(role_name)
+    role = storage.get_role_for_group_by_name(group_id, role_name)
     storage.delete_user_role_session(update.effective_user.id, group_id, role.role_id)
     provider_registry = runtime.provider_registry
     default_provider_id = runtime.default_provider_id
@@ -133,7 +135,8 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
             if field.scope == "role":
                 storage.delete_provider_user_value(provider_id, field.key, role.role_id)
     await update.message.reply_text(
-        f"Сессия для роли @{role.role_name} в группе {group_id} сброшена. Новый чат будет создан при следующем запросе."
+        f"Сессия для роли @{storage.get_group_role_name(group_id, role.role_id)} в группе {group_id} сброшена. "
+        "Новый чат будет создан при следующем запросе."
     )
 
 

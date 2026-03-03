@@ -7,6 +7,7 @@ from typing import Any
 from app.llm_providers import ProviderConfig
 
 logger = logging.getLogger("bot")
+_EMPTY = object()
 
 
 def provider_id_from_model(
@@ -94,7 +95,53 @@ def build_llm_payload_json_text(
     llm_answer_text: str | None = None,
     llm_answer_role_name: str | None = None,
 ) -> str:
-    payload = {
+    _, compact_payload = build_llm_payload_json(
+        user_text,
+        user_prompt_suffix,
+        user_reply_prefix,
+        reply_text,
+        username=username,
+        recipient=recipient,
+        trigger_type=trigger_type,
+        mentioned_roles=mentioned_roles,
+        system_prompt=system_prompt,
+        llm_answer_text=llm_answer_text,
+        llm_answer_role_name=llm_answer_role_name,
+    )
+    return "INPUT_JSON:\n" + json.dumps(compact_payload, ensure_ascii=False)
+
+
+def _prune_empty(value: Any) -> Any:
+    if value is None or value == "" or value is False:
+        return _EMPTY
+    if isinstance(value, list):
+        items = [item for item in (_prune_empty(item) for item in value) if item is not _EMPTY]
+        return items or _EMPTY
+    if isinstance(value, dict):
+        cleaned = {
+            key: item
+            for key, item in ((key, _prune_empty(item)) for key, item in value.items())
+            if item is not _EMPTY
+        }
+        return cleaned or _EMPTY
+    return value
+
+
+def build_llm_payload_json(
+    user_text: str,
+    user_prompt_suffix: str | None,
+    user_reply_prefix: str | None,
+    reply_text: str | None,
+    *,
+    username: str | None,
+    recipient: str,
+    trigger_type: str,
+    mentioned_roles: list[str] | None = None,
+    system_prompt: str | None = None,
+    llm_answer_text: str | None = None,
+    llm_answer_role_name: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload: dict[str, Any] = {
         "actor": {
             "username": username,
         },
@@ -125,4 +172,7 @@ def build_llm_payload_json_text(
             "available": [],
         },
     }
-    return "INPUT_JSON:\n" + json.dumps(payload, ensure_ascii=False)
+    compact_payload = _prune_empty(payload)
+    if compact_payload is _EMPTY or not isinstance(compact_payload, dict):
+        compact_payload = {}
+    return payload, compact_payload

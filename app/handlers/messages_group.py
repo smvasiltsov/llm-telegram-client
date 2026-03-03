@@ -44,7 +44,14 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
     storage.upsert_group(chat.id, chat.title)
     seed_group_roles(storage, chat.id)
     orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat.id)
-    orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id) if orchestrator_group_role else None
+    roles_for_group = storage.list_roles_for_group(chat.id)
+    orchestrator_role = (
+        next((r for r in roles_for_group if r.role_id == orchestrator_group_role.role_id), None)
+        if orchestrator_group_role
+        else None
+    )
+    if orchestrator_role is None and orchestrator_group_role is not None:
+        orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id)
     if orchestrator_role is not None:
         logger.info(
             "orchestrator active chat_id=%s role=%s role_id=%s",
@@ -70,15 +77,15 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
     elif require_bot_mention:
         should_start = mentioned
     else:
-        roles = storage.list_roles_for_group(chat.id)
+        roles = roles_for_group
         lowered = text.lower()
-        should_start = "@all" in lowered or any(f"@{role.role_name.lower()}" in lowered for role in roles)
+        should_start = "@all" in lowered or any(f"@{role.public_name().lower()}" in lowered for role in roles)
     logger.info(
         "group msg routing require_bot_mention=%s mentioned=%s should_start=%s roles=%s",
         require_bot_mention,
         mentioned,
         should_start,
-        [role.role_name for role in storage.list_roles_for_group(chat.id)],
+        [role.public_name() for role in roles_for_group],
     )
 
     buffer: MessageBuffer = _runtime(context).message_buffer
@@ -121,10 +128,16 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
     owner_user_id = _runtime(context).owner_user_id
     require_bot_mention = _runtime(context).require_bot_mention
     orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
-    orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id) if orchestrator_group_role else None
+    orchestrator_role = (
+        next((r for r in roles if r.role_id == orchestrator_group_role.role_id), None)
+        if orchestrator_group_role
+        else None
+    )
+    if orchestrator_role is None and orchestrator_group_role is not None:
+        orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id)
     if orchestrator_role is not None:
         cleaned = strip_bot_mention(combined_text, bot_username)
-        role_map = {r.role_name.lower(): r for r in roles}
+        role_map = {r.public_name().lower(): r for r in roles}
         is_all = "@all" in cleaned.lower()
         mentioned_names = extract_role_mentions(cleaned, set(role_map.keys()))
         selected_roles: list = []
@@ -148,10 +161,10 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
         logger.info(
             "orchestrator route chat_id=%s orchestrator_role=%s mentioned_roles=%s is_all=%s fanout=%s direct_to_orchestrator=%s",
             chat_id,
-            orchestrator_role.role_name,
+            orchestrator_role.public_name(),
             mentioned_names,
             is_all,
-            [r.role_name for r in selected_roles],
+            [r.public_name() for r in selected_roles],
             should_route_to_orchestrator,
         )
         route = RouteResult(
@@ -176,7 +189,6 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
         return
 
     storage.upsert_user(user_id, None)
-    actor = storage.get_user(user_id)
     auth = storage.get_auth_token(user_id)
     requires_auth = roles_require_auth(
         context=context,
@@ -186,7 +198,7 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
 
     if requires_auth and (not auth or not auth.is_authorized):
         pending: PendingStore = _runtime(context).pending_store
-        role_name = "__all__" if route.is_all else route.roles[0].role_name
+        role_name = "__all__" if route.is_all else route.roles[0].public_name()
         pending.save(
             user_id,
             chat_id,
@@ -209,12 +221,12 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
         roles=route.roles,
         user_text=route.content,
         reply_text=reply_text,
-        actor_username=actor.username if actor else None,
+        actor_username="user",
         reply_to_message_id=reply_to_message_id,
         is_all=route.is_all,
         apply_plugins=True,
         save_pending_on_unauthorized=True,
-        pending_role_name="__all__" if route.is_all else route.roles[0].role_name,
+        pending_role_name="__all__" if route.is_all else route.roles[0].public_name(),
         allow_orchestrator_post_event=True,
         chain_origin="group",
     )

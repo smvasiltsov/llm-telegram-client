@@ -5,8 +5,8 @@ from typing import Any, Protocol
 
 
 @dataclass(frozen=True)
-class SkillSpec:
-    skill_id: str
+class PrePostProcessingSpec:
+    prepost_processing_id: str
     name: str
     version: str
     description: str = ""
@@ -15,7 +15,7 @@ class SkillSpec:
 
 
 @dataclass(frozen=True)
-class SkillContext:
+class PrePostProcessingContext:
     chain_id: str
     chat_id: int
     user_id: int
@@ -24,19 +24,19 @@ class SkillContext:
 
 
 @dataclass(frozen=True)
-class SkillResult:
+class PrePostProcessingResult:
     status: str
     output: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class SkillProtocol(Protocol):
-    def describe(self) -> SkillSpec:
+class PrePostProcessingProtocol(Protocol):
+    def describe(self) -> PrePostProcessingSpec:
         ...
 
     def validate_config(self, config: dict[str, Any]) -> list[str]:
         ...
 
-    def run(self, ctx: SkillContext, payload: dict[str, Any]) -> SkillResult:
+    def run(self, ctx: PrePostProcessingContext, payload: dict[str, Any]) -> PrePostProcessingResult:
         ...

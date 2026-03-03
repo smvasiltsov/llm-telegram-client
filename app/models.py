@@ -20,6 +20,10 @@ class Role:
     extra_instruction: str
     llm_model: str | None
     is_active: bool
+    mention_name: str | None = None
+
+    def public_name(self) -> str:
+        return self.mention_name or self.role_name
 
 
 @dataclass
@@ -64,10 +68,10 @@ class AuthToken:
 
 
 @dataclass
-class RoleSkill:
+class RolePrePostProcessing:
     group_id: int
     role_id: int
-    skill_id: str
+    prepost_processing_id: str
     enabled: bool
     config_json: str | None
     created_at: str

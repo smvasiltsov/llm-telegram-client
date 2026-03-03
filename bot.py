@@ -9,6 +9,7 @@ from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChat
 
 from app.app_factory import build_application, build_services
 from app.config import load_config, load_dotenv
+from app.services.group_reconcile import reconcile_active_groups
 
 
 logging.basicConfig(
@@ -39,6 +40,7 @@ async def main() -> None:
 
     try:
         await application.initialize()
+        await reconcile_active_groups(application.bot, runtime.storage)
         owner_commands = [
             BotCommand("groups", "Список групп и выбор"),
             BotCommand("tools", "Список инструментов"),

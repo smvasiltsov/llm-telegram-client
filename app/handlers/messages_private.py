@@ -217,27 +217,23 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 await update.message.reply_text("Имя роли должно быть латиницей, цифрами или _. Попробуй еще раз.")
                 return
             role_name = role_name.lower()
-            if storage.role_exists(role_name):
-                if state.get("mode") == "rename":
-                    current_role = storage.get_role_by_id(state["role_id"])
-                    if role_name != current_role.role_name:
-                        await update.message.reply_text("Роль с таким именем уже существует. Укажи другое имя.")
-                        return
-                else:
-                    await update.message.reply_text("Роль с таким именем уже существует. Укажи другое имя.")
-                    return
+            target_group_id = int(state["target_group_id"])
+            exclude_role_id = int(state["role_id"]) if state.get("mode") == "rename" else None
+            if storage.group_role_name_exists(target_group_id, role_name, exclude_role_id=exclude_role_id):
+                await update.message.reply_text("Роль с таким именем уже существует в этой группе. Укажи другое имя.")
+                return
             state["role_name"] = role_name
             if state["mode"] == "rename":
-                storage.update_role_name(state["role_id"], role_name)
+                storage.set_group_role_display_name(target_group_id, state["role_id"], role_name)
                 pending_roles.pop(user.id, None)
                 await update.message.reply_text(f"Роль переименована в @{role_name}.")
                 return
             if state["mode"] == "clone":
                 source_role = storage.get_role_by_id(state["source_role_id"])
                 source_group_role = storage.get_group_role(state["source_group_id"], source_role.role_id)
-                target_group_id = state["target_group_id"]
+                internal_name = storage.generate_internal_role_name()
                 role = storage.upsert_role(
-                    role_name=role_name,
+                    role_name=internal_name,
                     description=source_role.description,
                     base_system_prompt=source_role.base_system_prompt,
                     extra_instruction=source_role.extra_instruction,
@@ -245,6 +241,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     is_active=True,
                 )
                 storage.ensure_group_role(target_group_id, role.role_id)
+                storage.set_group_role_display_name(target_group_id, role.role_id, role_name)
                 storage.set_group_role_prompt(
                     target_group_id,
                     role.role_id,
@@ -267,7 +264,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 )
                 pending_roles.pop(user.id, None)
                 await update.message.reply_text(
-                    f"Роль @{role.role_name} добавлена в группу {target_group_id}."
+                    f"Роль @{storage.get_group_role_name(target_group_id, role.role_id)} "
+                    f"добавлена в группу {target_group_id}."
                 )
                 return
             state["prompt"] = ""
@@ -302,9 +300,9 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 suffix = None
             storage.set_group_role_user_prompt_suffix(state["target_group_id"], state["role_id"], suffix)
             pending_roles.pop(user.id, None)
-            role = storage.get_role_by_id(state["role_id"])
             await update.message.reply_text(
-                f"Инструкция к сообщениям для @{role.role_name} обновлена."
+                f"Инструкция к сообщениям для "
+                f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
             )
             return
         if state["step"] == "reply_prefix":
@@ -313,9 +311,9 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 reply_prefix = None
             storage.set_group_role_user_reply_prefix(state["target_group_id"], state["role_id"], reply_prefix)
             pending_roles.pop(user.id, None)
-            role = storage.get_role_by_id(state["role_id"])
             await update.message.reply_text(
-                f"Инструкция для реплаев для @{role.role_name} обновлена."
+                f"Инструкция для реплаев для "
+                f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
             )
             return
 
@@ -336,7 +334,10 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     if role_name == "__all__":
         target_roles = roles_for_group
     else:
-        target_roles = [role for role in roles_for_group if role.role_name == role_name]
+        target_roles = [role for role in roles_for_group if role.public_name() == role_name]
+        if not target_roles:
+            # Backward compatibility: pending rows may contain internal role_name.
+            target_roles = [role for role in roles_for_group if role.role_name == role_name]
     if not target_roles:
         return
 
@@ -393,10 +394,9 @@ async def _process_pending_private_text(
         is_clear = raw_prompt.lower() in {"clear", "skip"}
         prompt = "" if is_clear else raw_prompt
         storage.set_group_role_prompt(group_id, role_id, prompt)
-        role = storage.get_role_by_id(role_id)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"Промпт роли @{role.role_name} для группы {group_id} обновлён.",
+            text=f"Промпт роли @{storage.get_group_role_name(group_id, role_id)} для группы {group_id} обновлён.",
         )
         return True
 
@@ -411,10 +411,12 @@ async def _process_pending_private_text(
                 suffix = None
             storage.set_group_role_user_prompt_suffix(state["target_group_id"], state["role_id"], suffix)
             pending_roles.pop(user_id, None)
-            role = storage.get_role_by_id(state["role_id"])
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Инструкция к сообщениям для @{role.role_name} обновлена.",
+                text=(
+                    f"Инструкция к сообщениям для "
+                    f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
+                ),
             )
             return True
         if state["step"] == "reply_prefix":
@@ -426,10 +428,12 @@ async def _process_pending_private_text(
                 reply_prefix = None
             storage.set_group_role_user_reply_prefix(state["target_group_id"], state["role_id"], reply_prefix)
             pending_roles.pop(user_id, None)
-            role = storage.get_role_by_id(state["role_id"])
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=f"Инструкция для реплаев для @{role.role_name} обновлена.",
+                text=(
+                    f"Инструкция для реплаев для "
+                    f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
+                ),
             )
             return True
 
@@ -445,12 +449,14 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     original_pending_msg = pending_msg
     chat_id, message_id, role_name, content, reply_text = pending_msg
     storage: Storage = _runtime(context).storage
-    actor = storage.get_user(user_id)
     roles = storage.list_roles_for_group(chat_id)
     if role_name == "__all__":
         target_roles = roles
     else:
-        role = next((r for r in roles if r.role_name == role_name), None)
+        role = next((r for r in roles if r.public_name() == role_name), None)
+        if role is None:
+            # Backward compatibility: pending rows may contain internal role_name.
+            role = next((r for r in roles if r.role_name == role_name), None)
         if not role:
             logger.info("pending role not found user_id=%s role_name=%s", user_id, role_name)
             return False
@@ -476,7 +482,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
         roles=target_roles,
         user_text=content,
         reply_text=reply_text,
-        actor_username=actor.username if actor else None,
+        actor_username="user",
         reply_to_message_id=message_id,
         is_all=role_name == "__all__",
         apply_plugins=False,

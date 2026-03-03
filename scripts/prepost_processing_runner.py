@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.mcp.registry import SkillRegistry
-from app.mcp.skills_contract import SkillContext
+from app.prepost_processing.registry import PrePostProcessingRegistry
+from prepost_processing_sdk.contract import PrePostProcessingContext
 
 
 def _load_json_arg(raw: str | None) -> dict:
@@ -41,29 +41,39 @@ def _load_json_file(path: str | None) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run local skill with mock context/payload.")
-    parser.add_argument("--skills-dir", default="skills", help="Path to skills directory.")
-    parser.add_argument("--skill-id", required=True, help="Skill id from skill.yaml.")
+    parser = argparse.ArgumentParser(description="Run local pre/post processing with mock context/payload.")
+    parser.add_argument(
+        "--prepost-processing-dir",
+        dest="prepost_processing_dir",
+        default="prepost_processing",
+        help="Path to pre/post processing directory.",
+    )
+    parser.add_argument(
+        "--prepost-processing-id",
+        dest="prepost_processing_id",
+        required=True,
+        help="Pre/post processing id from processor.yaml.",
+    )
     parser.add_argument("--phase", choices=["pre", "post"], default="pre", help="Execution phase.")
     parser.add_argument("--payload-json", default=None, help="Inline JSON object for input data.")
     parser.add_argument("--payload-file", default=None, help="Path to JSON file for input data.")
-    parser.add_argument("--config-json", default=None, help="Inline JSON object for skill config.")
-    parser.add_argument("--config-file", default=None, help="Path to JSON file for skill config.")
+    parser.add_argument("--config-json", default=None, help="Inline JSON object for pre/post processing config.")
+    parser.add_argument("--config-file", default=None, help="Path to JSON file for pre/post processing config.")
     parser.add_argument("--chat-id", type=int, default=-1)
     parser.add_argument("--user-id", type=int, default=1)
     parser.add_argument("--role-id", type=int, default=1)
     parser.add_argument("--role-name", default="dev")
     args = parser.parse_args()
 
-    registry = SkillRegistry()
-    registry.discover(args.skills_dir)
-    record = registry.get(args.skill_id)
+    registry = PrePostProcessingRegistry()
+    registry.discover(args.prepost_processing_dir)
+    record = registry.get(args.prepost_processing_id)
     if record is None:
         print(
             json.dumps(
                 {
-                    "error": f"Skill '{args.skill_id}' not found",
-                    "available": [spec.skill_id for spec in registry.list_specs()],
+                    "error": f"Pre/post processing '{args.prepost_processing_id}' not found",
+                    "available": [spec.prepost_processing_id for spec in registry.list_specs()],
                 },
                 ensure_ascii=False,
             )
@@ -83,7 +93,7 @@ def main() -> int:
         print(json.dumps({"status": "invalid_config", "errors": config_errors}, ensure_ascii=False, indent=2))
         return 3
 
-    ctx = SkillContext(
+    ctx = PrePostProcessingContext(
         chain_id=uuid4().hex[:8],
         chat_id=args.chat_id,
         user_id=args.user_id,
@@ -99,7 +109,7 @@ def main() -> int:
     print(
         json.dumps(
             {
-                "skill_id": record.spec.skill_id,
+                "prepost_processing_id": record.spec.prepost_processing_id,
                 "phase": args.phase,
                 "result": {
                     "status": result.status,

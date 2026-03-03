@@ -8,8 +8,8 @@ from pathlib import Path
 from app.storage import Storage
 
 
-class StorageRoleSkillsTests(unittest.TestCase):
-    def test_role_skills_crud(self) -> None:
+class StorageRolePrePostProcessingsTests(unittest.TestCase):
+    def test_role_prepost_processing_crud(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             db_path = Path(td) / "test.sqlite3"
             storage = Storage(db_path)
@@ -25,32 +25,32 @@ class StorageRoleSkillsTests(unittest.TestCase):
             )
             storage.ensure_group_role(group.group_id, role.role_id)
 
-            rs = storage.upsert_role_skill(
+            rs = storage.upsert_role_prepost_processing(
                 group.group_id,
                 role.role_id,
                 "echo",
                 enabled=True,
                 config={"a": 1},
             )
-            self.assertEqual(rs.skill_id, "echo")
+            self.assertEqual(rs.prepost_processing_id, "echo")
             self.assertTrue(rs.enabled)
             self.assertEqual(json.loads(rs.config_json or "{}"), {"a": 1})
 
-            listed_all = storage.list_role_skills(group.group_id, role.role_id)
-            self.assertEqual([x.skill_id for x in listed_all], ["echo"])
+            listed_all = storage.list_role_prepost_processing(group.group_id, role.role_id)
+            self.assertEqual([x.prepost_processing_id for x in listed_all], ["echo"])
 
-            storage.set_role_skill_enabled(group.group_id, role.role_id, "echo", False)
-            listed_enabled = storage.list_role_skills(group.group_id, role.role_id, enabled_only=True)
+            storage.set_role_prepost_processing_enabled(group.group_id, role.role_id, "echo", False)
+            listed_enabled = storage.list_role_prepost_processing(group.group_id, role.role_id, enabled_only=True)
             self.assertEqual(listed_enabled, [])
 
-            storage.set_role_skill_config(group.group_id, role.role_id, "echo", {"b": 2})
-            got = storage.get_role_skill(group.group_id, role.role_id, "echo")
+            storage.set_role_prepost_processing_config(group.group_id, role.role_id, "echo", {"b": 2})
+            got = storage.get_role_prepost_processing(group.group_id, role.role_id, "echo")
             self.assertIsNotNone(got)
             assert got is not None
             self.assertEqual(json.loads(got.config_json or "{}"), {"b": 2})
 
-            storage.delete_role_skill(group.group_id, role.role_id, "echo")
-            self.assertIsNone(storage.get_role_skill(group.group_id, role.role_id, "echo"))
+            storage.delete_role_prepost_processing(group.group_id, role.role_id, "echo")
+            self.assertIsNone(storage.get_role_prepost_processing(group.group_id, role.role_id, "echo"))
 
 
 if __name__ == "__main__":

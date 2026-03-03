@@ -29,7 +29,7 @@ def route_message(
         return None
 
     roles_list = list(roles)
-    role_map = {role.role_name.lower(): role for role in roles_list}
+    role_map = {role.public_name().lower(): role for role in roles_list}
     cleaned = strip_bot_mention(text, bot_username)
 
     is_all = "@all" in cleaned.lower()
@@ -39,8 +39,9 @@ def route_message(
 
     mentioned = extract_role_mentions(cleaned, set(role_map.keys()))
     if mentioned:
-        role = role_map[mentioned[0].lower()]
-        cleaned = cleaned.replace(f"@{role.role_name}", "", 1).strip()
+        mention = mentioned[0]
+        role = role_map[mention.lower()]
+        cleaned = cleaned.replace(f"@{mention}", "", 1).strip()
         return RouteResult(roles=[role], content=cleaned, is_all=False)
 
     # No explicit role -> no route

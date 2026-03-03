@@ -18,14 +18,14 @@ from app.handlers.messages_common import (
     _request_token_for_user,
     _runtime,
 )
-from app.mcp.skills_contract import SkillContext, SkillResult
 from app.llm_executor import LLMExecutor
 from app.llm_router import MissingUserField
 from app.models import GroupRole, Role
+from prepost_processing_sdk.contract import PrePostProcessingContext, PrePostProcessingResult
 from app.services.orchestrator_response import parse_orchestrator_response
 from app.services.formatting import format_with_header, format_with_header_raw, render_llm_text, send_formatted_with_fallback
 from app.services.plugin_pipeline import build_plugin_reply_markup
-from app.services.prompt_builder import build_llm_payload_json_text, resolve_provider_model, role_requires_auth
+from app.services.prompt_builder import build_llm_payload_json, resolve_provider_model, role_requires_auth
 from app.session_resolver import SessionResolver
 from app.storage import Storage
 from app.utils import extract_role_mentions, split_message
@@ -35,10 +35,10 @@ DelegationKey = tuple[int, int, str]
 logger = logging.getLogger("bot")
 DEFAULT_ORCHESTRATOR_MAX_CHAIN_AUTO_STEPS = 30
 MAX_SAME_DELEGATION_REPEATS = 3
-DEFAULT_SKILL_TIMEOUT_SEC = 30
-MAX_SKILL_TIMEOUT_SEC = 120
-MAX_SKILL_OUTPUT_CHARS = 12000
-ALLOWED_SKILL_PERMISSIONS = frozenset(
+DEFAULT_PREPOST_PROCESSING_TIMEOUT_SEC = 30
+MAX_PREPOST_PROCESSING_TIMEOUT_SEC = 120
+MAX_PREPOST_PROCESSING_OUTPUT_CHARS = 12000
+ALLOWED_PREPOST_PROCESSING_PERMISSIONS = frozenset(
     {
         "read_context",
         "transform_prompt",
@@ -49,6 +49,10 @@ ALLOWED_SKILL_PERMISSIONS = frozenset(
 
 def normalize_delegation_text(text: str) -> str:
     return " ".join(text.lower().split())
+
+
+def role_public_name(role: Role) -> str:
+    return role.public_name()
 
 
 @dataclass(frozen=True)
@@ -153,7 +157,7 @@ def roles_require_auth(
     return False
 
 
-async def _run_role_skills_phase(
+async def _run_role_prepost_processing_phase(
     *,
     context: ContextTypes.DEFAULT_TYPE,
     chat_id: int,
@@ -165,20 +169,20 @@ async def _run_role_skills_phase(
 ) -> dict[str, object]:
     runtime = _runtime(context)
     storage: Storage = runtime.storage
-    registry = runtime.skill_registry
-    role_skills = storage.list_role_skills(chat_id, role.role_id, enabled_only=True)
-    if not role_skills:
+    registry = runtime.prepost_processing_registry
+    role_prepost_processing = storage.list_role_prepost_processing(chat_id, role.role_id, enabled_only=True)
+    if not role_prepost_processing:
         return payload
 
     current = dict(payload)
-    for role_skill in role_skills:
-        record = registry.get(role_skill.skill_id)
+    for role_prepost_processing in role_prepost_processing:
+        record = registry.get(role_prepost_processing.prepost_processing_id)
         if record is None:
             logger.info(
-                "skill skip: not discovered group_id=%s role=%s skill_id=%s phase=%s",
+                "pre/post processing skip: not discovered group_id=%s role=%s prepost_processing_id=%s phase=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 phase,
             )
             continue
@@ -187,52 +191,52 @@ async def _run_role_skills_phase(
             declared_permissions = tuple(str(item).strip() for item in manifest_permissions if str(item).strip())
         else:
             declared_permissions = tuple(record.spec.permissions)
-        denied_permissions = [perm for perm in declared_permissions if perm not in ALLOWED_SKILL_PERMISSIONS]
+        denied_permissions = [perm for perm in declared_permissions if perm not in ALLOWED_PREPOST_PROCESSING_PERMISSIONS]
         if denied_permissions:
             logger.info(
-                "skill skip: unsupported permissions group_id=%s role=%s skill_id=%s phase=%s denied=%s",
+                "pre/post processing skip: unsupported permissions group_id=%s role=%s prepost_processing_id=%s phase=%s denied=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 phase,
                 denied_permissions,
             )
             continue
 
         config: dict[str, object] = {}
-        if role_skill.config_json:
+        if role_prepost_processing.config_json:
             try:
-                loaded = json.loads(role_skill.config_json)
+                loaded = json.loads(role_prepost_processing.config_json)
                 if isinstance(loaded, dict):
                     config = loaded
             except Exception:
                 logger.exception(
-                    "skill config parse failed group_id=%s role=%s skill_id=%s",
+                    "pre/post processing config parse failed group_id=%s role=%s prepost_processing_id=%s",
                     chat_id,
                     role.role_name,
-                    role_skill.skill_id,
+                    role_prepost_processing.prepost_processing_id,
                 )
                 continue
 
         errors = record.instance.validate_config(config)
         if errors:
             logger.info(
-                "skill skip: invalid config group_id=%s role=%s skill_id=%s errors=%s",
+                "pre/post processing skip: invalid config group_id=%s role=%s prepost_processing_id=%s errors=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 errors,
             )
             continue
 
-        skill_ctx = SkillContext(
+        processing_ctx = PrePostProcessingContext(
             chain_id=chain_id,
             chat_id=chat_id,
             user_id=user_id,
             role_id=role.role_id,
             role_name=role.role_name,
         )
-        skill_input = {
+        processing_input = {
             "phase": phase,
             "config": config,
             "data": dict(current),
@@ -241,39 +245,39 @@ async def _run_role_skills_phase(
         try:
             timeout_sec = int(timeout_sec)
         except Exception:
-            timeout_sec = DEFAULT_SKILL_TIMEOUT_SEC
-        timeout_sec = min(MAX_SKILL_TIMEOUT_SEC, max(1, timeout_sec))
+            timeout_sec = DEFAULT_PREPOST_PROCESSING_TIMEOUT_SEC
+        timeout_sec = min(MAX_PREPOST_PROCESSING_TIMEOUT_SEC, max(1, timeout_sec))
         try:
-            result: SkillResult = await asyncio.wait_for(
-                asyncio.to_thread(record.instance.run, skill_ctx, skill_input),
+            result: PrePostProcessingResult = await asyncio.wait_for(
+                asyncio.to_thread(record.instance.run, processing_ctx, processing_input),
                 timeout=timeout_sec,
             )
         except asyncio.TimeoutError:
             logger.info(
-                "skill timeout group_id=%s role=%s skill_id=%s phase=%s timeout_sec=%s",
+                "pre/post processing timeout group_id=%s role=%s prepost_processing_id=%s phase=%s timeout_sec=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 phase,
                 timeout_sec,
             )
             continue
         except Exception:
             logger.exception(
-                "skill failed group_id=%s role=%s skill_id=%s phase=%s",
+                "pre/post processing failed group_id=%s role=%s prepost_processing_id=%s phase=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 phase,
             )
             continue
 
         if result.status != "ok":
             logger.info(
-                "skill skipped status group_id=%s role=%s skill_id=%s phase=%s status=%s",
+                "pre/post processing skipped status group_id=%s role=%s prepost_processing_id=%s phase=%s status=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 phase,
                 result.status,
             )
@@ -281,12 +285,12 @@ async def _run_role_skills_phase(
 
         output = result.output if isinstance(result.output, dict) else {}
         output_chars = len(json.dumps(output, ensure_ascii=False, default=str))
-        if output_chars > MAX_SKILL_OUTPUT_CHARS:
+        if output_chars > MAX_PREPOST_PROCESSING_OUTPUT_CHARS:
             logger.info(
-                "skill skip: output too large group_id=%s role=%s skill_id=%s phase=%s chars=%s",
+                "pre/post processing skip: output too large group_id=%s role=%s prepost_processing_id=%s phase=%s chars=%s",
                 chat_id,
                 role.role_name,
-                role_skill.skill_id,
+                role_prepost_processing.prepost_processing_id,
                 phase,
                 output_chars,
             )
@@ -301,10 +305,10 @@ async def _run_role_skills_phase(
                 current["response_text"] = output["response_text"]
 
         logger.info(
-            "skill ok group_id=%s role=%s skill_id=%s phase=%s",
+            "pre/post processing ok group_id=%s role=%s prepost_processing_id=%s phase=%s",
             chat_id,
             role.role_name,
-            role_skill.skill_id,
+            role_prepost_processing.prepost_processing_id,
             phase,
         )
     return current
@@ -352,7 +356,7 @@ async def execute_role_request(
     base_prompt = group_role.system_prompt_override if group_role.system_prompt_override is not None else role.base_system_prompt
     system_prompt = f"{(base_prompt or '').strip()}\n\n{(role.extra_instruction or '').strip()}".strip() or None
     skill_chain_id = uuid4().hex[:8]
-    pre_data = await _run_role_skills_phase(
+    pre_data = await _run_role_prepost_processing_phase(
         context=context,
         chat_id=chat_id,
         user_id=user_id,
@@ -369,7 +373,7 @@ async def execute_role_request(
     if not (isinstance(effective_reply_text, str) or effective_reply_text is None):
         effective_reply_text = reply_text
 
-    content = build_llm_payload_json_text(
+    full_payload, compact_payload = build_llm_payload_json(
         effective_user_text,
         group_role.user_prompt_suffix,
         group_role.user_reply_prefix,
@@ -382,14 +386,24 @@ async def execute_role_request(
         llm_answer_text=llm_answer_text,
         llm_answer_role_name=llm_answer_role_name,
     )
+    content = "INPUT_JSON:\n" + json.dumps(compact_payload, ensure_ascii=False)
     logger.info(
-        "llm payload built chat_id=%s user_id=%s role=%s mode=%s payload_chars=%s trigger=%s",
+        "llm payload full chat_id=%s user_id=%s role=%s mode=%s payload=%s",
+        chat_id,
+        user_id,
+        role.role_name,
+        group_role.mode,
+        json.dumps(full_payload, ensure_ascii=False),
+    )
+    logger.info(
+        "llm payload built chat_id=%s user_id=%s role=%s mode=%s payload_chars=%s trigger=%s pruned_payload=%s",
         chat_id,
         user_id,
         role.role_name,
         group_role.mode,
         len(content),
         trigger_type,
+        json.dumps(compact_payload, ensure_ascii=False),
     )
 
     session_id = await resolver.resolve(
@@ -424,7 +438,7 @@ async def execute_role_request(
             raise
         response_text = recovery.response_text
 
-    post_data = await _run_role_skills_phase(
+    post_data = await _run_role_prepost_processing_phase(
         context=context,
         chat_id=chat_id,
         user_id=user_id,
@@ -461,8 +475,9 @@ async def send_role_response(
     apply_plugins: bool,
 ) -> str:
     runtime = _runtime(context)
+    role_name = role_public_name(role)
     if not apply_plugins:
-        full_text = format_with_header(role.role_name, response_text)
+        full_text = format_with_header(role_name, response_text)
         for chunk in split_message(full_text):
             await context.bot.send_message(
                 chat_id=chat_id,
@@ -486,7 +501,7 @@ async def send_role_response(
     logger.info(
         "plugin pre buffered user_id=%s role=%s provider=%s text_len=%s",
         user_id,
-        role.role_name,
+        role_name,
         llm_executor.provider_id_for_model(model_override),
         len(response_text),
     )
@@ -494,7 +509,7 @@ async def send_role_response(
         "chat_id": chat_id,
         "user_id": user_id,
         "role_id": role.role_id,
-        "role_name": role.role_name,
+        "role_name": role_name,
         "provider_id": llm_executor.provider_id_for_model(model_override),
         "model_id": model_override,
         "store_text": storage.save_plugin_text,
@@ -505,7 +520,7 @@ async def send_role_response(
     logger.info(
         "plugin post buffered user_id=%s role=%s text_len=%s reply_markup=%s",
         user_id,
-        role.role_name,
+        role_name,
         len(response_text),
         bool(reply_markup),
     )
@@ -513,10 +528,10 @@ async def send_role_response(
         reply_markup,
         is_private=chat_id > 0,
         logger=logger,
-        log_ctx={"user_id": user_id, "role": role.role_name},
+        log_ctx={"user_id": user_id, "role": role_name},
     )
     rendered = render_llm_text(response_text, formatting_mode, allow_raw_html)
-    full_text = format_with_header_raw(role.role_name, rendered)
+    full_text = format_with_header_raw(role_name, rendered)
     for idx, chunk in enumerate(split_message(full_text)):
         await send_formatted_with_fallback(
             context.bot,
@@ -621,7 +636,7 @@ def extract_delegation_targets(
     available_roles: list[Role],
     source_role: Role,
 ) -> tuple[list[Role], str]:
-    role_map = {role.role_name.lower(): role for role in available_roles}
+    role_map = {role_public_name(role).lower(): role for role in available_roles}
     mention_names = extract_role_mentions(source_response_text, set(role_map.keys()))
     targets: list[Role] = []
     seen_ids: set[int] = set()
@@ -655,7 +670,7 @@ async def dispatch_mentions(
         logger.info(
             "delegation skip: hop limit reached chain_id=%s source_role=%s hop=%s",
             chain_context.chain_id,
-            source_role.role_name,
+            role_public_name(source_role),
             chain_context.hop,
         )
         return
@@ -663,9 +678,14 @@ async def dispatch_mentions(
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
-    orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id) if orchestrator_group_role else None
-
     available_roles = storage.list_roles_for_group(chat_id)
+    orchestrator_role = (
+        next((r for r in available_roles if r.role_id == orchestrator_group_role.role_id), None)
+        if orchestrator_group_role
+        else None
+    )
+    if orchestrator_role is None and orchestrator_group_role is not None:
+        orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id)
     targets, delegated_text = extract_delegation_targets(
         source_response_text=source_response_text,
         available_roles=available_roles,
@@ -675,7 +695,7 @@ async def dispatch_mentions(
         logger.info(
             "delegation none chain_id=%s source_role=%s hop=%s",
             chain_context.chain_id,
-            source_role.role_name,
+            role_public_name(source_role),
             chain_context.hop,
         )
         return
@@ -683,16 +703,16 @@ async def dispatch_mentions(
         logger.info(
             "delegation skip: empty text chain_id=%s source_role=%s targets=%s",
             chain_context.chain_id,
-            source_role.role_name,
-            [r.role_name for r in targets],
+            role_public_name(source_role),
+            [role_public_name(r) for r in targets],
         )
         return
     logger.info(
         "delegation detected chain_id=%s source_role=%s hop=%s targets=%s",
         chain_context.chain_id,
-        source_role.role_name,
+        role_public_name(source_role),
         chain_context.hop,
-        [r.role_name for r in targets],
+        [role_public_name(r) for r in targets],
     )
 
     for target in targets:
@@ -702,8 +722,8 @@ async def dispatch_mentions(
             logger.info(
                 "delegation skip: same text repeat limit chain_id=%s source_role=%s target_role=%s hop=%s repeats=%s",
                 chain_context.chain_id,
-                source_role.role_name,
-                target.role_name,
+                role_public_name(source_role),
+                role_public_name(target),
                 chain_context.hop,
                 same_count + 1,
             )
@@ -713,16 +733,16 @@ async def dispatch_mentions(
             logger.info(
                 "delegation skip: target is orchestrator chain_id=%s source_role=%s target_role=%s",
                 chain_context.chain_id,
-                source_role.role_name,
-                target.role_name,
+                role_public_name(source_role),
+                role_public_name(target),
             )
             continue
         try:
             logger.info(
                 "delegation sent chain_id=%s source_role=%s target_role=%s hop=%s",
                 chain_context.chain_id,
-                source_role.role_name,
-                target.role_name,
+                role_public_name(source_role),
+                role_public_name(target),
                 chain_context.hop,
             )
             result = await execute_role_request(
@@ -733,10 +753,10 @@ async def dispatch_mentions(
                 session_token=session_token,
                 user_text=delegated_text,
                 reply_text=None,
-                actor_username=source_role.role_name,
+                actor_username=role_public_name(source_role),
                 trigger_type="mention_role",
-                mentioned_roles=[target.role_name],
-                recipient=target.role_name,
+                mentioned_roles=[role_public_name(target)],
+                recipient=role_public_name(target),
             )
             response_text = result.response_text
             if result.group_role.mode == "orchestrator":
@@ -760,12 +780,12 @@ async def dispatch_mentions(
                     chat_id=chat_id,
                     user_id=user_id,
                     reply_to_message_id=chain_context.reply_to_message_id,
-                    actor_username=target.role_name,
+                    actor_username=role_public_name(target),
                     session_token=session_token,
                     orchestrator_role=orchestrator_role,
                     original_user_text=delegated_text,
                     original_reply_text=None,
-                    answered_role_name=target.role_name,
+                    answered_role_name=role_public_name(target),
                     role_answer_text=response_text,
                     chain_context=next_context,
                     dispatch_mentions_fn=dispatch_mentions,
@@ -784,7 +804,7 @@ async def dispatch_mentions(
                 user_id=user_id,
                 chat_id=chat_id,
                 message_id=chain_context.reply_to_message_id,
-                role_name=target.role_name,
+                role_name=role_public_name(target),
                 content=delegated_text,
                 reply_text=None,
                 exc=exc,
@@ -799,8 +819,8 @@ async def dispatch_mentions(
             logger.exception(
                 "delegation failed chain_id=%s source_role=%s target_role=%s hop=%s",
                 chain_context.chain_id,
-                source_role.role_name,
-                target.role_name,
+                role_public_name(source_role),
+                role_public_name(target),
                 chain_context.hop,
             )
 
@@ -828,7 +848,14 @@ async def run_chain(
     storage: Storage = runtime.storage
     pending_store = runtime.pending_store
     orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
-    orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id) if orchestrator_group_role else None
+    roles_for_group = storage.list_roles_for_group(chat_id)
+    orchestrator_role = (
+        next((r for r in roles_for_group if r.role_id == orchestrator_group_role.role_id), None)
+        if orchestrator_group_role
+        else None
+    )
+    if orchestrator_role is None and orchestrator_group_role is not None:
+        orchestrator_role = storage.get_role_by_id(orchestrator_group_role.role_id)
 
     had_error = False
     completed_roles = 0
@@ -837,10 +864,10 @@ async def run_chain(
             group_role = storage.get_group_role(chat_id, role.role_id)
             if group_role.mode == "orchestrator":
                 trigger_type = trigger_type_orchestrator
-                mentioned_roles = [r.role_name for r in roles if r.role_id != role.role_id]
+                mentioned_roles = [role_public_name(r) for r in roles if r.role_id != role.role_id]
             else:
                 trigger_type = "mention_all" if is_all else "mention_role"
-                mentioned_roles = [r.role_name for r in roles] if is_all else [role.role_name]
+                mentioned_roles = [role_public_name(r) for r in roles] if is_all else [role_public_name(role)]
             result = await execute_role_request(
                 context=context,
                 chat_id=chat_id,
@@ -852,7 +879,7 @@ async def run_chain(
                 actor_username=actor_username,
                 trigger_type=trigger_type,
                 mentioned_roles=mentioned_roles,
-                recipient=role.role_name if group_role.mode != "orchestrator" else "orchestrator",
+                recipient=role_public_name(role) if group_role.mode != "orchestrator" else "orchestrator",
             )
             group_role = result.group_role
             model_override = result.model_override
@@ -861,14 +888,14 @@ async def run_chain(
                 await context.bot.send_message(
                     chat_id=chat_id,
                     text=(
-                        f"Обновил session_id для роли @{role.role_name}: "
+                        f"Обновил session_id для роли @{role_public_name(role)}: "
                         f"{result.recovery.old_session_id} -> {result.recovery.new_session_id}"
                     ),
                     reply_to_message_id=reply_to_message_id,
                 )
                 logger.info(
                     "Recovered stale session role=%s old_session_id=%s new_session_id=%s",
-                    role.role_name,
+                    role_public_name(role),
                     result.recovery.old_session_id,
                     result.recovery.new_session_id,
                 )
@@ -886,7 +913,7 @@ async def run_chain(
                 else:
                     logger.info("orchestrator response parse fallback role=%s", role.role_name)
         except MissingUserField as exc:
-            role_name = pending_role_name or ("__all__" if is_all else role.role_name)
+            role_name = pending_role_name or ("__all__" if is_all else role_public_name(role))
             await _handle_missing_user_field(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -901,7 +928,7 @@ async def run_chain(
         except Exception as exc:
             if _is_unauthorized(exc):
                 if save_pending_on_unauthorized:
-                    role_name = pending_role_name or ("__all__" if is_all else roles[0].role_name)
+                    role_name = pending_role_name or ("__all__" if is_all else role_public_name(roles[0]))
                     pending_store.save(
                         user_id,
                         chat_id,
@@ -946,12 +973,12 @@ async def run_chain(
                 chat_id=chat_id,
                 user_id=user_id,
                 reply_to_message_id=reply_to_message_id,
-                actor_username=role.role_name,
+                actor_username=role_public_name(role),
                 session_token=session_token,
                 orchestrator_role=orchestrator_role,
                 original_user_text=user_text,
                 original_reply_text=reply_text,
-                answered_role_name=role.role_name,
+                answered_role_name=role_public_name(role),
                 role_answer_text=response_text,
                 chain_context=chain_context,
                 dispatch_mentions_fn=dispatch_mentions,

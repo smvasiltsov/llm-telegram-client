@@ -1,6 +1,6 @@
 id: echo
 version: 0.1.0
-entrypoint: skill:create_skill
+entrypoint: processor:create_processor
 enabled_by_default: false
 timeout_sec: 10
 permissions: []

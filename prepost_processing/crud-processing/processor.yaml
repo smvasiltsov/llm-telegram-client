@@ -1,0 +1,7 @@
+id: crud-processing
+version: 0.1.0
+entrypoint: processor:create_processor
+enabled_by_default: false
+timeout_sec: 20
+permissions: []
+description: "Safe CRUD operations inside configured root directory."

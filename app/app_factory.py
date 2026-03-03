@@ -30,7 +30,7 @@ from app.llm_executor import LLMExecutor
 from app.llm_providers import load_provider_registry
 from app.llm_router import LLMRouter
 from app.message_buffer import MessageBuffer
-from app.mcp.registry import SkillRegistry
+from app.prepost_processing.registry import PrePostProcessingRegistry
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
 from app.plugin_server import PluginServerConfig, PluginTextServer
@@ -89,7 +89,7 @@ def build_services(
     bot_username: str = "",
     providers_dir: Path = Path("llm_providers"),
     plugins_dir: Path = Path("plugins"),
-    skills_dir: Path = Path("skills"),
+    prepost_processing_dir: Path = Path("prepost_processing"),
     base_cwd: Path | None = None,
 ) -> RuntimeContext:
     tools_bash_password = str(env_values.get("BASH_DANGEROUS_PASSWORD", "")).strip()
@@ -99,7 +99,7 @@ def build_services(
         tools_bash_password=tools_bash_password,
         providers_dir=providers_dir,
         plugins_dir=plugins_dir,
-        skills_dir=skills_dir,
+        prepost_processing_dir=prepost_processing_dir,
         base_cwd=base_cwd or Path.cwd(),
     )
 
@@ -111,7 +111,7 @@ def build_runtime(
     tools_bash_password: str,
     providers_dir: Path,
     plugins_dir: Path,
-    skills_dir: Path,
+    prepost_processing_dir: Path,
     base_cwd: Path,
 ) -> RuntimeContext:
     provider_registry, provider_models = load_provider_registry(providers_dir)
@@ -181,8 +181,8 @@ def build_runtime(
 
     tool_service = ToolService(tool_registry)
     tool_mcp_adapter = ToolMCPAdapter(tool_service)
-    skill_registry = SkillRegistry()
-    skill_registry.discover(skills_dir)
+    prepost_processing_registry = PrePostProcessingRegistry()
+    prepost_processing_registry.discover(prepost_processing_dir)
     plugin_manager = load_plugins(plugins_dir)
     plugin_server = PluginTextServer(
         storage,
@@ -217,7 +217,7 @@ def build_runtime(
         default_provider_id=default_provider_id,
         allow_raw_html=config.allow_raw_html,
         formatting_mode=config.formatting_mode,
-        skill_registry=skill_registry,
+        prepost_processing_registry=prepost_processing_registry,
         plugin_manager=plugin_manager,
         plugin_server=plugin_server,
         tool_service=tool_service,
