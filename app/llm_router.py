@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import time
+from collections import deque
 from typing import Any
 
 import httpx
@@ -408,6 +409,12 @@ class LLMRouter:
             line_count = 0
             chunk_count = 0
             first_line_elapsed_ms: int | None = None
+            nonempty_reasoning_count = 0
+            nonempty_content_count = 0
+            finish_reason_count = 0
+            last_finish_reason: Any = None
+            last_event: dict[str, Any] | None = None
+            raw_tail: deque[str] = deque(maxlen=8)
             try:
                 async with client.stream(
                     method,
@@ -440,6 +447,7 @@ class LLMRouter:
                         if not line:
                             continue
                         line_count += 1
+                        raw_tail.append(line[: self._ERROR_PREVIEW_LIMIT])
                         if first_line_elapsed_ms is None:
                             first_line_elapsed_ms = int((time.monotonic() - request_start) * 1000)
                             self._logger.info(
@@ -471,6 +479,20 @@ class LLMRouter:
                                     line[: self._RESPONSE_PREVIEW_LIMIT],
                                 )
                             continue
+                        if isinstance(data, dict):
+                            last_event = data
+                            choice = data.get("choice")
+                            if isinstance(choice, dict):
+                                reasoning_value = choice.get("reasoningContent")
+                                if isinstance(reasoning_value, str) and reasoning_value.strip():
+                                    nonempty_reasoning_count += 1
+                                content_value = choice.get("content")
+                                if isinstance(content_value, str) and content_value:
+                                    nonempty_content_count += 1
+                                finish_reason = choice.get("finishReason")
+                                if finish_reason is not None:
+                                    finish_reason_count += 1
+                                    last_finish_reason = finish_reason
                         chunk = self._extract_path(data, content_path) if content_path else None
                         if chunk:
                             parts.append(str(chunk))
@@ -500,12 +522,18 @@ class LLMRouter:
             result = "".join(parts).strip()
             if not result:
                 self._logger.warning(
-                    "LLM stream empty result provider=%s session_id=%s elapsed_ms=%s line_count=%s chunk_count=%s",
+                    "LLM stream empty result provider=%s session_id=%s elapsed_ms=%s line_count=%s chunk_count=%s reasoning_count=%s content_count=%s finish_reason_count=%s last_finish_reason=%r last_event=%s raw_tail=%s",
                     provider.provider_id,
                     session_id,
                     int((time.monotonic() - request_start) * 1000),
                     line_count,
                     chunk_count,
+                    nonempty_reasoning_count,
+                    nonempty_content_count,
+                    finish_reason_count,
+                    last_finish_reason,
+                    json.dumps(last_event, ensure_ascii=False)[: self._ERROR_PREVIEW_LIMIT] if last_event is not None else None,
+                    list(raw_tail),
                 )
                 raise ValueError("stream response empty")
             self._logger.info(
