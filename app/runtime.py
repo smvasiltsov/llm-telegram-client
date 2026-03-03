@@ -16,6 +16,8 @@ from app.plugins import PluginManager
 from app.prepost_processing.registry import PrePostProcessingRegistry
 from app.security import TokenCipher
 from app.session_resolver import SessionResolver
+from app.skills.registry import SkillRegistry
+from app.skills.service import SkillService
 from app.storage import Storage
 from app.tools import ToolMCPAdapter, ToolService
 
@@ -44,7 +46,10 @@ class RuntimeContext:
     default_provider_id: str
     allow_raw_html: bool
     formatting_mode: str
+    skills_usage_prompt: str
     prepost_processing_registry: PrePostProcessingRegistry
+    skills_registry: SkillRegistry
+    skills_service: SkillService
     plugin_manager: PluginManager
     plugin_server: PluginTextServer
     tool_service: ToolService

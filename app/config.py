@@ -21,6 +21,14 @@ DEFAULT_BASH_SAFE_COMMANDS = [
     "python3",
 ]
 
+DEFAULT_SKILLS_USAGE_PROMPT = (
+    "You can call skills by answering with a JSON object with strict structure. "
+    "If you do not want to use skills, answer normally and your answer will be sent to the user. "
+    'When calling a skill, answer with exactly this JSON object: '
+    '{"type":"skill_call","skill_call":{"skill_id":"<skill_id>","arguments":{...}}}. '
+    "Use only skill ids from skills.available."
+)
+
 
 @dataclass(frozen=True)
 class AppConfig:
@@ -36,6 +44,7 @@ class AppConfig:
     plugin_server_host: str
     plugin_server_port: int
     plugin_server_enabled: bool
+    skills_usage_prompt: str
     tools_enabled: bool
     tools_bash_enabled: bool
     tools_bash_default_cwd: str
@@ -72,6 +81,7 @@ def load_config(path: str | Path) -> AppConfig:
     llm_raw = raw.get("llm", {})
     formatting_raw = raw.get("formatting", {})
     plugin_server_raw = raw.get("plugin_server", {})
+    skills_raw = raw.get("skills", {}) or {}
     tools_raw = raw.get("tools", {}) or {}
     bash_raw = tools_raw.get("bash", {}) or {}
 
@@ -105,6 +115,7 @@ def load_config(path: str | Path) -> AppConfig:
         plugin_server_host=str(plugin_server_raw.get("host", "127.0.0.1")),
         plugin_server_port=int(plugin_server_raw.get("port", 8015)),
         plugin_server_enabled=bool(plugin_server_raw.get("enabled", True)),
+        skills_usage_prompt=str(skills_raw.get("usage_prompt", DEFAULT_SKILLS_USAGE_PROMPT)).strip(),
         tools_enabled=bool(tools_raw.get("enabled", True)),
         tools_bash_enabled=bool(bash_raw.get("enabled", True)),
         tools_bash_default_cwd=str(bash_raw.get("default_cwd", ".")),

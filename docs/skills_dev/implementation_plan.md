@@ -84,20 +84,19 @@ Loop guards:
 - timeout budget;
 - structured error propagation.
 
-## Phase 5. First built-in read-only skills
+## Phase 5. First built-in filesystem skills
 
 Deliverables:
 
 - implement `fs.read_file`;
 - implement `fs.list_dir`;
-- implement `sql.query_readonly`;
-- implement `web.search` or `web.fetch_page`.
+- implement `fs.write_file`.
 
 Notes:
 
 - keep filesystem access inside configured roots;
-- keep SQL read-only by both query validation and connection policy;
-- keep web results compact and truncated.
+- support bounded range reads for `fs.read_file`;
+- support create, replace, and append behavior for `fs.write_file`.
 
 ## Phase 6. Role UI for skill management
 
@@ -125,23 +124,22 @@ Minimum test matrix:
 - disabled skill call rejected;
 - schema validation error;
 - read-only file read success;
-- SQL read-only success;
-- web search success or bounded failure;
+- file write success;
 - loop exits on final answer;
 - loop exits on repeated bad calls.
 
-## Phase 8. Mutation skills
+## Phase 8. External developer kit
 
 Deliverables:
 
-- add `fs.write_file`;
-- add `fs.apply_diff`;
-- later evaluate whether shell execution belongs in `skills` or remains a separate privileged subsystem.
+- prepare a standalone repository seed for independent AI developers;
+- include SDK, runner, template skill, tests, docs, and bootstrap prompt;
+- ensure skills built there can be copied into the main repo and work without provider access.
 
 Notes:
 
-- mutation requires stronger audit and policy checks;
-- dangerous execution should not be part of the first delivery.
+- the external kit must not depend on bot runtime modules;
+- local testing must work without access to a real LLM provider.
 
 ## Phase 9. Documentation and examples
 
@@ -157,10 +155,10 @@ Deliverables:
 2. Storage and runtime wiring.
 3. Assistant protocol and parser.
 4. Skill-calling loop.
-5. Read-only built-in skills.
+5. Built-in filesystem skills.
 6. Role UI for enable/disable.
 7. Tests and observability hardening.
-8. Mutation skills.
+8. External developer kit.
 
 ## Non-goals for v1
 

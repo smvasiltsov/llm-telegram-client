@@ -1,4 +1,4 @@
-id: echo
+id: echo.skill
 version: 0.1.0
 entrypoint: skill:create_skill
 enabled_by_default: false

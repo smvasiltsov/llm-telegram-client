@@ -39,6 +39,7 @@ from app.roles_registry import seed_roles
 from app.runtime import RuntimeContext
 from app.security import TokenCipher
 from app.session_resolver import SessionResolver
+from app.skills import SkillRegistry, SkillService
 from app.storage import Storage
 from app.tools import BashTool, ToolMCPAdapter, ToolRegistry, ToolService
 
@@ -90,6 +91,7 @@ def build_services(
     providers_dir: Path = Path("llm_providers"),
     plugins_dir: Path = Path("plugins"),
     prepost_processing_dir: Path = Path("prepost_processing"),
+    skills_dir: Path = Path("skills"),
     base_cwd: Path | None = None,
 ) -> RuntimeContext:
     tools_bash_password = str(env_values.get("BASH_DANGEROUS_PASSWORD", "")).strip()
@@ -100,6 +102,7 @@ def build_services(
         providers_dir=providers_dir,
         plugins_dir=plugins_dir,
         prepost_processing_dir=prepost_processing_dir,
+        skills_dir=skills_dir,
         base_cwd=base_cwd or Path.cwd(),
     )
 
@@ -112,6 +115,7 @@ def build_runtime(
     providers_dir: Path,
     plugins_dir: Path,
     prepost_processing_dir: Path,
+    skills_dir: Path,
     base_cwd: Path,
 ) -> RuntimeContext:
     provider_registry, provider_models = load_provider_registry(providers_dir)
@@ -183,6 +187,9 @@ def build_runtime(
     tool_mcp_adapter = ToolMCPAdapter(tool_service)
     prepost_processing_registry = PrePostProcessingRegistry()
     prepost_processing_registry.discover(prepost_processing_dir)
+    skills_registry = SkillRegistry()
+    skills_registry.discover(skills_dir)
+    skills_service = SkillService(skills_registry)
     plugin_manager = load_plugins(plugins_dir)
     plugin_server = PluginTextServer(
         storage,
@@ -217,7 +224,10 @@ def build_runtime(
         default_provider_id=default_provider_id,
         allow_raw_html=config.allow_raw_html,
         formatting_mode=config.formatting_mode,
+        skills_usage_prompt=config.skills_usage_prompt,
         prepost_processing_registry=prepost_processing_registry,
+        skills_registry=skills_registry,
+        skills_service=skills_service,
         plugin_manager=plugin_manager,
         plugin_server=plugin_server,
         tool_service=tool_service,

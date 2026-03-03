@@ -1,53 +1,60 @@
-# Skills Dev Guide (Iteration 1)
+# Skills Development Guide
 
-## Quick Start
-1. Create folder:
-   - `skills/<skill_id>/`
-2. Add:
-   - `skill.yaml`
-   - `skill.py`
-3. Implement contract:
-   - `describe()`
-   - `validate_config(config)`
-   - `run(ctx, payload)`
+## Goal
 
-Use `skills/_template` as baseline.
+Build a model-callable skill that can be copied into the main bot repository and work there without code changes.
 
-## Local Runner
-Run skill outside bot:
+## Folder layout
+
+Each skill must live in:
+
+```text
+skills/<skill_folder>/
+  __init__.py
+  skill.yaml
+  skill.py
+```
+
+## Required Python contract
+
+Your skill must implement:
+
+- `describe() -> SkillSpec`
+- `validate_config(config: dict) -> list[str]`
+- `run(ctx: SkillContext, arguments: dict, config: dict) -> SkillResult`
+
+## Design expectations
+
+- deterministic behavior
+- bounded output
+- explicit config validation
+- no imports from Telegram or main bot runtime
+- JSON-like output only
+
+## Real example
+
+Use `skills/fs_read_file/` as the production-like example.
+
+It mirrors the main project style:
+
+- shared helper module in `skills/_fs_common.py`
+- `pathlib` for path handling
+- config validation through `validate_config`
+- strict root-dir confinement
+- UTF-8 text handling
+
+## Local testing
 
 ```bash
 python3 scripts/skill_runner.py \
-  --skill-id echo \
-  --phase pre \
-  --payload-json '{"user_text":"hello","reply_text":null}' \
+  --skills-dir skills \
+  --skill-id echo.skill \
+  --arguments-json '{"message":"hello"}' \
   --config-json '{}'
 ```
 
-With files:
+Smoke tests:
 
 ```bash
-python3 scripts/skill_runner.py \
-  --skill-id echo \
-  --phase post \
-  --payload-file skills/echo/mocks/payload.json \
-  --config-file skills/echo/mocks/config.json
+python3 -m unittest discover -s tests -v
 ```
-
-## Payload Envelope
-Runner and bot call skill with:
-- `phase`: `pre` or `post`
-- `config`: role-skill config
-- `data`: payload data
-
-Supported output overrides:
-- `pre`:
-  - `output.user_text`
-  - `output.reply_text`
-- `post`:
-  - `output.response_text`
-
-## Guardrails
-- Timeout per skill from manifest (`timeout_sec`, clamped).
-- Output size limit applied in bot runtime.
-- Unsupported permissions lead to skill skip.

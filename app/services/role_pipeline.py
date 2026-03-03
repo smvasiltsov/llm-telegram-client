@@ -26,6 +26,7 @@ from app.services.orchestrator_response import parse_orchestrator_response
 from app.services.formatting import format_with_header, format_with_header_raw, render_llm_text, send_formatted_with_fallback
 from app.services.plugin_pipeline import build_plugin_reply_markup
 from app.services.prompt_builder import build_llm_payload_json, resolve_provider_model, role_requires_auth
+from app.services.skill_calling_loop import SkillCallingLoop, SkillStepSendResult
 from app.session_resolver import SessionResolver
 from app.storage import Storage
 from app.utils import extract_role_mentions, split_message
@@ -372,6 +373,96 @@ async def execute_role_request(
     effective_reply_text = pre_data.get("reply_text", reply_text)
     if not (isinstance(effective_reply_text, str) or effective_reply_text is None):
         effective_reply_text = reply_text
+
+    if storage.list_role_skills(chat_id, role.role_id, enabled_only=True):
+        logger.info(
+            "execute role request via skill loop role=%s mode=%s model_override=%s",
+            role.role_name,
+            group_role.mode,
+            model_override,
+        )
+        recovery: SessionRecoveryResult | None = None
+        skill_loop = SkillCallingLoop(
+            storage=storage,
+            llm_executor=llm_executor,
+            session_resolver=resolver,
+            skills_service=runtime.skills_service,
+            provider_models=provider_models,
+            provider_model_map=provider_model_map,
+            provider_registry=provider_registry,
+            skills_usage_prompt=str(getattr(runtime, "skills_usage_prompt", "") or ""),
+        )
+
+        async def _send_skill_step(current_session_id: str, content: str, current_model_override: str | None) -> SkillStepSendResult:
+            nonlocal recovery
+            try:
+                response_text = await llm_executor.send_with_retries(
+                    session_id=current_session_id,
+                    session_token=session_token,
+                    content=content,
+                    role=role,
+                    model_override=current_model_override,
+                )
+                return SkillStepSendResult(response_text=response_text, session_id=current_session_id)
+            except Exception as exc:
+                recovered = await _recover_stale_session_and_resend(
+                    exc=exc,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    role=role,
+                    session_id=current_session_id,
+                    session_token=session_token,
+                    model_override=current_model_override,
+                    content=content,
+                    context=context,
+                )
+                if recovered is None:
+                    raise
+                recovery = recovered
+                return SkillStepSendResult(
+                    response_text=recovered.response_text,
+                    session_id=recovered.new_session_id,
+                )
+
+        loop_result = await skill_loop.run(
+            chat_id=chat_id,
+            user_id=user_id,
+            role=role,
+            session_token=session_token,
+            user_text=effective_user_text,
+            reply_text=effective_reply_text,
+            actor_username=actor_username,
+            trigger_type=trigger_type,
+            mentioned_roles=mentioned_roles,
+            recipient=recipient,
+            llm_answer_text=llm_answer_text,
+            llm_answer_role_name=llm_answer_role_name,
+            send_step=_send_skill_step,
+        )
+        response_text = loop_result.final_answer_text
+        post_data = await _run_role_prepost_processing_phase(
+            context=context,
+            chat_id=chat_id,
+            user_id=user_id,
+            role=role,
+            phase="post",
+            payload={
+                "user_text": effective_user_text,
+                "reply_text": effective_reply_text,
+                "response_text": response_text,
+            },
+            chain_id=skill_chain_id,
+        )
+        effective_response_text = post_data.get("response_text", response_text)
+        if isinstance(effective_response_text, str):
+            response_text = effective_response_text
+
+        return RoleRequestResult(
+            response_text=response_text,
+            group_role=group_role,
+            model_override=loop_result.model_override,
+            recovery=recovery,
+        )
 
     full_payload, compact_payload = build_llm_payload_json(
         effective_user_text,

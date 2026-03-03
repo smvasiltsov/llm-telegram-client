@@ -11,8 +11,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from mcp_skill_sdk.registry import SkillRegistry
-from mcp_skill_sdk.skills_contract import SkillContext
+from skills_sdk.registry import SkillRegistry
+from skills_sdk.contract import SkillContext
 
 
 def _load_json_arg(raw: str | None) -> dict:
@@ -41,12 +41,11 @@ def _load_json_file(path: str | None) -> dict:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run local skill with mock context/payload.")
+    parser = argparse.ArgumentParser(description="Run local model-callable skill with mock context and arguments.")
     parser.add_argument("--skills-dir", default="skills", help="Path to skills directory.")
     parser.add_argument("--skill-id", required=True, help="Skill id from skill.yaml.")
-    parser.add_argument("--phase", choices=["pre", "post"], default="pre", help="Execution phase.")
-    parser.add_argument("--payload-json", default=None, help="Inline JSON object for input data.")
-    parser.add_argument("--payload-file", default=None, help="Path to JSON file for input data.")
+    parser.add_argument("--arguments-json", default=None, help="Inline JSON object for skill arguments.")
+    parser.add_argument("--arguments-file", default=None, help="Path to JSON file for skill arguments.")
     parser.add_argument("--config-json", default=None, help="Inline JSON object for skill config.")
     parser.add_argument("--config-file", default=None, help="Path to JSON file for skill config.")
     parser.add_argument("--chat-id", type=int, default=-1)
@@ -70,8 +69,8 @@ def main() -> int:
         )
         return 2
 
-    payload = _load_json_file(args.payload_file)
-    payload.update(_load_json_arg(args.payload_json))
+    arguments = _load_json_file(args.arguments_file)
+    arguments.update(_load_json_arg(args.arguments_json))
 
     config = _load_json_file(args.config_file)
     config.update(_load_json_arg(args.config_json))
@@ -88,19 +87,15 @@ def main() -> int:
         role_id=args.role_id,
         role_name=args.role_name,
     )
-    envelope = {
-        "phase": args.phase,
-        "config": config,
-        "data": payload,
-    }
-    result = record.instance.run(ctx, envelope)
+    result = record.instance.run(ctx, arguments, config)
     print(
         json.dumps(
             {
                 "skill_id": record.spec.skill_id,
-                "phase": args.phase,
+                "arguments": arguments,
+                "config": config,
                 "result": {
-                    "status": result.status,
+                    "ok": result.ok,
                     "output": result.output,
                     "error": result.error,
                     "metadata": result.metadata,

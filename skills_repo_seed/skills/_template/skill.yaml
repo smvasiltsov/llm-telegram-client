@@ -1,4 +1,4 @@
-id: template
+id: template.skill
 version: 0.1.0
 entrypoint: skill:create_skill
 enabled_by_default: false

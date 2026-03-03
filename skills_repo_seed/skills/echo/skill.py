@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-from mcp_skill_sdk.skills_contract import SkillContext, SkillResult, SkillSpec
+from skills_sdk.contract import SkillContext, SkillResult, SkillSpec
 
 
 class EchoSkill:
     def describe(self) -> SkillSpec:
         return SkillSpec(
-            skill_id="echo",
+            skill_id="echo.skill",
             name="Echo Skill",
             version="0.1.0",
-            description="Echoes selected payload fields for integration smoke.",
-            permissions=(),
-            timeout_sec=10,
+            description="Simple example skill that returns its arguments.",
+            input_schema={"type": "object"},
         )
 
     def validate_config(self, config: dict) -> list[str]:
@@ -19,15 +18,8 @@ class EchoSkill:
             return ["config must be an object"]
         return []
 
-    def run(self, ctx: SkillContext, payload: dict) -> SkillResult:
-        return SkillResult(
-            status="ok",
-            output={
-                "chain_id": ctx.chain_id,
-                "role_name": ctx.role_name,
-                "keys": sorted(payload.keys()) if isinstance(payload, dict) else [],
-            },
-        )
+    def run(self, ctx: SkillContext, arguments: dict, config: dict) -> SkillResult:
+        return SkillResult(ok=True, output={"echo": arguments, "role_name": ctx.role_name})
 
 
 def create_skill() -> EchoSkill:

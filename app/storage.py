@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from app.models import AuthToken, Group, GroupRole, Role, RolePrePostProcessing, User, UserRoleSession
+from app.models import AuthToken, Group, GroupRole, Role, RolePrePostProcessing, RoleSkill, SkillRun, User, UserRoleSession
 
 
 @dataclass
@@ -197,6 +197,50 @@ class Storage:
         )
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS role_skills_enabled (
+                group_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
+                skill_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                config_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (group_id, role_id, skill_id),
+                FOREIGN KEY (group_id) REFERENCES groups(group_id),
+                FOREIGN KEY (role_id) REFERENCES roles(role_id)
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_role_skills_enabled_role "
+            "ON role_skills_enabled(group_id, role_id, enabled)"
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS skill_runs (
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chain_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                telegram_user_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
+                skill_id TEXT NOT NULL,
+                arguments_json TEXT,
+                config_json TEXT,
+                status TEXT NOT NULL,
+                ok INTEGER NOT NULL DEFAULT 0,
+                duration_ms INTEGER,
+                error_text TEXT,
+                output_json TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (role_id) REFERENCES roles(role_id)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_chain_step ON skill_runs(chain_id, step_index, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_created ON skill_runs(skill_id, created_at)")
+        cur.execute(
+            """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_group_roles_unique_display_name
             ON group_roles(group_id, lower(display_name))
             WHERE is_active = 1 AND display_name IS NOT NULL AND display_name <> ''
@@ -371,6 +415,71 @@ class Storage:
         )
         self._conn.commit()
 
+    def log_skill_run(
+        self,
+        *,
+        chain_id: str,
+        step_index: int,
+        telegram_user_id: int,
+        chat_id: int,
+        role_id: int,
+        skill_id: str,
+        arguments: dict | None,
+        config: dict | None,
+        status: str,
+        ok: bool,
+        duration_ms: int | None = None,
+        error_text: str | None = None,
+        output: dict | None = None,
+    ) -> SkillRun:
+        now = _utc_now()
+        arguments_json = json.dumps(arguments, ensure_ascii=False) if arguments is not None else None
+        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
+        output_json = json.dumps(output, ensure_ascii=False) if output is not None else None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO skill_runs (
+                chain_id,
+                step_index,
+                telegram_user_id,
+                chat_id,
+                role_id,
+                skill_id,
+                arguments_json,
+                config_json,
+                status,
+                ok,
+                duration_ms,
+                error_text,
+                output_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                chain_id,
+                step_index,
+                telegram_user_id,
+                chat_id,
+                role_id,
+                skill_id,
+                arguments_json,
+                config_json,
+                status,
+                1 if ok else 0,
+                duration_ms,
+                error_text,
+                output_json,
+                now,
+            ),
+        )
+        self._conn.commit()
+        row_id = int(cur.lastrowid)
+        skill_run = self.get_skill_run(row_id)
+        if skill_run is None:
+            raise RuntimeError("Failed to persist skill run")
+        return skill_run
+
     def upsert_user(self, telegram_user_id: int, username: str | None) -> None:
         now = _utc_now()
         cur = self._conn.cursor()
@@ -400,6 +509,52 @@ class Storage:
         )
         self._conn.commit()
         return self.get_group(group_id)
+
+    def get_skill_run(self, run_id: int) -> SkillRun | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                run_id,
+                chain_id,
+                step_index,
+                telegram_user_id,
+                chat_id,
+                role_id,
+                skill_id,
+                arguments_json,
+                config_json,
+                status,
+                ok,
+                duration_ms,
+                error_text,
+                output_json,
+                created_at
+            FROM skill_runs
+            WHERE run_id = ?
+            """,
+            (run_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return SkillRun(
+            run_id=row["run_id"],
+            chain_id=row["chain_id"],
+            step_index=row["step_index"],
+            telegram_user_id=row["telegram_user_id"],
+            chat_id=row["chat_id"],
+            role_id=row["role_id"],
+            skill_id=row["skill_id"],
+            arguments_json=row["arguments_json"],
+            config_json=row["config_json"],
+            status=row["status"],
+            ok=bool(row["ok"]),
+            duration_ms=row["duration_ms"],
+            error_text=row["error_text"],
+            output_json=row["output_json"],
+            created_at=row["created_at"],
+        )
 
     def get_group(self, group_id: int) -> Group:
         cur = self._conn.cursor()
@@ -1265,5 +1420,131 @@ class Storage:
             WHERE group_id = ? AND role_id = ? AND prepost_processing_id = ?
             """,
             (group_id, role_id, prepost_processing_id),
+        )
+        self._conn.commit()
+
+    def upsert_role_skill(
+        self,
+        group_id: int,
+        role_id: int,
+        skill_id: str,
+        *,
+        enabled: bool = True,
+        config: dict | None = None,
+    ) -> RoleSkill:
+        now = _utc_now()
+        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO role_skills_enabled (group_id, role_id, skill_id, enabled, config_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(group_id, role_id, skill_id) DO UPDATE SET
+                enabled=excluded.enabled,
+                config_json=excluded.config_json,
+                updated_at=excluded.updated_at
+            """,
+            (group_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
+        )
+        self._conn.commit()
+        role_skill = self.get_role_skill(group_id, role_id, skill_id)
+        if role_skill is None:
+            raise RuntimeError("Failed to upsert role skill")
+        return role_skill
+
+    def get_role_skill(self, group_id: int, role_id: int, skill_id: str) -> RoleSkill | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+            FROM role_skills_enabled
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (group_id, role_id, skill_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return RoleSkill(
+            group_id=row["group_id"],
+            role_id=row["role_id"],
+            skill_id=row["skill_id"],
+            enabled=bool(row["enabled"]),
+            config_json=row["config_json"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    def list_role_skills(self, group_id: int, role_id: int, *, enabled_only: bool = False) -> list[RoleSkill]:
+        cur = self._conn.cursor()
+        if enabled_only:
+            cur.execute(
+                """
+                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills_enabled
+                WHERE group_id = ? AND role_id = ? AND enabled = 1
+                ORDER BY skill_id
+                """,
+                (group_id, role_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT group_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills_enabled
+                WHERE group_id = ? AND role_id = ?
+                ORDER BY skill_id
+                """,
+                (group_id, role_id),
+            )
+        rows = cur.fetchall()
+        return [
+            RoleSkill(
+                group_id=row["group_id"],
+                role_id=row["role_id"],
+                skill_id=row["skill_id"],
+                enabled=bool(row["enabled"]),
+                config_json=row["config_json"],
+                created_at=row["created_at"],
+                updated_at=row["updated_at"],
+            )
+            for row in rows
+        ]
+
+    def set_role_skill_enabled(self, group_id: int, role_id: int, skill_id: str, enabled: bool) -> None:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE role_skills_enabled
+            SET enabled = ?, updated_at = ?
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (1 if enabled else 0, now, group_id, role_id, skill_id),
+        )
+        self._conn.commit()
+
+    def set_role_skill_config(self, group_id: int, role_id: int, skill_id: str, config: dict | None) -> None:
+        now = _utc_now()
+        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE role_skills_enabled
+            SET config_json = ?, updated_at = ?
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (config_json, now, group_id, role_id, skill_id),
+        )
+        self._conn.commit()
+
+    def delete_role_skill(self, group_id: int, role_id: int, skill_id: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM role_skills_enabled
+            WHERE group_id = ? AND role_id = ? AND skill_id = ?
+            """,
+            (group_id, role_id, skill_id),
         )
         self._conn.commit()

@@ -1,16 +1,19 @@
-# Publish Workflow To Bot
+# Publish Workflow
 
-## Manual
-1. Create or update skill in this repository under `skills/<id>/`.
-2. Run local checks via runner/tests.
-3. Copy `skills/<id>/` into bot repository `skills/<id>/`.
-4. Restart bot process so discovery runs again.
+This repository is for development only.
 
-## Scripted
-Run:
+The main project integration step is simple:
+
+1. finish the skill in this repository
+2. run local runner checks
+3. run smoke tests
+4. copy the finished `skills/<skill_folder>/` into the main project `skills/` directory
+5. enable the skill for a role in the bot UI
+
+## Helper script
 
 ```bash
-scripts/publish_to_bot_skills.sh --bot-repo /path/to/bot --skill-id <id>
+scripts/publish_to_bot_skills.sh --main-repo /path/to/main/repo --skill-folder fs_read_file
 ```
 
-This copies one skill folder into `<bot-repo>/skills/<id>`.
+Only publish the skill folder itself.

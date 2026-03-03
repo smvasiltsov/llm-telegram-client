@@ -1,20 +1,48 @@
-# MCP Skills Isolated Workspace
+# Standalone Skills Developer Kit
 
-This directory is a seed for a separate repository where another LLM agent can build skills without bot context.
+This folder is a self-contained seed for a separate repository where independent AI developers can build model-callable `skills` without access to the main bot project or any real LLM provider.
 
-## Structure
-- `mcp_skill_sdk/` - local SDK contract and registry.
-- `skills/` - skill implementations.
-- `scripts/` - local runner and publish helpers.
-- `tests/` - unit/smoke tests.
-- `docs/` - development guide.
-- `prompts/` - bootstrap prompt for a new agent.
+## What is included
 
-## Quick Start
-1. `python3 -m venv .venv`
-2. `source .venv/bin/activate`
-3. `pip install -r requirements.txt`
-4. `python3 scripts/skill_runner.py --skill-id echo --phase pre --payload-json '{"user_text":"hello"}'`
+- `skills_sdk/` - standalone SDK contract and registry
+- `skills/` - local skill implementations
+- `scripts/` - local runner and publish helper
+- `tests/` - smoke tests for discovery and local execution
+- `docs/` - everything an external developer needs to understand and implement skills
+- `prompts/` - bootstrap prompt for a new AI developer
 
-## Publish to bot repo
-Use `scripts/publish_to_bot_skills.sh` to copy selected skills into a bot repository `skills/` folder.
+## Real example included
+
+This kit now includes a real filesystem skill example:
+
+- `fs.read_file`
+
+It follows the same implementation pattern and uses the same standard-library dependencies as the production skill in the main project.
+
+## What external developers should do first
+
+1. Read `AGENTS.md`
+2. Read `docs/quickstart.md`
+3. Read `docs/skills-sdk-v1.md`
+4. Read `docs/skills-dev-guide.md`
+5. Read `prompts/agent_bootstrap_prompt.md`
+
+## No provider dependency
+
+This kit does not need access to a real LLM provider.
+
+Skills are developed and tested through:
+
+- direct local execution with `scripts/skill_runner.py`
+- local smoke tests
+- registry validation
+
+## Main integration rule
+
+A skill developed here should work in the main project out of the box if:
+
+- it uses the same `skills_sdk` contract;
+- the manifest is valid;
+- it is copied into the main repo `skills/` folder;
+- it is enabled for a role in the bot UI;
+- the role skill config is valid.

@@ -6,12 +6,19 @@ The LLM must not guess how to trigger a capability from free text. It must respo
 
 ## Assistant decisions
 
-Each assistant step returns exactly one of:
+Each assistant step may return either:
 
-- `final_answer`
-- `skill_call`
+- a `skill_call` JSON object
+- a normal plain-text answer for the user
+- optionally a `final_answer` JSON object for compatibility
 
-## `final_answer` shape
+## Plain-text answer
+
+If the model does not want to use a skill, it may answer with normal text.
+
+That plain text is treated as the final user-facing answer.
+
+## Optional `final_answer` shape
 
 ```json
 {

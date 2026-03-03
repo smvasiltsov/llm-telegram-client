@@ -27,6 +27,7 @@ This keeps the first implementation understandable and debuggable. More advanced
 1. `docs/skills_dev/architecture.md`
 2. `docs/skills_dev/protocol.md`
 3. `docs/skills_dev/implementation_plan.md`
+4. `docs/skills_dev/developer_guide.md`
 
 ## Why this split exists
 
@@ -41,10 +42,7 @@ Examples:
 - Good `skills`:
   - read a file;
   - list a directory;
-  - run a read-only SQL query;
-  - do a web search;
-  - fetch a web page;
-  - apply a file diff.
+  - write or append a file.
 
 ## Initial design goals
 

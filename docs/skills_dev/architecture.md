@@ -92,13 +92,7 @@ Built-in skill families planned for the first phases:
 - filesystem:
   - `fs.read_file`
   - `fs.list_dir`
-  - later `fs.write_file`
-  - later `fs.apply_diff`
-- SQL:
-  - `sql.query_readonly`
-- web:
-  - `web.search`
-  - `web.fetch_page`
+  - `fs.write_file`
 
 ## 4. Conversation State
 
@@ -173,8 +167,6 @@ Each skill must declare a safety class:
 
 Security rules for the first version:
 
-- implement read-only skills first;
+- implement bounded filesystem skills first;
 - keep filesystem skills constrained to an allowed root;
-- keep SQL read-only by contract and runtime enforcement;
-- keep web access bounded by timeout and result truncation;
 - postpone dangerous skills until the loop and logging are stable.

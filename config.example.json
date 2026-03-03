@@ -19,6 +19,9 @@
     "host": "127.0.0.1",
     "port": 8015
   },
+  "skills": {
+    "usage_prompt": "You can call skills by answering with a JSON object with strict structure. If you do not want to use skills, answer normally and your answer will be sent to the user. When calling a skill, answer with exactly this JSON object: {\"type\":\"skill_call\",\"skill_call\":{\"skill_id\":\"<skill_id>\",\"arguments\":{...}}}. Use only skill ids from skills.available."
+  },
   "tools": {
     "enabled": true,
     "bash": {

@@ -76,3 +76,33 @@ class RolePrePostProcessing:
     config_json: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass
+class RoleSkill:
+    group_id: int
+    role_id: int
+    skill_id: str
+    enabled: bool
+    config_json: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class SkillRun:
+    run_id: int
+    chain_id: str
+    step_index: int
+    telegram_user_id: int
+    chat_id: int
+    role_id: int
+    skill_id: str
+    arguments_json: str | None
+    config_json: str | None
+    status: str
+    ok: bool
+    duration_ms: int | None
+    error_text: str | None
+    output_json: str | None
+    created_at: str

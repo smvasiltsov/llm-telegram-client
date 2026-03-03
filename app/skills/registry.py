@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from mcp_skill_sdk.skills_contract import SkillProtocol, SkillSpec
+from skills_sdk.contract import SkillProtocol, SkillSpec
 
 
 logger = logging.getLogger("skills_registry")
@@ -31,13 +31,29 @@ class SkillRegistry:
     def get(self, skill_id: str) -> SkillRecord | None:
         return self._records.get(skill_id)
 
+    def register(self, skill: SkillProtocol, manifest: dict[str, Any] | None = None) -> SkillRecord:
+        spec = skill.describe()
+        effective_manifest = manifest or {
+            "id": spec.skill_id,
+            "version": spec.version,
+            "entrypoint": "<runtime>",
+        }
+        self._validate_skill(skill, effective_manifest)
+        record = SkillRecord(
+            manifest=dict(effective_manifest),
+            instance=skill,
+            spec=spec,
+        )
+        self._records[spec.skill_id] = record
+        return record
+
     def discover(self, skills_dir: str | Path) -> None:
         base = Path(skills_dir)
         if not base.exists() or not base.is_dir():
             logger.info("skills directory not found: %s", base)
             return
 
-        for skill_dir in sorted(p for p in base.iterdir() if p.is_dir()):
+        for skill_dir in sorted(path for path in base.iterdir() if path.is_dir()):
             manifest_path = skill_dir / "skill.yaml"
             if not manifest_path.exists():
                 continue
@@ -46,8 +62,18 @@ class SkillRegistry:
                 skill = self._load_entrypoint(skill_dir, manifest["entrypoint"])
                 self._validate_skill(skill, manifest)
                 spec = skill.describe()
-                self._records[spec.skill_id] = SkillRecord(manifest=manifest, instance=skill, spec=spec)
-                logger.info("skill loaded id=%s version=%s path=%s", spec.skill_id, spec.version, skill_dir)
+                record = SkillRecord(
+                    manifest=manifest,
+                    instance=skill,
+                    spec=spec,
+                )
+                self._records[spec.skill_id] = record
+                logger.info(
+                    "skill loaded id=%s version=%s path=%s",
+                    spec.skill_id,
+                    spec.version,
+                    skill_dir,
+                )
             except Exception:
                 logger.exception("skill load failed path=%s", skill_dir)
 
@@ -56,7 +82,7 @@ class SkillRegistry:
         if not isinstance(raw, dict):
             raise ValueError(f"Manifest must be object: {manifest_path}")
         required = ("id", "version", "entrypoint")
-        missing = [k for k in required if not str(raw.get(k, "")).strip()]
+        missing = [key for key in required if not str(raw.get(key, "")).strip()]
         if missing:
             raise ValueError(f"Manifest missing required keys {missing}: {manifest_path}")
         return raw
@@ -75,7 +101,7 @@ class SkillRegistry:
     def _validate_skill(self, skill: Any, manifest: dict[str, Any]) -> None:
         for method_name in ("describe", "validate_config", "run"):
             if not hasattr(skill, method_name):
-                raise ValueError(f"Skill missing required method '{method_name}'")
+                raise ValueError(f"Skill is missing required method '{method_name}'")
         spec = skill.describe()
         if not isinstance(spec, SkillSpec):
             raise ValueError("describe() must return SkillSpec")

@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BOT_REPO=""
-SKILL_ID=""
+MAIN_REPO=""
+SKILL_FOLDER=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --bot-repo)
-      BOT_REPO="$2"
+    --main-repo)
+      MAIN_REPO="$2"
       shift 2
       ;;
-    --skill-id)
-      SKILL_ID="$2"
+    --skill-folder)
+      SKILL_FOLDER="$2"
       shift 2
       ;;
     *)
@@ -21,22 +21,21 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$BOT_REPO" || -z "$SKILL_ID" ]]; then
-  echo "Usage: $0 --bot-repo /path/to/bot --skill-id <id>" >&2
+if [[ -z "$MAIN_REPO" || -z "$SKILL_FOLDER" ]]; then
+  echo "Usage: $0 --main-repo /path/to/main/repo --skill-folder <folder>" >&2
   exit 1
 fi
 
-SRC_DIR="skills/${SKILL_ID}"
-DST_DIR="${BOT_REPO}/skills/${SKILL_ID}"
+SRC_DIR="skills/${SKILL_FOLDER}"
+DST_DIR="${MAIN_REPO}/skills/${SKILL_FOLDER}"
 
 if [[ ! -d "$SRC_DIR" ]]; then
   echo "Skill not found: $SRC_DIR" >&2
   exit 1
 fi
 
-mkdir -p "${BOT_REPO}/skills"
+mkdir -p "${MAIN_REPO}/skills"
 rm -rf "$DST_DIR"
 cp -R "$SRC_DIR" "$DST_DIR"
 
-echo "Published skill '${SKILL_ID}' to '${DST_DIR}'"
-echo "Restart bot process to reload skills."
+echo "Published skill folder '${SKILL_FOLDER}' to '${DST_DIR}'"

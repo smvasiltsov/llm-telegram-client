@@ -1,84 +1,72 @@
 # Skills SDK v1
 
-## Purpose
-SDK v1 defines a stable Python contract for local skills that can be developed and tested outside the bot, then plugged into the bot without code changes.
+This repository mirrors the model-callable `skills` contract used by the main bot project.
 
-## Skill Layout
-Each skill lives in its own folder:
+## Contract objects
 
-```text
-skills/
-  <skill_id>/
-    skill.yaml
-    skill.py
-    tests/
-    mocks/
+### `SkillSpec`
+
+Describes the skill visible to runtime and LLM.
+
+Important fields:
+
+- `skill_id`
+- `name`
+- `version`
+- `description`
+- `input_schema`
+- `mode`
+- `timeout_sec`
+
+### `SkillContext`
+
+Runtime metadata passed to the skill:
+
+- `chain_id`
+- `chat_id`
+- `user_id`
+- `role_id`
+- `role_name`
+
+### `SkillResult`
+
+Return object for the skill:
+
+- `ok`
+- `output`
+- `error`
+- `metadata`
+
+## Protocol
+
+Every skill must implement:
+
+```python
+def describe(self) -> SkillSpec: ...
+def validate_config(self, config: dict[str, Any]) -> list[str]: ...
+def run(self, ctx: SkillContext, arguments: dict[str, Any], config: dict[str, Any]) -> SkillResult: ...
 ```
 
-## Manifest (`skill.yaml`)
-Required fields:
-- `id`: stable skill identifier.
-- `version`: semantic version string.
-- `entrypoint`: Python callable path, format `module:function`.
+## Discovery
 
-Optional fields:
-- `enabled_by_default`: bool.
-- `permissions`: list of permission strings.
-- `timeout_sec`: positive integer.
-- `description`: free text.
+Skills are discovered from:
 
-## Python Contract
+```text
+skills/<skill_folder>/skill.yaml
+skills/<skill_folder>/skill.py
+```
 
-`describe() -> SkillSpec`
-- Returns static skill metadata.
+The registry loads:
 
-`validate_config(config: dict) -> list[str]`
-- Returns validation errors (empty list if valid).
+- manifest from `skill.yaml`
+- factory from `entrypoint`
+- returned instance from `create_skill()`
 
-`run(ctx: SkillContext, payload: dict) -> SkillResult`
-- Executes skill logic and returns structured result.
- - Runtime passes envelope:
-   - `phase`: `pre` or `post`
-   - `config`: role-skill config (dict)
-   - `data`: mutable execution data
+## Reference example
 
-## Core Types
-- `SkillSpec`:
-  - `skill_id`, `name`, `version`, `description`
-  - `permissions`, `timeout_sec`
-- `SkillContext`:
-  - `chain_id`, `chat_id`, `user_id`, `role_id`, `role_name`
-- `SkillResult`:
-  - `status` (`ok` | `error` | `skipped`)
-  - `output` (dict)
-  - `error` (optional text)
-  - `metadata` (dict)
+For a production-like example, inspect:
 
-## Runtime Rules (v1)
-- Skills are discovered at startup.
-- Invalid skills are skipped, bot continues startup.
-- Discovery validates:
-  - manifest required fields,
-  - entrypoint import,
-  - required functions existence.
-- Execution (iteration 1):
-  - `pre` phase may override:
-    - `data.user_text`
-    - `data.reply_text`
-  - `post` phase may override:
-    - `data.response_text`
-  - Skill errors are logged and do not break role pipeline.
-  - Guardrails:
-    - timeout per skill: from manifest `timeout_sec` (clamped to 1..120 sec),
-    - max output size: 12000 chars (JSON-serialized output),
-    - permissions allowlist:
-      - `read_context`
-      - `transform_prompt`
-      - `transform_response`
-    - skills with unsupported permissions are skipped.
+- `skills/fs_read_file/skill.py`
+- `skills/_fs_common.py`
 
-## Testing Outside Bot
-- Skill should be runnable with mock context and mock payload.
-- Recommended:
-  - unit tests in `skills/<id>/tests/`
-  - canned inputs in `skills/<id>/mocks/`
+That example is intentionally aligned with the real filesystem skill pattern used in the main project.

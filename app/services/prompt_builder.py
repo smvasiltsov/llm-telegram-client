@@ -94,6 +94,9 @@ def build_llm_payload_json_text(
     system_prompt: str | None = None,
     llm_answer_text: str | None = None,
     llm_answer_role_name: str | None = None,
+    skills_prompt: str | None = None,
+    skills_available: list[dict[str, Any]] | None = None,
+    skill_history: list[dict[str, Any]] | None = None,
 ) -> str:
     _, compact_payload = build_llm_payload_json(
         user_text,
@@ -107,6 +110,9 @@ def build_llm_payload_json_text(
         system_prompt=system_prompt,
         llm_answer_text=llm_answer_text,
         llm_answer_role_name=llm_answer_role_name,
+        skills_prompt=skills_prompt,
+        skills_available=skills_available,
+        skill_history=skill_history,
     )
     return "INPUT_JSON:\n" + json.dumps(compact_payload, ensure_ascii=False)
 
@@ -140,6 +146,9 @@ def build_llm_payload_json(
     system_prompt: str | None = None,
     llm_answer_text: str | None = None,
     llm_answer_role_name: str | None = None,
+    skills_prompt: str | None = None,
+    skills_available: list[dict[str, Any]] | None = None,
+    skill_history: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload: dict[str, Any] = {
         "actor": {
@@ -168,8 +177,10 @@ def build_llm_payload_json(
             "text": llm_answer_text,
             "role_name": llm_answer_role_name,
         },
-        "tools": {
-            "available": [],
+        "skills": {
+            "prompt": skills_prompt,
+            "available": skills_available or [],
+            "history": skill_history or [],
         },
     }
     compact_payload = _prune_empty(payload)
