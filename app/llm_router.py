@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 import httpx
@@ -20,6 +21,7 @@ class MissingUserField(Exception):
 
 class LLMRouter:
     _RESPONSE_PREVIEW_LIMIT = 300
+    _ERROR_PREVIEW_LIMIT = 800
 
     def __init__(
         self,
@@ -202,6 +204,53 @@ class LLMRouter:
             raise MissingUserField(provider.provider_id, field, scoped_role_id)
         return value
 
+    def _safe_len(self, value: Any) -> int | None:
+        if isinstance(value, str):
+            return len(value)
+        if isinstance(value, list):
+            return len(value)
+        if isinstance(value, dict):
+            try:
+                return len(json.dumps(value, ensure_ascii=False))
+            except Exception:
+                return None
+        return None
+
+    def _response_diag_headers(self, response: httpx.Response | None) -> dict[str, str]:
+        if response is None:
+            return {}
+        interesting = (
+            "content-type",
+            "content-length",
+            "server",
+            "via",
+            "x-request-id",
+            "x-correlation-id",
+            "cf-ray",
+        )
+        result: dict[str, str] = {}
+        for key in interesting:
+            value = response.headers.get(key)
+            if value:
+                result[key] = value
+        return result
+
+    async def _error_preview(self, response: httpx.Response | None) -> str | None:
+        if response is None:
+            return None
+        try:
+            body = await response.aread()
+        except Exception:
+            return None
+        if not body:
+            return None
+        try:
+            text = body.decode(response.encoding or "utf-8", errors="replace")
+        except Exception:
+            text = body.decode("utf-8", errors="replace")
+        text = text.strip()
+        return text[: self._ERROR_PREVIEW_LIMIT] if text else None
+
     async def _list_sessions_generic(self, provider: ProviderConfig) -> list[str]:
         endpoint = provider.endpoints.get("list_sessions") or {}
         path = endpoint.get("path")
@@ -334,59 +383,153 @@ class LLMRouter:
         method = endpoint.get("method", "POST")
         headers = self._render_template(headers_template or {}, context, provider, role_id)
         response_cfg = endpoint.get("response", {}) or {}
+        request_start = time.monotonic()
+        payload_chars = self._safe_len(payload)
+        content_chars = len(content)
         if response_cfg.get("stream"):
             content_path = response_cfg.get("stream_content_path")
             done_path = response_cfg.get("stream_done_path")
             line_prefix = response_cfg.get("stream_line_prefix")
             done_value = response_cfg.get("stream_done_value")
             self._logger.info(
-                "LLM generic send_message stream provider=%s method=%s path=%s headers=%s payload=%s",
+                "LLM generic send_message stream provider=%s session_id=%s role_id=%s model=%s method=%s path=%s content_chars=%s payload_chars=%s headers=%s payload=%s",
                 provider.provider_id,
+                session_id,
+                role_id,
+                model_id,
                 method,
                 path,
+                content_chars,
+                payload_chars,
                 self._redact_dict(headers) if isinstance(headers, dict) else headers,
                 self._redact_dict(payload) if isinstance(payload, dict) else payload,
             )
             parts: list[str] = []
-            async with client.stream(
-                method,
-                path.format(session_id=session_id),
-                json=payload,
-                headers=headers or None,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line:
-                        continue
-                    if line_prefix and line.startswith(line_prefix):
-                        line = line[len(line_prefix):].strip()
-                    if done_value is not None and line == done_value:
-                        break
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    chunk = self._extract_path(data, content_path) if content_path else None
-                    if chunk:
-                        parts.append(str(chunk))
-                    done = self._extract_path(data, done_path) if done_path else None
-                    if done:
-                        break
+            line_count = 0
+            chunk_count = 0
+            first_line_elapsed_ms: int | None = None
+            try:
+                async with client.stream(
+                    method,
+                    path.format(session_id=session_id),
+                    json=payload,
+                    headers=headers or None,
+                ) as resp:
+                    headers_elapsed_ms = int((time.monotonic() - request_start) * 1000)
+                    self._logger.info(
+                        "LLM stream opened provider=%s session_id=%s status=%s elapsed_ms=%s headers=%s",
+                        provider.provider_id,
+                        session_id,
+                        resp.status_code,
+                        headers_elapsed_ms,
+                        self._response_diag_headers(resp),
+                    )
+                    if resp.is_error:
+                        preview = await self._error_preview(resp)
+                        self._logger.error(
+                            "LLM stream HTTP error provider=%s session_id=%s status=%s elapsed_ms=%s headers=%s preview=%r",
+                            provider.provider_id,
+                            session_id,
+                            resp.status_code,
+                            headers_elapsed_ms,
+                            self._response_diag_headers(resp),
+                            preview,
+                        )
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        line_count += 1
+                        if first_line_elapsed_ms is None:
+                            first_line_elapsed_ms = int((time.monotonic() - request_start) * 1000)
+                            self._logger.info(
+                                "LLM stream first_line provider=%s session_id=%s elapsed_ms=%s sample=%r",
+                                provider.provider_id,
+                                session_id,
+                                first_line_elapsed_ms,
+                                line[: self._RESPONSE_PREVIEW_LIMIT],
+                            )
+                        if line_prefix and line.startswith(line_prefix):
+                            line = line[len(line_prefix):].strip()
+                        if done_value is not None and line == done_value:
+                            self._logger.info(
+                                "LLM stream done marker provider=%s session_id=%s line_count=%s",
+                                provider.provider_id,
+                                session_id,
+                                line_count,
+                            )
+                            break
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            if line_count <= 3:
+                                self._logger.warning(
+                                    "LLM stream non_json_line provider=%s session_id=%s line_no=%s sample=%r",
+                                    provider.provider_id,
+                                    session_id,
+                                    line_count,
+                                    line[: self._RESPONSE_PREVIEW_LIMIT],
+                                )
+                            continue
+                        chunk = self._extract_path(data, content_path) if content_path else None
+                        if chunk:
+                            parts.append(str(chunk))
+                            chunk_count += 1
+                        done = self._extract_path(data, done_path) if done_path else None
+                        if done:
+                            self._logger.info(
+                                "LLM stream done path provider=%s session_id=%s line_count=%s chunk_count=%s",
+                                provider.provider_id,
+                                session_id,
+                                line_count,
+                                chunk_count,
+                            )
+                            break
+            except httpx.HTTPStatusError:
+                raise
+            except httpx.HTTPError:
+                self._logger.exception(
+                    "LLM stream transport failure provider=%s session_id=%s elapsed_ms=%s line_count=%s chunk_count=%s",
+                    provider.provider_id,
+                    session_id,
+                    int((time.monotonic() - request_start) * 1000),
+                    line_count,
+                    chunk_count,
+                )
+                raise
             result = "".join(parts).strip()
             if not result:
+                self._logger.warning(
+                    "LLM stream empty result provider=%s session_id=%s elapsed_ms=%s line_count=%s chunk_count=%s",
+                    provider.provider_id,
+                    session_id,
+                    int((time.monotonic() - request_start) * 1000),
+                    line_count,
+                    chunk_count,
+                )
                 raise ValueError("stream response empty")
             self._logger.info(
-                "LLM generic response provider=%s chars=%s preview=%r",
+                "LLM generic response provider=%s session_id=%s chars=%s elapsed_ms=%s first_line_ms=%s line_count=%s chunk_count=%s preview=%r",
                 provider.provider_id,
+                session_id,
                 len(result),
+                int((time.monotonic() - request_start) * 1000),
+                first_line_elapsed_ms,
+                line_count,
+                chunk_count,
                 result[: self._RESPONSE_PREVIEW_LIMIT],
             )
             return result
         self._logger.info(
-            "LLM generic send_message provider=%s method=%s path=%s headers=%s payload=%s",
+            "LLM generic send_message provider=%s session_id=%s role_id=%s model=%s method=%s path=%s content_chars=%s payload_chars=%s headers=%s payload=%s",
             provider.provider_id,
+            session_id,
+            role_id,
+            model_id,
             method,
             path,
+            content_chars,
+            payload_chars,
             self._redact_dict(headers) if isinstance(headers, dict) else headers,
             self._redact_dict(payload) if isinstance(payload, dict) else payload,
         )
@@ -396,6 +539,26 @@ class LLMRouter:
             json=payload,
             headers=headers or None,
         )
+        elapsed_ms = int((time.monotonic() - request_start) * 1000)
+        self._logger.info(
+            "LLM non-stream response headers provider=%s session_id=%s status=%s elapsed_ms=%s headers=%s",
+            provider.provider_id,
+            session_id,
+            resp.status_code,
+            elapsed_ms,
+            self._response_diag_headers(resp),
+        )
+        if resp.is_error:
+            preview = await self._error_preview(resp)
+            self._logger.error(
+                "LLM non-stream HTTP error provider=%s session_id=%s status=%s elapsed_ms=%s headers=%s preview=%r",
+                provider.provider_id,
+                session_id,
+                resp.status_code,
+                elapsed_ms,
+                self._response_diag_headers(resp),
+                preview,
+            )
         resp.raise_for_status()
         data = resp.json()
         content_path = response_cfg.get("content_path")
@@ -404,9 +567,11 @@ class LLMRouter:
             raise ValueError("send_message response missing content")
         result = str(content_value)
         self._logger.info(
-            "LLM generic response provider=%s chars=%s preview=%r",
+            "LLM generic response provider=%s session_id=%s chars=%s elapsed_ms=%s preview=%r",
             provider.provider_id,
+            session_id,
             len(result),
+            elapsed_ms,
             result[: self._RESPONSE_PREVIEW_LIMIT],
         )
         return result
