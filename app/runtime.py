@@ -47,6 +47,8 @@ class RuntimeContext:
     allow_raw_html: bool
     formatting_mode: str
     skills_usage_prompt: str
+    skills_max_steps_per_request: int
+    skills_followup_mode: str
     prepost_processing_registry: PrePostProcessingRegistry
     skills_registry: SkillRegistry
     skills_service: SkillService

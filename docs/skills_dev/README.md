@@ -1,6 +1,6 @@
 # Skills Development Docs
 
-This section describes the future model-callable `skills` system.
+This section describes the current model-callable `skills` system.
 
 ## Terminology
 

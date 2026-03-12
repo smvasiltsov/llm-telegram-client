@@ -1,5 +1,7 @@
 # MCP Skills Platform: Iteration 1 Plan
 
+> Архивный документ. Текущий план реализации и состояние этапов находятся в `docs/skills_dev/implementation_plan.md`.
+
 ## Goal
 - Add a minimal skills platform for roles:
   - auto-discovery of local skills,

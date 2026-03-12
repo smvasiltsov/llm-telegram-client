@@ -1,5 +1,8 @@
 # Orchestrator JSON Schema (fixed)
 
+> Архивный черновик. В примерах ниже встречаются устаревшие поля (`tools.available`).
+> Текущая структура для model-callable skills описана в `docs/skills_dev/protocol.md`.
+
 ## Цель
 Единый формат входа в LLM для обычных ролей и оркестратора.
 

@@ -1,0 +1,9 @@
+confluence:
+  root_page_id: 1114122
+publish:
+  dry_run_default: true
+  max_batch: 50
+  update_if_changed_only: true
+  markdown_mode: storage
+state:
+  file: .confluence-publish/state.json

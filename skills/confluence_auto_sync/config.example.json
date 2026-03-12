@@ -1,0 +1,24 @@
+{
+  "skill": {
+    "timeout_sec": 300
+  },
+  "confluence": {
+    "url": "https://<site>.atlassian.net/wiki",
+    "username": "your_email@example.com",
+    "token": "your_atlassian_api_token",
+    "timeout_sec": 30,
+    "retry_attempts": 3,
+    "retry_sleep_sec": 3
+  },
+  "publish": {
+    "repo_path": ".",
+    "docs_root": "confluence_docs",
+    "dry_run_default": true,
+    "max_batch": 20,
+    "update_if_changed_only": true,
+    "markdown_mode": "storage"
+  },
+  "state": {
+    "file": ".confluence-publish/state.json"
+  }
+}

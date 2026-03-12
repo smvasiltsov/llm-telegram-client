@@ -17,16 +17,24 @@
 - `app/services/formatting.py` — рендер и безопасная отправка форматированного ответа.
 - `app/services/prompt_builder.py` — выбор модели/провайдера и сборка финального prompt.
 - `app/services/plugin_pipeline.py` — сборка Telegram reply_markup для plugin postprocess.
+- `app/services/skill_calling_loop.py` — цикл model-callable skills (`skill_call`) с логированием шагов.
 - `app/services/tool_exec.py` — выполнение tool-команд (bash), логирование и рендер результата.
 - `app/tools/` — реестр/адаптер/реализации инструментов.
+- `app/skills/` — model-callable skills registry/service/contracts.
+- `app/prepost_processing/` — серверные pre/post hooks вокруг LLM-запроса.
 - `app/storage.py` + `app/models.py` — работа с SQLite и доменными сущностями.
 
 ## Основной поток
 1) Бот добавляется в группу.
 2) Сообщения пользователя маршрутизируются на роль.
 3) У роли выбрана LLM‑модель (фактически это провайдер + модель).
-4) Бот создает/использует сессию провайдера и отправляет сообщение.
-5) Ответ возвращается в группу.
+4) Перед LLM вызовом выполняются `prepost_processing` фазы `pre`.
+5) Если для роли включены model-callable `skills`, запрос идет через `skill_calling_loop`:
+   - LLM может вернуть `skill_call`,
+   - runtime выполняет skill,
+   - результат возвращается в следующий шаг loop.
+6) После финального ответа выполняются `prepost_processing` фазы `post`.
+7) Ответ возвращается в группу.
 
 ## Основные сущности
 - **Group** — телеграм‑группа.
@@ -35,6 +43,8 @@
 - **Provider** — описание API LLM в `llm_providers/*.json`.
 - **Session** — сессия LLM, привязанная к роли и группе.
 - **User fields** — значения, которые бот запрашивает у пользователя (например token, working_dir).
+- **Pre/Post Processing** — автоматические серверные трансформации input/output.
+- **Skill** — моделью вызываемая capability (например `fs.read_file`, `fs.list_dir`, `fs.write_file`).
 
 ## Где хранится состояние
 Хранилище — SQLite (файл в `config.json`):
@@ -42,6 +52,9 @@
 - сессии;
 - история сообщений;
 - user_fields (значения, введённые пользователем).
+- role-skill bindings (`role_skills_enabled`);
+- логи вызовов skills (`skill_runs`);
+- role pre/post bindings (`role_prepost_processing`).
 
 ## Форматирование ответов
 В `config.json` есть параметры:

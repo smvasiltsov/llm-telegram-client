@@ -27,5 +27,7 @@ Expected workflow:
    - `run(ctx, arguments, config)`
 6. test locally:
    - `python3 scripts/skill_runner.py --skill-id <skill_id> --arguments-json '{}' --config-json '{}'`
-7. run smoke tests:
+7. preview what LLM sees:
+   - `python3 scripts/skills_prompt_preview.py --enabled-skill-id <skill_id> --output input_json_compact`
+8. run smoke tests:
    - `python3 -m unittest discover -s tests -v`

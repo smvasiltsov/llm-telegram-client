@@ -391,6 +391,8 @@ async def execute_role_request(
             provider_model_map=provider_model_map,
             provider_registry=provider_registry,
             skills_usage_prompt=str(getattr(runtime, "skills_usage_prompt", "") or ""),
+            default_max_steps=max(1, int(getattr(runtime, "skills_max_steps_per_request", 8) or 8)),
+            followup_mode=str(getattr(runtime, "skills_followup_mode", "full") or "full"),
         )
 
         async def _send_skill_step(current_session_id: str, content: str, current_model_override: str | None) -> SkillStepSendResult:

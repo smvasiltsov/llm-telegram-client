@@ -18,6 +18,10 @@ Important fields:
 - `mode`
 - `timeout_sec`
 
+Important: LLM call contracts are derived from `SkillSpec.description` and `SkillSpec.input_schema`.
+Do not keep primary argument contract details only in README.
+If a skill has multiple modes, encode mode-specific argument contracts in `input_schema` (for example via `oneOf` + `mode` discriminator).
+
 ### `SkillContext`
 
 Runtime metadata passed to the skill:

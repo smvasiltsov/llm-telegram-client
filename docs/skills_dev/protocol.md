@@ -71,44 +71,59 @@ Error result:
 }
 ```
 
-## Catalog shape sent to the LLM
+## Skills section sent to the LLM
 
-The first iteration sends a single compact catalog with each normal request. Every visible skill in the catalog must already be enabled for the current role.
+The first iteration sends a `skills` object with each request. Every visible skill in `skills.available` is already enabled for the current role.
 
 Example:
 
 ```json
 {
-  "skills": [
-    {
-      "skill_id": "fs.read_file",
-      "description": "Read a UTF-8 text file from the allowed workspace.",
-      "mode": "read_only",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "path": {
-            "type": "string"
+  "skills": {
+    "prompt": "You can call skills by answering with a JSON object...",
+    "available": [
+      {
+        "skill_id": "fs.read_file",
+        "name": "Read File",
+        "description": "Read a text file within the allowed root_dir by character range.",
+        "mode": "read_only",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "start_char": { "type": "integer", "minimum": 0 },
+            "end_char": { "type": "integer", "minimum": 0 }
+          },
+          "required": ["path"]
+        }
+      },
+      {
+        "skill_id": "fs.list_dir",
+        "name": "List Directory",
+        "description": "List directory entries within the allowed root_dir.",
+        "mode": "read_only",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" },
+            "limit": { "type": "integer", "minimum": 1 }
           }
-        },
-        "required": ["path"]
+        }
       }
-    },
-    {
-      "skill_id": "web.search",
-      "description": "Search the web and return compact result snippets.",
-      "mode": "read_only",
-      "input_schema": {
-        "type": "object",
-        "properties": {
-          "query": {
-            "type": "string"
-          }
+    ],
+    "history": [
+      {
+        "skill_id": "fs.list_dir",
+        "ok": true,
+        "status": "ok",
+        "output": {
+          "path": ".",
+          "count": 3
         },
-        "required": ["query"]
+        "error": null
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 

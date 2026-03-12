@@ -1,0 +1,7 @@
+id: confluence
+version: 0.1.0
+entrypoint: skill:create_skill
+enabled_by_default: false
+timeout_sec: 30
+permissions: []
+description: "Confluence Cloud v2 skill with read/write operations selected by arguments.operation."

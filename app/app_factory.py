@@ -225,6 +225,8 @@ def build_runtime(
         allow_raw_html=config.allow_raw_html,
         formatting_mode=config.formatting_mode,
         skills_usage_prompt=config.skills_usage_prompt,
+        skills_max_steps_per_request=config.skills_max_steps_per_request,
+        skills_followup_mode=config.skills_followup_mode,
         prepost_processing_registry=prepost_processing_registry,
         skills_registry=skills_registry,
         skills_service=skills_service,

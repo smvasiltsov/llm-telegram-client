@@ -1,5 +1,7 @@
 # Skills Dev Guide (Iteration 1)
 
+> Архивный документ. Актуальный гайд для model-callable skills: `docs/skills_dev/developer_guide.md`.
+
 ## Quick Start
 1. Create folder:
    - `skills/<skill_id>/`

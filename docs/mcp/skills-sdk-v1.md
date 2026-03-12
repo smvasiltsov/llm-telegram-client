@@ -1,5 +1,7 @@
 # Skills SDK v1
 
+> Архивный документ. Актуальная спецификация model-callable skills находится в `docs/skills_dev/*`.
+
 ## Purpose
 SDK v1 defines a stable Python contract for local skills that can be developed and tested outside the bot, then plugged into the bot without code changes.
 

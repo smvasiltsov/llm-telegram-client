@@ -1,0 +1,7 @@
+id: confluence_auto_sync
+version: 0.1.0
+entrypoint: skill:create_skill
+enabled_by_default: false
+timeout_sec: 300
+permissions: []
+description: "Idempotent incremental Confluence sync from repository docs via mcp_publish operation."

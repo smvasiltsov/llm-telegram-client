@@ -40,6 +40,32 @@ python3 scripts/skill_runner.py \
   --config-json '{"root_dir":"./sandbox"}'
 ```
 
+5. Preview what LLM will see for enabled skills and contracts:
+
+```bash
+python3 scripts/skills_prompt_preview.py \
+  --skills-dir skills \
+  --enabled-skill-id fs.read_file \
+  --enabled-skill-id fs.write_file \
+  --output input_json_compact
+```
+
+По умолчанию в preview уже включены debug-метаданные навыка:
+- `version`, `timeout_sec`, `permissions`
+- `manifest.id/version/entrypoint`
+- `config_contract_hints.validate_config_errors_for_empty_config`
+
+Если нужен excerpt из README навыка:
+
+```bash
+python3 scripts/skills_prompt_preview.py \
+  --skills-dir skills \
+  --enabled-skill-id fs.read_file \
+  --include-readme \
+  --readme-max-chars 1500 \
+  --output skills_only
+```
+
 ## Create a new skill
 
 1. Copy `skills/_template` to `skills/<your_skill_folder>`

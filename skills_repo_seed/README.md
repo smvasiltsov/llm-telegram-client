@@ -34,6 +34,7 @@ This kit does not need access to a real LLM provider.
 Skills are developed and tested through:
 
 - direct local execution with `scripts/skill_runner.py`
+- prompt contract preview with `scripts/skills_prompt_preview.py` (includes manifest/config hints by default)
 - local smoke tests
 - registry validation
 
@@ -46,3 +47,9 @@ A skill developed here should work in the main project out of the box if:
 - it is copied into the main repo `skills/` folder;
 - it is enabled for a role in the bot UI;
 - the role skill config is valid.
+
+Additionally, to ensure correct LLM invocation quality:
+
+- describe argument contracts in `SkillSpec.description` and `SkillSpec.input_schema` inside `skill.py`;
+- do not rely on `README.md` as the primary contract source for LLM;
+- for multi-mode skills, encode mode-specific argument branches in `input_schema`.

@@ -28,6 +28,7 @@ MAX_SKILL_TIMEOUT_SEC = 120
 DEFAULT_SKILL_ERROR_TEXT = "Skill loop stopped because the assistant kept repeating the same skill call."
 SKILLS_PROVIDER_ID = "skills"
 SKILLS_ROOT_DIR_KEY = "root_dir"
+ALLOWED_FOLLOWUP_MODES = {"full", "compact"}
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class SkillCallingLoop:
         provider_registry: dict[str, Any],
         skills_usage_prompt: str = "",
         default_max_steps: int = DEFAULT_MAX_SKILL_STEPS,
+        followup_mode: str = "full",
     ) -> None:
         self._storage = storage
         self._llm_executor = llm_executor
@@ -80,6 +82,10 @@ class SkillCallingLoop:
         self._provider_registry = provider_registry
         self._skills_usage_prompt = str(skills_usage_prompt or "").strip()
         self._default_max_steps = default_max_steps
+        normalized_followup_mode = str(followup_mode or "full").strip().lower()
+        if normalized_followup_mode not in ALLOWED_FOLLOWUP_MODES:
+            normalized_followup_mode = "full"
+        self._followup_mode = normalized_followup_mode
 
     async def run(
         self,
@@ -149,13 +155,18 @@ class SkillCallingLoop:
                 skills_available=skill_catalog,
                 skill_history=skill_history,
             )
-            content = "INPUT_JSON:\n" + json.dumps(compact_payload, ensure_ascii=False)
+            content = self._build_step_content(
+                compact_payload=compact_payload,
+                skill_history=skill_history,
+                step_index=step_index,
+            )
             logger.info(
-                "skill loop payload chat_id=%s user_id=%s role=%s step=%s payload=%s",
+                "skill loop payload chat_id=%s user_id=%s role=%s step=%s followup_mode=%s payload=%s",
                 chat_id,
                 user_id,
                 role.role_name,
                 step_index,
+                self._followup_mode,
                 json.dumps(full_payload, ensure_ascii=False),
             )
             if send_step is None:
@@ -246,6 +257,17 @@ class SkillCallingLoop:
             executed_skills=tuple(executed_skills),
             model_override=model_override,
         )
+
+    def _build_step_content(
+        self,
+        *,
+        compact_payload: dict[str, Any],
+        skill_history: list[dict[str, Any]],
+        step_index: int,
+    ) -> str:
+        if self._followup_mode == "compact" and step_index > 0 and skill_history:
+            return "SKILL_RESULT:\n" + json.dumps(skill_history[-1], ensure_ascii=False)
+        return "INPUT_JSON:\n" + json.dumps(compact_payload, ensure_ascii=False)
 
     def _load_enabled_skills(
         self,

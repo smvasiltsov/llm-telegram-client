@@ -28,6 +28,8 @@ DEFAULT_SKILLS_USAGE_PROMPT = (
     '{"type":"skill_call","skill_call":{"skill_id":"<skill_id>","arguments":{...}}}. '
     "Use only skill ids from skills.available."
 )
+DEFAULT_SKILLS_FOLLOWUP_MODE = "full"
+ALLOWED_SKILLS_FOLLOWUP_MODES = {"full", "compact"}
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class AppConfig:
     plugin_server_port: int
     plugin_server_enabled: bool
     skills_usage_prompt: str
+    skills_max_steps_per_request: int
+    skills_followup_mode: str
     tools_enabled: bool
     tools_bash_enabled: bool
     tools_bash_default_cwd: str
@@ -97,6 +101,10 @@ def load_config(path: str | Path) -> AppConfig:
         allowed_workdirs_raw = []
     allowed_workdirs = [str(item).strip() for item in allowed_workdirs_raw if str(item).strip()]
 
+    skills_followup_mode = str(skills_raw.get("followup_mode", DEFAULT_SKILLS_FOLLOWUP_MODE)).strip().lower()
+    if skills_followup_mode not in ALLOWED_SKILLS_FOLLOWUP_MODES:
+        skills_followup_mode = DEFAULT_SKILLS_FOLLOWUP_MODE
+
     return AppConfig(
         telegram_bot_token=raw["telegram_bot_token"],
         database_path=raw.get("database_path", "./bot.sqlite3"),
@@ -116,6 +124,8 @@ def load_config(path: str | Path) -> AppConfig:
         plugin_server_port=int(plugin_server_raw.get("port", 8015)),
         plugin_server_enabled=bool(plugin_server_raw.get("enabled", True)),
         skills_usage_prompt=str(skills_raw.get("usage_prompt", DEFAULT_SKILLS_USAGE_PROMPT)).strip(),
+        skills_max_steps_per_request=max(1, int(skills_raw.get("max_steps_per_request", 8))),
+        skills_followup_mode=skills_followup_mode,
         tools_enabled=bool(tools_raw.get("enabled", True)),
         tools_bash_enabled=bool(bash_raw.get("enabled", True)),
         tools_bash_default_cwd=str(bash_raw.get("default_cwd", ".")),

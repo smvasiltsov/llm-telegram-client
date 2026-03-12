@@ -1,0 +1,376 @@
+{
+  "version": 1,
+  "records": [
+    {
+      "doc_path": "00-start-here/00-1-project-overview.md",
+      "page_id": "5079042",
+      "content_hash": "0ef0d1fe2d3f79b66a7e3f59dd82e26a9764ca01e9197054779de24962093976",
+      "last_published_at": "2026-03-11T19:40:26.867619+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "00-start-here/00-2-how-to-navigate-docs.md",
+      "page_id": "5111810",
+      "content_hash": "492b6ef03b06bf4539a45035b5204bf9c6a3a2d630f212f6dbfaa51bb52f0b9e",
+      "last_published_at": "2026-03-11T19:40:27.963179+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "00-start-here/00-3-glossary.md",
+      "page_id": "5406721",
+      "content_hash": "879d726d99296b5bfc254c34e2996b6ffde807b715041696d4d75f4add49159a",
+      "last_published_at": "2026-03-11T19:40:29.095159+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "00-start-here/_index.md",
+      "page_id": "5373953",
+      "content_hash": "cfe93a53e3e46f7577812c91dfd234f74a71858e23be335c1393830459db7baa",
+      "last_published_at": "2026-03-11T19:40:25.726694+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "10-product-and-user-flows/10-1-bot-ui-in-telegram.md",
+      "page_id": "5439508",
+      "content_hash": "6fa144f466a95b019af15ea2124c556cf0337c2f95cacdb7bc9e1c22dff28c77",
+      "last_published_at": "2026-03-11T19:40:31.340825+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "10-product-and-user-flows/10-2-group-role-management.md",
+      "page_id": "5472257",
+      "content_hash": "61ff1735a14dad716868e866caf12d09392770d82dbd2e0b3833bca251ed9fdc",
+      "last_published_at": "2026-03-11T19:40:32.571084+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "10-product-and-user-flows/10-3-typical-user-scenarios.md",
+      "page_id": "5505025",
+      "content_hash": "30c50f732cf134eb8bbaccf90bfa010ac390bc93b5c025f6b78b925f5477a14d",
+      "last_published_at": "2026-03-11T19:40:33.713365+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "10-product-and-user-flows/10-4-access-model-owner-only-permissions.md",
+      "page_id": "5537793",
+      "content_hash": "21d8efcdcc32dc42facaea4c87d7c22dc848f0f379508dc66bf97513e4686158",
+      "last_published_at": "2026-03-11T19:40:35.209889+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "10-product-and-user-flows/_index.md",
+      "page_id": "5439489",
+      "content_hash": "e5c59469a073eeeda3a4752129c02527a73d6ed2487f14dc5fedb8974fc596b0",
+      "last_published_at": "2026-03-11T19:40:30.293965+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-1-system-architecture-overview.md",
+      "page_id": "5242895",
+      "content_hash": "68d160e168a3d9a66804a54d77bc7fa2dd87a6b949fefde1107ac0470f6025de",
+      "last_published_at": "2026-03-11T19:40:37.969900+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-2-runtime-context-and-core-components.md",
+      "page_id": "5406740",
+      "content_hash": "2124bf51c4b0b59a7fb742991803c5f5d5ab2c09b093ffa1643a5f6069fc7906",
+      "last_published_at": "2026-03-11T19:40:39.050602+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-3-message-processing-pipeline-group-private.md",
+      "page_id": "5603329",
+      "content_hash": "41da3eda3ed0a500677cc046cf5bd190cbd353a2b3ce9177a1efc8ba7899d999",
+      "last_published_at": "2026-03-11T19:40:40.190153+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-4-data-model-and-storage-sqlite-entities.md",
+      "page_id": "5636097",
+      "content_hash": "43cffcb9267132f3fd29185ff7f46bbde56a58e74ad470910cf05e5251a7c55f",
+      "last_published_at": "2026-03-11T19:40:41.331075+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-5-security-threat-model.md",
+      "page_id": "5242914",
+      "content_hash": "eff93ec6a842e1f24950292d6e41994464a4b9e1df0a9df3e18d8740eb67f072",
+      "last_published_at": "2026-03-11T19:40:42.374954+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-6-runtime-flows.md",
+      "page_id": "5341204",
+      "content_hash": "1a48d4d55d85aa38bcde2b701cfcd91f3455f176fe9a1af3141ad34d97b83ea6",
+      "last_published_at": "2026-03-11T19:40:43.434090+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/_index.md",
+      "page_id": "5570561",
+      "content_hash": "b5797af9f1e45c51c867ba92fabc6675f50cd5145cd550821a9c9779503f47bc",
+      "last_published_at": "2026-03-11T19:40:36.292578+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "30-llm-integration/30-1-providers-overview.md",
+      "page_id": "5701633",
+      "content_hash": "78fff071d81d7940651fe0d614809374591e2b53007d2dd54bcce02c71b48690",
+      "last_published_at": "2026-03-11T19:40:45.850285+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "30-llm-integration/30-2-provider-config-template.md",
+      "page_id": "5406759",
+      "content_hash": "3287e481cfbf6211d9016f3d4fbe85fd2ec14dcc78986d856e5477dfeb2d651f",
+      "last_published_at": "2026-03-11T19:40:46.952261+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "30-llm-integration/30-3-user-fields-and-auth-modes.md",
+      "page_id": "5734401",
+      "content_hash": "80fb3c17473312fc9c0e4762f8e690922462d70606665bc98dc7214502513fe8",
+      "last_published_at": "2026-03-11T19:40:48.087894+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "30-llm-integration/30-4-session-history-behavior.md",
+      "page_id": "5767169",
+      "content_hash": "7e93bb2c684c8fe09b6010968ead8270dd72e0f7ea040e4ce6d9dcf028ae53c6",
+      "last_published_at": "2026-03-11T19:40:49.197355+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "30-llm-integration/30-5-plugins-and-post-processing.md",
+      "page_id": "5111829",
+      "content_hash": "b7de1cf3a53f34f1f26df9718473acbffa566c185cb0b6567d048fe69740d3cf",
+      "last_published_at": "2026-03-11T19:40:50.247654+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "30-llm-integration/_index.md",
+      "page_id": "5668865",
+      "content_hash": "134139c7433918c25d3114868f03a3291b537b2ec905be9b769b56d242d2c89b",
+      "last_published_at": "2026-03-11T19:40:44.671857+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/40-1-skills-architecture.md",
+      "page_id": "5832705",
+      "content_hash": "37b7e80936417902362e08efec3061263808c140a9bedbd059f1e8f19a305935",
+      "last_published_at": "2026-03-11T19:40:52.477099+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/40-2-skills-protocol-skill-call.md",
+      "page_id": "5865473",
+      "content_hash": "d1bf2a0d34c496a4fc0e0f0e8865dee8539df43101fa61382be3e91874a3be3d",
+      "last_published_at": "2026-03-11T19:40:53.653843+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/40-3-skills-developer-guide.md",
+      "page_id": "5898241",
+      "content_hash": "d56563c9a4babaaaa80c7a6369859bf989a3b462458e573d7d004bb43f684078",
+      "last_published_at": "2026-03-11T19:40:54.786104+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/40-4-skills-runner-cli.md",
+      "page_id": "5931009",
+      "content_hash": "91d1a697b12ada2e479cc444f67eec5447f7f51c4c10c73a1408e1ab7e912dc0",
+      "last_published_at": "2026-03-11T19:40:58.057895+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/40-5-mcp-tool-runner-cli.md",
+      "page_id": "5701652",
+      "content_hash": "fd05e17448aa13ceedd73f12639df2723f9bb61890f8790f7ca9f35cf0db7064",
+      "last_published_at": "2026-03-11T19:40:59.105067+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/40-6-mcp-publish-repo-to-confluence-specification.md",
+      "page_id": "5963777",
+      "content_hash": "1ee0d76f363b490bd5d352e37d9f0ccbe0da0037029293a5fc441889ac8566d5",
+      "last_published_at": "2026-03-11T19:41:00.202226+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "40-skills-and-mcp-platform/_index.md",
+      "page_id": "5799937",
+      "content_hash": "72b3f117b90f2aa26f30723556c0df605000c55d22ed2a7a464f815ba5b3383b",
+      "last_published_at": "2026-03-11T19:40:51.332938+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "50-development/50-1-developer-setup.md",
+      "page_id": "5898260",
+      "content_hash": "9ac911bdc1f4a4ba54591da97b2017fd2a23fea41050bd6b818dbf359368af49",
+      "last_published_at": "2026-03-11T19:41:02.468971+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "50-development/50-2-codebase-structure-and-layering.md",
+      "page_id": "5996565",
+      "content_hash": "cd1d338b8888c778173682e8069728f36505f375f6d8d60d1009f6c93da1182b",
+      "last_published_at": "2026-03-11T19:41:03.519055+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "50-development/50-3-adding-new-provider.md",
+      "page_id": "5898279",
+      "content_hash": "84ff8878cc8c5ac6b1aec4995fa9f2931b860535a17d67a9b23b1886524aba1e",
+      "last_published_at": "2026-03-11T19:41:04.616279+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "50-development/50-4-local-validation-and-smoke-tests.md",
+      "page_id": "5439527",
+      "content_hash": "b595fe6adc5c2aebe46f2e97f26c21fef59c20ca2d5ec4de6657b4b7f6e6f94c",
+      "last_published_at": "2026-03-11T19:41:05.733305+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "50-development/50-5-observability-and-logs.md",
+      "page_id": "6029313",
+      "content_hash": "efa34c6213f93ac35a79c4c4dbee53fc30a4d3336fe2ee8665efa02816b25365",
+      "last_published_at": "2026-03-11T19:41:06.897097+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "50-development/_index.md",
+      "page_id": "5996545",
+      "content_hash": "fd2b70375d8b73350d5f339109f0be9e92fafb926f944fc82d7fdd0a46dabd32",
+      "last_published_at": "2026-03-11T19:41:01.363351+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "60-operations-and-quality/60-1-troubleshooting.md",
+      "page_id": "6094849",
+      "content_hash": "3bafdc8a843e726c4e64eb8ea30032bdc3386f08d6b1cfe689521c84f8c16429",
+      "last_published_at": "2026-03-11T19:41:09.200081+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "60-operations-and-quality/60-2-documentation-quality-gates.md",
+      "page_id": "6127617",
+      "content_hash": "9cf74bf6d07b99b9655f94b0948654a1fb93b6b56591577e7b315d0c7e603d1d",
+      "last_published_at": "2026-03-11T19:41:10.441705+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "60-operations-and-quality/60-3-documentation-regression-checklist.md",
+      "page_id": "5931028",
+      "content_hash": "d670ba882dcdcc5c25747f9ee4aa948e575516cef3762b34db9a9752853ccb43",
+      "last_published_at": "2026-03-11T19:41:11.564255+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "60-operations-and-quality/60-4-documentation-freshness-monitoring.md",
+      "page_id": "6160385",
+      "content_hash": "691513bdb0bbd6e421d5a236162ecdb490c96e6ed05ec19cf3d712099697dd84",
+      "last_published_at": "2026-03-11T19:41:12.743059+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "60-operations-and-quality/60-5-link-and-metadata-validation-workflow.md",
+      "page_id": "6062100",
+      "content_hash": "262df2708e3927319f4739a65e3e7183a2ccc6e146aa588cc392e6665819e138",
+      "last_published_at": "2026-03-11T19:41:13.842058+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "60-operations-and-quality/_index.md",
+      "page_id": "6062081",
+      "content_hash": "a1403d17137e543bd011b4ec3345f15c5773042a60d60645768317a96eaa8e93",
+      "last_published_at": "2026-03-11T19:41:08.095541+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "70-decisions-adr/70-1-adr-index.md",
+      "page_id": "5472276",
+      "content_hash": "5580d25761bb59f4ba58eed98022e0d440ab41fbda46110c38a7c93ea55c9c74",
+      "last_published_at": "2026-03-11T19:41:15.994227+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "70-decisions-adr/70-2-adr-002-event-driven-processing-for-telegram-updates.md",
+      "page_id": "6193153",
+      "content_hash": "82afb91aaca931c366a638268ae0626d6f6d0d9d6fdf71ce3ea193c926644c93",
+      "last_published_at": "2026-03-11T19:41:17.210480+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "70-decisions-adr/70-3-architecture-data-runtime-adrs.md",
+      "page_id": "5734420",
+      "content_hash": "d938b4ff770dd3839fef2b517303f5c0bcde6a3d464868155128201978f3c226",
+      "last_published_at": "2026-03-11T19:41:18.383360+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "70-decisions-adr/_index.md",
+      "page_id": "5996584",
+      "content_hash": "3a9ace8332561984a946164ca3d2cd13bcc20dec55d2972a8b532d675a8232e5",
+      "last_published_at": "2026-03-11T19:41:14.917934+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "80-backlog-and-roadmap/80-1-documentation-coverage-and-gap-report.md",
+      "page_id": "6258689",
+      "content_hash": "05c492cb75ac4c7fad6f662c9c3e0263ed58e8a7b9a3a71d14e95618baa92f53",
+      "last_published_at": "2026-03-11T19:41:20.701059+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "80-backlog-and-roadmap/80-2-continuous-improvement-backlog.md",
+      "page_id": "6291457",
+      "content_hash": "cc66376945d368ac5d6292b026780723d2d1a7f8bf2360dad46c573940b2dfd8",
+      "last_published_at": "2026-03-11T19:41:21.822847+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "80-backlog-and-roadmap/80-3-iteration-plans-mcp-skills.md",
+      "page_id": "6324225",
+      "content_hash": "84efea542db6750e6d65eeba9f7080c810433d3ed3c6cc4eabbdb0a771d73b67",
+      "last_published_at": "2026-03-11T19:41:22.951628+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "80-backlog-and-roadmap/_index.md",
+      "page_id": "6225921",
+      "content_hash": "d428d901a57eafe7218f062dc1d73e2126dc666641e9af12969ef5f909d36de4",
+      "last_published_at": "2026-03-11T19:41:19.558787+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "90-archive/90-1-legacy-mcp-iteration-docs.md",
+      "page_id": "5537812",
+      "content_hash": "11cac86e72a22431efd761925a0c37d3d7927c079513fe0709b8f352709d4a76",
+      "last_published_at": "2026-03-11T19:41:25.230251+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "90-archive/90-2-temporary-planning-notes-docs-temp.md",
+      "page_id": "6389761",
+      "content_hash": "ce973d8876ee2c487a088f73ac993bb7278e3ee35fb691e458d607b8080fcf64",
+      "last_published_at": "2026-03-11T19:41:26.373954+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "90-archive/_index.md",
+      "page_id": "6356993",
+      "content_hash": "4d3f003b947098688472dbb7723526989794b8a75947d693dca089bfacb2ec41",
+      "last_published_at": "2026-03-11T19:41:24.120808+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "_index.md",
+      "page_id": "5341185",
+      "content_hash": "392390de2db10b1a5e30cc59324923d08704d104e7cefb25ab4d3be7de4360f9",
+      "last_published_at": "2026-03-11T19:40:24.576622+00:00",
+      "last_published_version": 1
+    }
+  ]
+}
