@@ -8,6 +8,7 @@ from telegram.ext import ContextTypes
 
 from app.message_buffer import MessageBuffer
 from app.pending_store import PendingStore
+from app.role_catalog_service import refresh_role_catalog
 from app.services.role_pipeline import roles_require_auth, run_chain
 from app.roles_registry import seed_team_roles
 from app.router import RouteResult, route_message
@@ -41,6 +42,7 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
         update.message.text,
     )
     storage: Storage = _runtime(context).storage
+    refresh_role_catalog(runtime=_runtime(context), storage=storage)
     team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
     seed_team_roles(storage, team_id)
     orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
@@ -124,6 +126,7 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
 
     bot_username = _runtime(context).bot_username
     storage: Storage = _runtime(context).storage
+    refresh_role_catalog(runtime=_runtime(context), storage=storage)
     team_id = storage.resolve_team_id_by_telegram_chat(chat_id)
     if team_id is None:
         logger.warning("flush skipped: team binding not found chat_id=%s", chat_id)

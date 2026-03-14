@@ -15,47 +15,39 @@ doc:
 ---
 # 10.2 Group/Role Management
 
-## Group as the Scope Boundary
-LTC organizes configuration around Telegram groups. Roles are attached to groups, and each group can have its own role set.
+## Team Scope and Master Roles
+Role behavior is split into two layers:
+- **master role** (file-based JSON in `roles_catalog`),
+- **team role binding** (team-specific enablement and overrides).
 
-## Role Lifecycle
-Typical role lifecycle in a group:
-1. Create role.
-2. Provide role name and description.
-3. Optionally provide system prompt.
-4. Select model.
-5. Configure optional instructions and runtime capabilities.
+## Role Identity (LTC-12)
+- identity is file basename only (`<name>.json`),
+- valid basename regex: `^[a-z0-9_]+$`,
+- payload `role_name` is metadata only.
 
-After creation, role settings can be updated at any time from the role card.
+## `/roles` User Flow
+- list is loaded from disk on every request (hot-reload),
+- valid roles are shown even when some files are invalid,
+- catalog errors are shown in UI.
 
-## Role Configuration Surface
-A role may include:
-- system prompt,
-- general instructions applied to each message,
-- reply-context instructions,
-- model/provider selection,
-- enabled skills,
-- enabled pre/post processors.
+Typical catalog errors surfaced to users:
+- invalid file name,
+- malformed JSON,
+- duplicate by case-fold,
+- `role_name` mismatch between payload and file name.
 
-These settings shape how requests are interpreted and executed.
+## `/groups` User Flow
+Within a team, users manage bound roles:
+- add role from master-role list,
+- adjust team-level overrides and capabilities,
+- reset role session,
+- remove binding from team.
 
-## Session Behavior Per Role
-Conversation context is isolated by user, group, and role key. This prevents accidental context leakage between roles or groups.
+## Deletion/Rename Behavior
+If a role file is removed or renamed:
+- old team bindings for previous identity are deactivated automatically,
+- no automatic transfer to new identity is performed.
 
-Operationally this means:
-- changing role in the same group starts a different context,
-- the same role name in another group can have separate behavior,
-- role-level reset clears that role session without deleting the role.
-
-## Deletion and Reset Operations
-Role management supports:
-- **reset session**: keep role settings, clear conversation context,
-- **delete role**: remove role binding from the group.
-
-These actions are intentionally explicit to reduce accidental data loss.
-
-## Practical Management Guidelines
-- Keep role purpose narrow and explicit.
-- Prefer small, focused roles over one large generic role.
-- Use clear role names that map to business intent.
-- Review enabled skills periodically to keep least-privilege behavior.
+## Session Behavior
+Role context remains isolated by user + team + role binding.
+Reset operation clears session state without deleting master role file.

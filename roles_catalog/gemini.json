@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "role_name": "gemini",
+  "description": "Роль gemini",
+  "base_system_prompt": "",
+  "extra_instruction": "",
+  "llm_model": "gemini-api:default",
+  "is_active": true
+}

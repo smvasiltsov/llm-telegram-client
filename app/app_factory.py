@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -32,6 +33,8 @@ from app.llm_providers import load_provider_registry
 from app.llm_router import LLMRouter
 from app.message_buffer import MessageBuffer
 from app.prepost_processing.registry import PrePostProcessingRegistry
+from app.role_catalog import RoleCatalog
+from app.role_catalog_export import export_roles_from_db_first_run
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
 from app.plugin_server import PluginServerConfig, PluginTextServer
@@ -46,6 +49,7 @@ from app.tools import BashTool, ToolMCPAdapter, ToolRegistry, ToolService
 
 
 HandlerFn = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+logger = logging.getLogger("bot")
 
 
 def register_handlers(
@@ -137,6 +141,9 @@ def build_runtime(
 
     storage = Storage(config.database_path)
     seed_roles(storage)
+    export_result = export_roles_from_db_first_run(storage, (base_cwd / "roles_catalog").resolve())
+    role_catalog = RoleCatalog.load((base_cwd / "roles_catalog").resolve())
+    storage.attach_role_catalog(role_catalog)
 
     cipher = TokenCipher(config.encryption_key)
     default_provider_id = next(iter(llm_clients.keys()))
@@ -203,6 +210,11 @@ def build_runtime(
     )
 
     storage.reset_authorizations()
+    if role_catalog.issues:
+        for issue in role_catalog.issues:
+            logger.warning("role_catalog issue path=%s reason=%s", issue.path, issue.reason)
+    if export_result.skipped_by_marker:
+        logger.info("role_catalog export skipped by marker")
     return RuntimeContext(
         bot_username=bot_username,
         storage=storage,
@@ -245,4 +257,5 @@ def build_runtime(
         team_dual_read_enabled=config.team_dual_read_enabled,
         team_dual_write_enabled=config.team_dual_write_enabled,
         team_rollout_mode=config.team_rollout_mode,
+        role_catalog=role_catalog,
     )

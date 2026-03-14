@@ -6,59 +6,35 @@
 - `bot.py` — entrypoint: загрузка конфигурации, инициализация runtime, lifecycle Telegram application.
 - `app/app_factory.py` — сборка runtime и регистрация Telegram handlers.
 - `app/runtime.py` — единый контейнер зависимостей (`RuntimeContext`), который хранится в `bot_data["runtime"]`.
-- `app/handlers/` — слой Telegram-обработчиков:
-- `app/handlers/commands.py` — `/groups`, `/roles`, `/tools`, `/bash`, reset/set prompt.
-- `app/handlers/callbacks.py` — inline UI callbacks (`/groups` навигация и действия по ролям).
-- `app/handlers/membership.py` — события добавления/удаления бота, учет групп.
-- `app/handlers/messages_private.py` — private flow (pending token/user_fields, password flow bash, приватные шаги UI).
-- `app/handlers/messages_group.py` — групповой flow (буферизация, маршрутизация по ролям, ответы в группу).
-- `app/handlers/messages_common.py` — общие helper-функции для private/group handlers.
-- `app/services/` — бизнес-утилиты, не привязанные к конкретному handler:
-- `app/services/formatting.py` — рендер и безопасная отправка форматированного ответа.
-- `app/services/prompt_builder.py` — выбор модели/провайдера и сборка финального prompt.
-- `app/services/plugin_pipeline.py` — сборка Telegram reply_markup для plugin postprocess.
-- `app/services/skill_calling_loop.py` — цикл model-callable skills (`skill_call`) с логированием шагов.
-- `app/services/tool_exec.py` — выполнение tool-команд (bash), логирование и рендер результата.
-- `app/tools/` — реестр/адаптер/реализации инструментов.
-- `app/skills/` — model-callable skills registry/service/contracts.
-- `app/prepost_processing/` — серверные pre/post hooks вокруг LLM-запроса.
+- `app/role_catalog.py` — загрузка и валидация master-role JSON каталога.
+- `app/role_catalog_service.py` — refresh/hot-reload, identity resolve, cleanup привязок при удалении/rename файла.
+- `app/handlers/` — слой Telegram-обработчиков (`/groups`, `/roles`, callbacks, group/private message flows).
+- `app/services/` — бизнес-утилиты (prompt building, formatting, role pipeline, skill loop, tool exec).
 - `app/storage.py` + `app/models.py` — работа с SQLite и доменными сущностями.
 
-## Основной поток
-1) Бот добавляется в группу.
-2) Сообщения пользователя маршрутизируются на роль.
-3) У роли выбрана LLM‑модель (фактически это провайдер + модель).
-4) Перед LLM вызовом выполняются `prepost_processing` фазы `pre`.
-5) Если для роли включены model-callable `skills`, запрос идет через `skill_calling_loop`:
-   - LLM может вернуть `skill_call`,
-   - runtime выполняет skill,
-   - результат возвращается в следующий шаг loop.
-6) После финального ответа выполняются `prepost_processing` фазы `post`.
-7) Ответ возвращается в группу.
-
 ## Основные сущности
-- **Group** — телеграм‑группа.
-- **Role** — роль бота (настройки подсказок, модели, инструкции).
-- **GroupRole** — связка роли и группы (override промпта, модель и т.п.).
-- **Provider** — описание API LLM в `llm_providers/*.json`.
-- **Session** — сессия LLM, привязанная к роли и группе.
-- **User fields** — значения, которые бот запрашивает у пользователя (например token, working_dir).
-- **Pre/Post Processing** — автоматические серверные трансформации input/output.
-- **Skill** — моделью вызываемая capability (например `fs.read_file`, `fs.list_dir`, `fs.write_file`).
+- **Team** — доменная команда.
+- **Team binding** — связь команды с интерфейсом (Telegram chat).
+- **Master role (JSON)** — master-конфигурация роли из `roles_catalog/*.json`.
+- **Team role** — привязка master-role к команде с override-полями.
+- **Session** — контекст пользователя по `team + role`.
+
+## LTC-12 (актуальная модель ролей)
+- Master-role identity: только basename файла `.json`.
+- Валидный basename: `^[a-z0-9_]+$`.
+- Поле `role_name` в JSON не является источником identity.
+- Duplicate по case-fold обрабатывается детерминированно: первый файл в стабильной сортировке побеждает, остальные идут в errors.
+- `/roles` и role callbacks используют hot-reload (чтение с диска на каждый запрос).
+- Валидные роли отображаются вместе с ошибками каталога.
+- При удалении/переименовании файла старые `team_roles`-привязки автоматически деактивируются.
 
 ## Где хранится состояние
-Хранилище — SQLite (файл в `config.json`):
-- роли, группы, настройки ролей;
-- сессии;
-- история сообщений;
-- user_fields (значения, введённые пользователем).
-- role-skill bindings (`role_skills_enabled`);
-- логи вызовов skills (`skill_runs`);
-- role pre/post bindings (`role_prepost_processing`).
+SQLite хранит:
+- team bindings, team role bindings, override-настройки;
+- user role sessions;
+- conversation history;
+- provider user fields;
+- role-skill / role-prepost bindings;
+- observability логи (`skill_runs`, `tool_runs`).
 
-## Форматирование ответов
-В `config.json` есть параметры:
-- `formatting.mode` — `html` или `markdown` (по умолчанию `markdown`).
-- `formatting.allow_raw_html` — разрешает отправку «сырого» HTML от LLM (актуально для режима `html`).
-
-Если включён raw‑режим, бот сначала пытается отправить текст как HTML, а при ошибке Telegram API автоматически делает fallback на экранированный текст.
+Master-role параметры (prompt/instruction/default model) берутся из JSON-файлов, а не из master-таблицы БД как источник истины.

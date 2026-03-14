@@ -16,37 +16,36 @@ doc:
 # 20.4 Data Model and Storage (SQLite entities)
 
 ## Storage Engine
-LTC uses SQLite as the default persistence backend. Schema initialization and backward-compatible migrations are handled by `Storage` in `app/storage.py`.
+LTC uses SQLite as the default persistence backend. Schema initialization and compatible migrations are handled in `app/storage.py`.
 
-## Primary Domain Entities
+## Core Entities
 
-### Users and Authorization
-- `users`: Telegram user identity, authorization flag, creation timestamp.
-- `auth_tokens`: encrypted provider token storage and auth state metadata.
+### Team and Bindings
+- `teams`: canonical team entity.
+- `team_bindings`: interface links (Telegram chat and future interfaces).
 
-### Group and Role Configuration
-- `groups`: known Telegram groups and active status.
-- `roles`: reusable role definitions (name, description, base prompts, default model).
-- `group_roles`: role binding to group with per-group overrides and enablement flags.
+### Role Layering (LTC-12)
+- master-role source of truth: JSON files in `roles_catalog/`.
+- role identity: file basename only.
+- `team_roles`: binding of role identity to team with overrides and runtime flags.
 
-### Session and Conversation Data
-- `user_role_sessions`: session mapping by `(telegram_user_id, group_id, role_id)` with lifecycle timestamps.
-- `conversation_messages`: persisted message history by session id.
+Important columns:
+- `team_roles.role_name`: file-based identity snapshot used for routing and cleanup logic.
+- `team_roles.team_role_id`: surrogate binding id for session/capability tables.
 
-### Provider/User Runtime Data
-- `provider_user_data`: provider-scoped key/value fields with optional role scope.
+### Runtime Data
+- `user_role_sessions`: sessions scoped by `(telegram_user_id, team_id, role_id/team_role_id)`.
+- `conversation_messages`: persisted conversation messages.
+- `provider_user_data`: provider fields, including role-scoped values.
 
 ### Capability Bindings
-- `role_prepost_processing`: enabled pre/post processors per `(group, role)` with optional config JSON.
-- `role_skills_enabled`: enabled skills per `(group, role)` with optional config JSON.
+- `role_prepost_processing`: pre/post processor bindings per team role.
+- `role_skills_enabled`: skill bindings per team role.
 
-### Observability and Execution Logs
-- `skill_runs`: skill execution chain, step metadata, duration, status, serialized input/output.
-- `tool_runs`: command/tool execution metadata and status.
-- `plugin_texts`: plugin-managed text storage.
+### Observability
+- `skill_runs`, `tool_runs`, `plugin_texts`.
 
-## Modeling Principles
-- Composite keys enforce scope boundaries.
-- Runtime features are enabled explicitly per role-group pair.
-- JSON fields allow flexible per-feature configuration.
-- Timestamp fields support auditability and operational diagnostics.
+## Modeling Notes
+- Team-level overrides are stored in DB.
+- Master role defaults (prompt/instruction/model) are loaded from JSON catalog and merged at runtime.
+- Catalog refresh deactivates stale team role bindings when file identity disappears (remove/rename).

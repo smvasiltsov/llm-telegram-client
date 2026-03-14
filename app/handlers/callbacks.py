@@ -7,6 +7,12 @@ from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, 
 from telegram.ext import ContextTypes
 
 from app.llm_providers import model_label
+from app.role_catalog_service import (
+    create_master_role_json,
+    ensure_role_identity_by_name,
+    list_active_master_role_names,
+    refresh_role_catalog,
+)
 from app.runtime import RuntimeContext
 from app.services.prompt_builder import provider_id_from_model, resolve_provider_model
 from app.storage import Storage
@@ -59,32 +65,70 @@ def _preview_text(value: str | None, *, max_len: int = 140) -> str:
     return text[: max_len - 1].rstrip() + "…"
 
 
-def _master_roles_keyboard(storage: Storage) -> InlineKeyboardMarkup:
+def _master_roles_keyboard(storage: Storage, runtime: RuntimeContext) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
     rows.append([InlineKeyboardButton(text="➕ Создать master-role", callback_data="mrole_create")])
-    for role in storage.list_active_roles():
-        bindings = storage.list_team_role_bindings_for_role(role.role_id, active_only=True)
+    for role_name in list_active_master_role_names(runtime):
+        role_id: int | None = None
+        try:
+            role_id = ensure_role_identity_by_name(runtime=runtime, storage=storage, role_name=role_name).role_id
+        except Exception:
+            role_id = None
+        bindings = storage.list_team_role_bindings_for_role(role_id, active_only=True) if role_id is not None else []
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"@{role.role_name} ({len(bindings)})",
-                    callback_data=f"mrole:{role.role_id}",
+                    text=f"@{role_name} ({len(bindings)})",
+                    callback_data=f"mrole_name:{role_name}",
                 )
             ]
         )
     return InlineKeyboardMarkup(rows)
 
 
-def _master_role_card_text(storage: Storage, role_id: int) -> str:
-    role = storage.get_role_by_id(role_id)
-    bindings = storage.list_team_role_bindings_for_role(role_id, active_only=True)
+def _master_roles_list_text(runtime: RuntimeContext, *, max_issues: int = 10) -> str:
+    lines = ["Выбери master-role:"]
+    issues = runtime.role_catalog.issues
+    if not issues:
+        return "\n".join(lines)
+    lines.append("")
+    lines.append(f"Ошибки чтения JSON: {len(issues)}")
+    for issue in issues[:max_issues]:
+        lines.append(f"- {issue.path.name}: {_human_issue_reason(issue.reason)}")
+    if len(issues) > max_issues:
+        lines.append(f"- ... и ещё {len(issues) - max_issues}")
+    return "\n".join(lines)
+
+
+def _human_issue_reason(reason: str) -> str:
+    if reason.startswith("invalid_file_name:"):
+        return "некорректное имя файла (разрешены только [a-z0-9_])"
+    if reason.startswith("duplicate_role_name_casefold:"):
+        winner = reason.split("winner=", 1)[1] if "winner=" in reason else "unknown"
+        return f"дубликат имени роли по регистру; используется файл {winner}"
+    if reason.startswith("role_name_mismatch:"):
+        payload_name = reason.split(":", 1)[1].split("->", 1)[0]
+        return f"role_name в JSON ({payload_name}) не совпадает с именем файла; используется имя файла"
+    return reason
+
+
+def _master_role_card_text(storage: Storage, runtime: RuntimeContext, role_name: str) -> str:
+    catalog_role = runtime.role_catalog.get(role_name)
+    if catalog_role is None:
+        raise ValueError(f"Master-role not found in catalog: {role_name}")
+    role_id: int | None = None
+    try:
+        role_id = ensure_role_identity_by_name(runtime=runtime, storage=storage, role_name=role_name).role_id
+    except Exception:
+        role_id = None
+    bindings = storage.list_team_role_bindings_for_role(role_id, active_only=True) if role_id is not None else []
     lines = [
-        f"Master-role: @{role.role_name}",
-        f"role_name: `{role.role_name}`",
-        f"Модель по умолчанию: {role.llm_model or '(не задана)'}",
+        f"Master-role: @{catalog_role.role_name}",
+        f"role_name: `{catalog_role.role_name}`",
+        f"Модель по умолчанию: {catalog_role.llm_model or '(не задана)'}",
         "",
-        f"System prompt: {_preview_text(role.base_system_prompt)}",
-        f"Instruction: {_preview_text(role.extra_instruction)}",
+        f"System prompt: {_preview_text(catalog_role.base_system_prompt)}",
+        f"Instruction: {_preview_text(catalog_role.extra_instruction)}",
         "",
         "Привязки к командам:",
     ]
@@ -96,7 +140,7 @@ def _master_role_card_text(storage: Storage, role_id: int) -> str:
             team_name = str(b["team_name"] or f"team:{team_id}")
             tg_id = b.get("telegram_group_id")
             tg_title = b.get("telegram_group_title")
-            display = str(b.get("display_name") or role.role_name)
+            display = str(b.get("display_name") or catalog_role.role_name)
             status = "ON" if bool(b.get("enabled")) else "OFF"
             mode = str(b.get("mode") or "normal")
             if tg_id is not None:
@@ -115,8 +159,8 @@ async def _handle_master_roles_navigation(
 ) -> bool:
     if data == "mroles:list":
         await query.edit_message_text(
-            "Выбери master-role:",
-            reply_markup=_master_roles_keyboard(storage),
+            _master_roles_list_text(runtime),
+            reply_markup=_master_roles_keyboard(storage, runtime),
         )
         await query.answer()
         return True
@@ -133,27 +177,38 @@ async def _handle_master_roles_navigation(
         )
         await query.answer()
         return True
-    if data.startswith("mrole:"):
-        role_id = int(data.split(":", 1)[1])
+    if data.startswith("mrole_name:"):
+        role_name = data.split(":", 1)[1]
+        try:
+            card_text = _master_role_card_text(storage, runtime, role_name)
+        except ValueError:
+            await query.edit_message_text(
+                "Master-role не найдена в каталоге.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mroles:list")]]
+                ),
+            )
+            await query.answer()
+            return True
         await query.edit_message_text(
-            _master_role_card_text(storage, role_id),
+            card_text,
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton(text="➕ Добавить в команду", callback_data=f"mrole_add:{role_id}")],
+                    [InlineKeyboardButton(text="➕ Добавить в команду", callback_data=f"mrole_add_name:{role_name}")],
                     [InlineKeyboardButton(text="⬅️ Назад", callback_data="mroles:list")],
                 ]
             ),
         )
         await query.answer()
         return True
-    if data.startswith("mrole_add:"):
-        role_id = int(data.split(":", 1)[1])
+    if data.startswith("mrole_add_name:"):
+        role_name = data.split(":", 1)[1]
         groups = _list_telegram_groups(storage)
         if not groups:
             await query.edit_message_text(
                 "Нет доступных команд Telegram для привязки.",
                 reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mrole:{role_id}")]]
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mrole_name:{role_name}")]]
                 ),
             )
             await query.answer()
@@ -162,30 +217,29 @@ async def _handle_master_roles_navigation(
             [
                 InlineKeyboardButton(
                     text=(group.title or str(group.group_id)),
-                    callback_data=f"mrole_bind:{role_id}:{group.group_id}",
+                    callback_data=f"mrole_bind_name:{role_name}:{group.group_id}",
                 )
             ]
             for group in groups
         ]
-        keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mrole:{role_id}")])
+        keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mrole_name:{role_name}")])
         await query.edit_message_text(
             "Выбери команду для привязки роли:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         await query.answer()
         return True
-    if data.startswith("mrole_bind:"):
-        _, role_id_str, group_id_str = data.split(":", 2)
-        role_id = int(role_id_str)
+    if data.startswith("mrole_bind_name:"):
+        _, role_name, group_id_str = data.split(":", 2)
         group_id = int(group_id_str)
-        role = storage.get_role_by_id(role_id)
+        role = ensure_role_identity_by_name(runtime=runtime, storage=storage, role_name=role_name)
         team_id = _team_id(storage, group_id)
-        _, created = storage.bind_master_role_to_team(team_id, role_id)
+        _, created = storage.bind_master_role_to_team(team_id, role.role_id)
         note = "привязана к" if created else "уже привязана к"
         await query.edit_message_text(
             f"Роль @{role.role_name} {note} команде {group_id}.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(text="⬅️ К роли", callback_data=f"mrole:{role_id}")]]
+                [[InlineKeyboardButton(text="⬅️ К роли", callback_data=f"mrole_name:{role_name}")]]
             ),
         )
         await query.answer()
@@ -222,21 +276,21 @@ async def _handle_master_role_create_model(
     role_name = str(state["role_name"])
     prompt = str(state.get("prompt", ""))
     instruction = str(state.get("instruction", ""))
-    role = storage.upsert_role(
+    create_master_role_json(
+        runtime=runtime,
+        storage=storage,
         role_name=role_name,
-        description=f"Master role {role_name}",
         base_system_prompt=prompt,
         extra_instruction=instruction,
         llm_model=model,
-        is_active=True,
     )
     pending_roles.pop(query.from_user.id, None)
     await query.edit_message_text(
-        f"Master-role @{role.role_name} создана.",
+        f"Master-role @{role_name} создана.",
         reply_markup=InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton(text="➕ Добавить в команду", callback_data=f"mrole_add:{role.role_id}")],
-                [InlineKeyboardButton(text="Открыть карточку", callback_data=f"mrole:{role.role_id}")],
+                [InlineKeyboardButton(text="➕ Добавить в команду", callback_data=f"mrole_add_name:{role_name}")],
+                [InlineKeyboardButton(text="Открыть карточку", callback_data=f"mrole_name:{role_name}")],
             ]
         ),
     )
@@ -382,14 +436,14 @@ async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: St
 async def _handle_add_role(query: CallbackQuery, data: str, context: ContextTypes.DEFAULT_TYPE, storage: Storage, runtime: RuntimeContext) -> bool:
     if data.startswith("addrole:"):
         group_id = int(data.split(":", 1)[1])
-        master_roles = storage.list_active_roles()
+        master_roles = list_active_master_role_names(runtime)
         keyboard: list[list[InlineKeyboardButton]] = []
-        for master_role in master_roles:
+        for role_name in master_roles:
             keyboard.append(
                 [
                     InlineKeyboardButton(
-                        text=f"@{master_role.role_name}",
-                        callback_data=f"addrole_master:{group_id}:{master_role.role_id}",
+                        text=f"@{role_name}",
+                        callback_data=f"addrole_master_name:{group_id}:{role_name}",
                     )
                 ]
             )
@@ -400,13 +454,12 @@ async def _handle_add_role(query: CallbackQuery, data: str, context: ContextType
         )
         await query.answer()
         return True
-    if data.startswith("addrole_master:"):
-        _, group_id_str, role_id_str = data.split(":", 2)
+    if data.startswith("addrole_master_name:"):
+        _, group_id_str, role_name = data.split(":", 2)
         group_id = int(group_id_str)
-        role_id = int(role_id_str)
         team_id = _team_id(storage, group_id)
-        role = storage.get_role_by_id(role_id)
-        _, created = storage.bind_master_role_to_team(team_id, role_id)
+        role = ensure_role_identity_by_name(runtime=runtime, storage=storage, role_name=role_name)
+        _, created = storage.bind_master_role_to_team(team_id, role.role_id)
         note = "добавлена в" if created else "уже есть в"
         await query.edit_message_text(
             f"Роль @{role.role_name} {note} группе {group_id}.",
@@ -870,70 +923,6 @@ async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, r
     return True
 
 
-async def _handle_add_role_model(query: CallbackQuery, data: str, storage: Storage, runtime: RuntimeContext) -> bool:
-    if not data.startswith("addrole_model:"):
-        return False
-    model_name = data.split(":", 1)[1]
-    pending_roles = runtime.pending_role_ops
-    state = pending_roles.get(query.from_user.id)
-    if not state or state.get("step") != "model_select":
-        await query.answer()
-        return True
-    provider_model_map = runtime.provider_model_map
-    if model_name != "__skip__" and model_name not in provider_model_map:
-        await query.edit_message_text(
-            "Модель не найдена в llm_providers.",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{state['target_group_id']}")]]
-            ),
-        )
-        await query.answer()
-        return True
-    model = None if model_name == "__skip__" else model_name
-    target_group_id = state["target_group_id"]
-    target_team_id = _team_id(storage, target_group_id)
-    role_name = state["role_name"]
-    prompt = state["prompt"]
-    if state["mode"] == "create":
-        internal_name = storage.generate_internal_role_name()
-        role = storage.upsert_role(
-            role_name=internal_name,
-            description=f"Роль {role_name}",
-            base_system_prompt=prompt,
-            extra_instruction="",
-            llm_model=model,
-            is_active=True,
-        )
-    else:
-        source_role = storage.get_role_by_id(state["source_role_id"])
-        role = source_role
-    storage.ensure_team_role(target_team_id, role.role_id)
-    if state["mode"] == "clone":
-        source_group_id = int(state["source_group_id"])
-        source_team_id = _team_id(storage, source_group_id)
-        source_group_role = storage.get_team_role(source_team_id, source_role.role_id)
-        target_group_role = storage.get_team_role(target_team_id, role.role_id)
-        storage.set_team_role_prompt(target_team_id, role.role_id, source_group_role.system_prompt_override)
-        storage.set_team_role_extra_instruction(target_team_id, role.role_id, source_group_role.extra_instruction_override)
-        storage.set_team_role_model(target_team_id, role.role_id, source_group_role.model_override)
-        storage.set_team_role_user_prompt_suffix(target_team_id, role.role_id, source_group_role.user_prompt_suffix)
-        storage.set_team_role_user_reply_prefix(target_team_id, role.role_id, source_group_role.user_reply_prefix)
-        if source_group_role.team_role_id is not None and target_group_role.team_role_id is not None:
-            storage.clone_team_role_processing_bindings(source_group_role.team_role_id, target_group_role.team_role_id)
-    storage.set_team_role_display_name(target_team_id, role.role_id, role_name)
-    if model is not None:
-        storage.set_team_role_model(target_team_id, role.role_id, model)
-    pending_roles.pop(query.from_user.id, None)
-    await query.edit_message_text(
-        f"Роль @{_role_public_name(storage, target_group_id, role.role_id)} добавлена в группу {target_group_id}.",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{target_group_id}")]]
-        ),
-    )
-    await query.answer()
-    return True
-
-
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query or not query.from_user:
@@ -946,7 +935,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     storage: Storage = runtime.storage
     data = query.data or ""
-    if not data.startswith("addrole_model:") and not data.startswith("mrole_create_model:"):
+    if data.startswith("mrole") or data.startswith("mroles"):
+        refresh_role_catalog(runtime=runtime, storage=storage)
+    if not data.startswith("mrole_create_model:"):
         runtime.pending_prompts.pop(query.from_user.id, None)
         runtime.pending_role_ops.pop(query.from_user.id, None)
 
@@ -965,6 +956,4 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if await _handle_skill_toggle(query, data, storage, runtime):
         return
     if await _handle_set_model(query, data, storage, runtime):
-        return
-    if await _handle_add_role_model(query, data, storage, runtime):
         return

@@ -1,6 +1,8 @@
 # Документация
 
 - Обзор архитектуры: `docs/overview.md`
+- LTC-12: Role JSON Catalog: `docs/ltc-12-roles-json.md`
+- Role JSON Guide for AI Agents (EN): `docs/roles-json-agent-guide.md`
 - Разработка model-callable skills: `docs/skills_dev/README.md`
 - Провайдеры LLM: `docs/providers.md`
 - Шаблон конфига провайдера: `docs/provider_template.md`

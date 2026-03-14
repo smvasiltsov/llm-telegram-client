@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from app.models import (
     AuthToken,
@@ -22,6 +23,9 @@ from app.models import (
     UserRoleSession,
 )
 
+if TYPE_CHECKING:
+    from app.role_catalog import RoleCatalog
+
 
 @dataclass
 class SessionResolution:
@@ -37,7 +41,11 @@ class Storage:
     def __init__(self, db_path: str | Path) -> None:
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._role_catalog: RoleCatalog | None = None
         self._init_schema()
+
+    def attach_role_catalog(self, role_catalog: "RoleCatalog") -> None:
+        self._role_catalog = role_catalog
 
     def _table_has_column(self, table: str, column: str) -> bool:
         cur = self._conn.cursor()
@@ -61,6 +69,16 @@ class Storage:
 
     def has_skill_team_role_id(self) -> bool:
         return self._table_has_column("role_skills_enabled", "team_role_id")
+
+    # LTC-12 safety-net helpers: schema feature-gates for JSON master-role migration.
+    def has_team_role_name_binding(self) -> bool:
+        return self._table_has_column("team_roles", "role_name")
+
+    def has_provider_user_data_role_name(self) -> bool:
+        return self._table_has_column("provider_user_data", "role_name")
+
+    def has_legacy_roles_table(self) -> bool:
+        return self._table_exists("roles")
 
     def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         cur = self._conn.cursor()
@@ -169,6 +187,7 @@ class Storage:
                 provider_id TEXT NOT NULL,
                 key TEXT NOT NULL,
                 role_id INTEGER,
+                role_name TEXT,
                 value TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -245,6 +264,7 @@ class Storage:
             CREATE TABLE IF NOT EXISTS team_roles (
                 team_id INTEGER NOT NULL,
                 role_id INTEGER NOT NULL,
+                role_name TEXT,
                 team_role_id INTEGER,
                 system_prompt_override TEXT,
                 extra_instruction_override TEXT,
@@ -302,7 +322,55 @@ class Storage:
         self._migrate_role_prepost_processing()
         self._migrate_to_team_only_schema()
         self._migrate_team_role_surrogate_additive()
+        self._migrate_role_name_bindings_additive()
         self._ensure_column("team_roles", "extra_instruction_override", "extra_instruction_override TEXT")
+        self._conn.commit()
+
+    def _migrate_role_name_bindings_additive(self) -> None:
+        cur = self._conn.cursor()
+        self._ensure_column("team_roles", "role_name", "role_name TEXT")
+        self._ensure_column("provider_user_data", "role_name", "role_name TEXT")
+
+        if self._table_exists("roles"):
+            cur.execute(
+                """
+                UPDATE team_roles
+                SET role_name = (
+                    SELECT r.role_name
+                    FROM roles r
+                    WHERE r.role_id = team_roles.role_id
+                    LIMIT 1
+                )
+                WHERE role_name IS NULL OR role_name = ''
+                """
+            )
+            cur.execute(
+                """
+                UPDATE provider_user_data
+                SET role_name = (
+                    SELECT r.role_name
+                    FROM roles r
+                    WHERE r.role_id = provider_user_data.role_id
+                    LIMIT 1
+                )
+                WHERE role_id IS NOT NULL AND (role_name IS NULL OR role_name = '')
+                """
+            )
+
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_team_roles_team_role_name
+            ON team_roles(team_id, role_name)
+            WHERE role_name IS NOT NULL AND role_name <> ''
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_user_data_role_name
+            ON provider_user_data(provider_id, key, role_name)
+            WHERE role_name IS NOT NULL AND role_name <> ''
+            """
+        )
         self._conn.commit()
 
     def _migrate_team_role_surrogate_additive(self) -> None:
@@ -1471,6 +1539,48 @@ class Storage:
             if not self.role_exists(candidate):
                 return candidate
 
+    def _apply_catalog_master_fields(self, role: Role) -> Role:
+        if self._role_catalog is None:
+            return role
+        catalog_role = self._role_catalog.get(role.role_name)
+        if catalog_role is None:
+            return role
+        return Role(
+            role_id=role.role_id,
+            role_name=role.role_name,
+            description=catalog_role.description,
+            base_system_prompt=catalog_role.base_system_prompt,
+            extra_instruction=catalog_role.extra_instruction,
+            llm_model=catalog_role.llm_model,
+            is_active=bool(catalog_role.is_active),
+            mention_name=role.mention_name,
+        )
+
+    @staticmethod
+    def _role_from_row(
+        row: sqlite3.Row,
+        *,
+        fallback_role_name: str | None = None,
+        mention_name: str | None = None,
+    ) -> Role:
+        role_name = row["role_name"] if "role_name" in row.keys() and row["role_name"] else fallback_role_name
+        if not role_name:
+            raise ValueError("Role row has no role_name")
+        return Role(
+            role_id=row["role_id"],
+            role_name=str(role_name),
+            description=str(row["description"] if "description" in row.keys() and row["description"] is not None else ""),
+            base_system_prompt=str(
+                row["base_system_prompt"] if "base_system_prompt" in row.keys() and row["base_system_prompt"] is not None else ""
+            ),
+            extra_instruction=str(
+                row["extra_instruction"] if "extra_instruction" in row.keys() and row["extra_instruction"] is not None else ""
+            ),
+            llm_model=row["llm_model"] if "llm_model" in row.keys() else None,
+            is_active=bool(row["is_active"] if "is_active" in row.keys() else True),
+            mention_name=mention_name if mention_name is not None else (row["mention_name"] if "mention_name" in row.keys() else None),
+        )
+
     def get_role_by_name(self, role_name: str) -> Role:
         cur = self._conn.cursor()
         cur.execute(
@@ -1484,15 +1594,7 @@ class Storage:
         row = cur.fetchone()
         if not row:
             raise ValueError(f"Role not found: {role_name}")
-        return Role(
-            role_id=row["role_id"],
-            role_name=row["role_name"],
-            description=row["description"],
-            base_system_prompt=row["base_system_prompt"],
-            extra_instruction=row["extra_instruction"],
-            llm_model=row["llm_model"],
-            is_active=bool(row["is_active"]),
-        )
+        return self._apply_catalog_master_fields(self._role_from_row(row))
 
     def get_role_by_id(self, role_id: int) -> Role:
         cur = self._conn.cursor()
@@ -1507,15 +1609,7 @@ class Storage:
         row = cur.fetchone()
         if not row:
             raise ValueError(f"Role not found: {role_id}")
-        return Role(
-            role_id=row["role_id"],
-            role_name=row["role_name"],
-            description=row["description"],
-            base_system_prompt=row["base_system_prompt"],
-            extra_instruction=row["extra_instruction"],
-            llm_model=row["llm_model"],
-            is_active=bool(row["is_active"]),
-        )
+        return self._apply_catalog_master_fields(self._role_from_row(row))
 
     def list_active_roles(self) -> list[Role]:
         cur = self._conn.cursor()
@@ -1528,18 +1622,19 @@ class Storage:
             """
         )
         rows = cur.fetchall()
-        return [
-            Role(
-                role_id=row["role_id"],
-                role_name=row["role_name"],
-                description=row["description"],
-                base_system_prompt=row["base_system_prompt"],
-                extra_instruction=row["extra_instruction"],
-                llm_model=row["llm_model"],
-                is_active=bool(row["is_active"]),
-            )
-            for row in rows
-        ]
+        return [self._apply_catalog_master_fields(self._role_from_row(row)) for row in rows]
+
+    def list_roles(self) -> list[Role]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT role_id, role_name, description, base_system_prompt, extra_instruction, llm_model, is_active
+            FROM roles
+            ORDER BY role_name
+            """
+        )
+        rows = cur.fetchall()
+        return [self._apply_catalog_master_fields(self._role_from_row(row)) for row in rows]
 
     def _team_role_to_group_role(self, team_role: TeamRole, group_id: int) -> GroupRole:
         return GroupRole(
@@ -1616,6 +1711,7 @@ class Storage:
             INSERT INTO team_roles (
                 team_id,
                 role_id,
+                role_name,
                 system_prompt_override,
                 extra_instruction_override,
                 display_name,
@@ -1626,10 +1722,12 @@ class Storage:
                 mode,
                 is_active
             )
-            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 1, 'normal', 1)
+            VALUES (
+                ?, ?, (SELECT role_name FROM roles WHERE role_id = ?), NULL, NULL, NULL, NULL, NULL, NULL, 1, 'normal', 1
+            )
             ON CONFLICT(team_id, role_id) DO NOTHING
             """,
-            (team_id, role_id),
+            (team_id, role_id, role_id),
         )
         self._conn.commit()
         return self.get_team_role(team_id, role_id)
@@ -1747,35 +1845,32 @@ class Storage:
         cur.execute(
             """
             SELECT
-                r.role_id,
-                r.role_name,
+                tr.role_id,
+                COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
                 r.description,
                 r.base_system_prompt,
                 r.extra_instruction,
                 r.llm_model,
-                r.is_active,
-                COALESCE(NULLIF(tr.display_name, ''), r.role_name) AS mention_name
-            FROM roles r
-            JOIN team_roles tr ON tr.role_id = r.role_id
-            WHERE tr.team_id = ? AND tr.is_active = 1 AND tr.enabled = 1 AND r.is_active = 1
-            ORDER BY r.role_name
+                COALESCE(r.is_active, 1) AS is_active,
+                COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
+            FROM team_roles tr
+            LEFT JOIN roles r ON r.role_id = tr.role_id
+            WHERE tr.team_id = ? AND tr.is_active = 1 AND tr.enabled = 1
+            ORDER BY lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name))
             """,
             (team_id,),
         )
         rows = cur.fetchall()
-        return [
-            Role(
-                role_id=row["role_id"],
-                role_name=row["role_name"],
-                description=row["description"],
-                base_system_prompt=row["base_system_prompt"],
-                extra_instruction=row["extra_instruction"],
-                llm_model=row["llm_model"],
-                is_active=bool(row["is_active"]),
-                mention_name=row["mention_name"],
-            )
-            for row in rows
-        ]
+        roles: list[Role] = []
+        for row in rows:
+            raw_name = row["role_name"]
+            if raw_name is None or str(raw_name).strip() == "":
+                continue
+            role = self._apply_catalog_master_fields(self._role_from_row(row))
+            role.mention_name = row["mention_name"]
+            if role.is_active:
+                roles.append(role)
+        return roles
 
     def list_team_role_bindings_for_role(self, role_id: int, *, active_only: bool = True) -> list[dict[str, object]]:
         cur = self._conn.cursor()
@@ -1865,9 +1960,9 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT COALESCE(NULLIF(tr.display_name, ''), r.role_name) AS name
+            SELECT COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS name
             FROM team_roles tr
-            JOIN roles r ON r.role_id = tr.role_id
+            LEFT JOIN roles r ON r.role_id = tr.role_id
             WHERE tr.team_id = ? AND tr.role_id = ?
             """,
             (team_id, role_id),
@@ -1882,19 +1977,19 @@ class Storage:
         cur.execute(
             """
             SELECT
-                r.role_id,
-                r.role_name,
+                tr.role_id,
+                COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
                 r.description,
                 r.base_system_prompt,
                 r.extra_instruction,
                 r.llm_model,
-                r.is_active,
-                COALESCE(NULLIF(tr.display_name, ''), r.role_name) AS mention_name
-            FROM roles r
-            JOIN team_roles tr ON tr.role_id = r.role_id
+                COALESCE(r.is_active, 1) AS is_active,
+                COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
+            FROM team_roles tr
+            LEFT JOIN roles r ON tr.role_id = r.role_id
             WHERE tr.team_id = ?
               AND tr.is_active = 1
-              AND lower(COALESCE(NULLIF(tr.display_name, ''), r.role_name)) = lower(?)
+              AND lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name)) = lower(?)
             LIMIT 1
             """,
             (team_id, role_name),
@@ -1902,16 +1997,9 @@ class Storage:
         row = cur.fetchone()
         if not row:
             raise ValueError(f"Role not found in team: team_id={team_id} role_name={role_name}")
-        return Role(
-            role_id=row["role_id"],
-            role_name=row["role_name"],
-            description=row["description"],
-            base_system_prompt=row["base_system_prompt"],
-            extra_instruction=row["extra_instruction"],
-            llm_model=row["llm_model"],
-            is_active=bool(row["is_active"]),
-            mention_name=row["mention_name"],
-        )
+        role = self._apply_catalog_master_fields(self._role_from_row(row))
+        role.mention_name = row["mention_name"]
+        return role
 
     def team_role_name_exists(self, team_id: int, role_name: str, exclude_role_id: int | None = None) -> bool:
         cur = self._conn.cursor()
@@ -1920,10 +2008,10 @@ class Storage:
                 """
                 SELECT 1
                 FROM team_roles tr
-                JOIN roles r ON r.role_id = tr.role_id
+                LEFT JOIN roles r ON r.role_id = tr.role_id
                 WHERE tr.team_id = ?
                   AND tr.is_active = 1
-                  AND lower(COALESCE(NULLIF(tr.display_name, ''), r.role_name)) = lower(?)
+                  AND lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name)) = lower(?)
                 LIMIT 1
                 """,
                 (team_id, role_name),
@@ -1933,11 +2021,11 @@ class Storage:
                 """
                 SELECT 1
                 FROM team_roles tr
-                JOIN roles r ON r.role_id = tr.role_id
+                LEFT JOIN roles r ON r.role_id = tr.role_id
                 WHERE tr.team_id = ?
                   AND tr.is_active = 1
                   AND tr.role_id != ?
-                  AND lower(COALESCE(NULLIF(tr.display_name, ''), r.role_name)) = lower(?)
+                  AND lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name)) = lower(?)
                 LIMIT 1
                 """,
                 (team_id, exclude_role_id, role_name),
@@ -2064,6 +2152,32 @@ class Storage:
         )
         self._conn.commit()
 
+    def list_active_team_role_names(self) -> list[str]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT lower(role_name) AS role_name
+            FROM team_roles
+            WHERE is_active = 1 AND role_name IS NOT NULL AND trim(role_name) <> ''
+            ORDER BY lower(role_name)
+            """
+        )
+        rows = cur.fetchall()
+        return [str(row["role_name"]) for row in rows]
+
+    def deactivate_team_roles_by_role_name(self, role_name: str) -> int:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET is_active = 0, enabled = 0, mode = 'normal'
+            WHERE is_active = 1 AND lower(role_name) = lower(?)
+            """,
+            (role_name,),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
     def ensure_group_role(self, group_id: int, role_id: int) -> GroupRole:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.ensure_team_role(team_id, role_id)
@@ -2111,6 +2225,16 @@ class Storage:
             "UPDATE roles SET role_name = ? WHERE role_id = ?",
             (role_name, role_id),
         )
+        if self.has_team_role_name_binding():
+            cur.execute(
+                "UPDATE team_roles SET role_name = ? WHERE role_id = ?",
+                (role_name, role_id),
+            )
+        if self.has_provider_user_data_role_name():
+            cur.execute(
+                "UPDATE provider_user_data SET role_name = ? WHERE role_id = ?",
+                (role_name, role_id),
+            )
         self._conn.commit()
 
     def delete_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> None:

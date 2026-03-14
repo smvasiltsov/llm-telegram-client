@@ -20,4 +20,5 @@ It includes:
 - local environment setup,
 - codebase layering model,
 - adding and validating providers,
-- smoke tests and observability practices.
+- smoke tests and observability practices,
+- role JSON authoring guidance for AI agents.

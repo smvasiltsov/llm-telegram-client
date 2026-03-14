@@ -14,6 +14,7 @@ from app.pending_user_fields import PendingUserFieldStore
 from app.plugin_server import PluginTextServer
 from app.plugins import PluginManager
 from app.prepost_processing.registry import PrePostProcessingRegistry
+from app.role_catalog import RoleCatalog
 from app.security import TokenCipher
 from app.session_resolver import SessionResolver
 from app.skills.registry import SkillRegistry
@@ -65,6 +66,7 @@ class RuntimeContext:
     team_dual_read_enabled: bool
     team_dual_write_enabled: bool
     team_rollout_mode: str
+    role_catalog: RoleCatalog
 
     def to_bot_data(self) -> dict[str, Any]:
         return {"runtime": self}

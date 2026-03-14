@@ -18,6 +18,7 @@ from app.handlers.messages_common import (
     _request_token_for_user,
     _runtime,
 )
+from app.role_catalog_service import refresh_role_catalog
 from app.llm_executor import LLMExecutor
 from app.llm_router import MissingUserField
 from app.models import Role, TeamRole
@@ -786,6 +787,7 @@ async def dispatch_mentions(
 
     runtime = _runtime(context)
     storage: Storage = runtime.storage
+    refresh_role_catalog(runtime=runtime, storage=storage)
     orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
     available_roles = storage.list_roles_for_team(team_id)
     orchestrator_role = (
@@ -959,9 +961,14 @@ async def run_chain(
 ) -> ChainRunResult:
     runtime = _runtime(context)
     storage: Storage = runtime.storage
+    refresh_role_catalog(runtime=runtime, storage=storage)
     pending_store = runtime.pending_store
     orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
     roles_for_group = storage.list_roles_for_team(team_id)
+    active_roles_by_id = {item.role_id: item for item in roles_for_group}
+    roles = [active_roles_by_id[item.role_id] for item in roles if item.role_id in active_roles_by_id]
+    if not roles:
+        return ChainRunResult(completed_roles=0, had_error=False, stopped=True)
     orchestrator_role = (
         next((r for r in roles_for_group if r.role_id == orchestrator_group_role.role_id), None)
         if orchestrator_group_role

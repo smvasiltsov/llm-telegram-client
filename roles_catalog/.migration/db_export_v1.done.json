@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "started_at": "2026-03-14T12:16:43.755874+00:00",
+  "exported_count": 15,
+  "conflict_count": 0,
+  "invalid_count": 0,
+  "roles_table_present": true,
+  "root_dir": "/opt/llm/llm-telegram-client-in-dev/roles_catalog"
+}

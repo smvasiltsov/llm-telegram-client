@@ -20,4 +20,5 @@ It covers:
 - layered architecture and runtime composition,
 - message processing pipelines,
 - SQLite data model and persistence,
-- security threat model and runtime flow patterns.
+- security threat model and runtime flow patterns,
+- LTC-12 role JSON catalog behavior and identity rules.

@@ -13,6 +13,7 @@ from app.llm_providers import ProviderUserField, model_label
 from app.message_buffer import MessageBuffer
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
+from app.role_catalog_service import master_role_exists, refresh_role_catalog
 from app.services.role_pipeline import roles_require_auth, run_chain
 from app.services.tool_exec import execute_bash_command
 from app.security import TokenCipher
@@ -39,6 +40,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
     if update.effective_chat and update.effective_chat.type != "private":
         return
     storage: Storage = _runtime(context).storage
+    refresh_role_catalog(runtime=_runtime(context), storage=storage)
     user = update.effective_user
     if not user:
         return
@@ -225,7 +227,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 if not re.match(r"^[A-Za-z0-9_]+$", role_name):
                     await update.message.reply_text("Имя роли должно быть латиницей, цифрами или _. Попробуй еще раз.")
                     return
-                if storage.role_exists(role_name):
+                if master_role_exists(_runtime(context), role_name) or storage.role_exists(role_name):
                     await update.message.reply_text("Master-role с таким именем уже существует. Укажи другое имя.")
                     return
                 state["role_name"] = role_name
@@ -280,68 +282,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 pending_roles.pop(user.id, None)
                 await update.message.reply_text(f"Роль переименована в @{role_name}.")
                 return
-            if state["mode"] == "clone":
-                source_role = storage.get_role_by_id(state["source_role_id"])
-                source_team_id = _resolve_team_id_for_chat(storage, int(state["source_group_id"]))
-                source_group_role = storage.get_team_role(source_team_id, source_role.role_id)
-                role = source_role
-                storage.ensure_team_role(target_team_id, role.role_id)
-                target_group_role = storage.get_team_role(target_team_id, role.role_id)
-                storage.set_team_role_display_name(target_team_id, role.role_id, role_name)
-                storage.set_team_role_prompt(
-                    target_team_id,
-                    role.role_id,
-                    source_group_role.system_prompt_override,
-                )
-                storage.set_team_role_extra_instruction(
-                    target_team_id,
-                    role.role_id,
-                    source_group_role.extra_instruction_override,
-                )
-                storage.set_team_role_model(
-                    target_team_id,
-                    role.role_id,
-                    source_group_role.model_override,
-                )
-                storage.set_team_role_user_prompt_suffix(
-                    target_team_id,
-                    role.role_id,
-                    source_group_role.user_prompt_suffix,
-                )
-                storage.set_team_role_user_reply_prefix(
-                    target_team_id,
-                    role.role_id,
-                    source_group_role.user_reply_prefix,
-                )
-                if target_group_role.team_role_id is not None and source_group_role.team_role_id is not None:
-                    storage.clone_team_role_processing_bindings(source_group_role.team_role_id, target_group_role.team_role_id)
-                pending_roles.pop(user.id, None)
-                await update.message.reply_text(
-                    f"Роль @{storage.get_team_role_name(target_team_id, role.role_id)} "
-                    f"добавлена в группу {target_group_id}."
-                )
-                return
-            state["prompt"] = ""
-            state["step"] = "model_select"
-            provider_models = _runtime(context).provider_models
-            provider_registry = _runtime(context).provider_registry
-            if not provider_models:
-                await update.message.reply_text("Список моделей не настроен в llm_providers.")
-                return
-            buttons = []
-            for model in provider_models:
-                provider = provider_registry.get(model.provider_id)
-                label = model_label(model, provider)
-                buttons.append([InlineKeyboardButton(text=label, callback_data=f"addrole_model:{model.full_id}")])
-            buttons.append([InlineKeyboardButton(text="Без модели", callback_data="addrole_model:__skip__")])
-            buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{state['target_group_id']}")])
-            await update.message.reply_text(
-                "Выбери LLM-модель для роли:",
-                reply_markup=InlineKeyboardMarkup(buttons),
-            )
-            return
-        if state["step"] == "model_select":
-            await update.message.reply_text("Выбери модель кнопкой ниже.")
+            pending_roles.pop(user.id, None)
+            await update.message.reply_text("Этот сценарий больше не используется. Добавляй роли через список master-role.")
             return
         if state["step"] == "display":
             await update.message.reply_text("Этот пункт больше не используется.")
@@ -518,6 +460,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     content = str(pending_msg["content"])
     reply_text = pending_msg["reply_text"]
     storage: Storage = _runtime(context).storage
+    refresh_role_catalog(runtime=_runtime(context), storage=storage)
     pending_team_id = pending_msg.get("team_id")
     if pending_team_id is None:
         pending.pop_record(user_id)

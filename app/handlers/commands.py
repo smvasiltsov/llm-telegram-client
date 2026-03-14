@@ -6,6 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.runtime import RuntimeContext
+from app.role_catalog_service import refresh_role_catalog
 from app.services.prompt_builder import provider_id_from_model
 from app.services.tool_exec import execute_bash_command
 from app.storage import Storage
@@ -27,6 +28,32 @@ def _list_telegram_groups(storage: Storage) -> list[tuple[int, str | None, int]]
     return result
 
 
+def _master_roles_list_text(runtime: RuntimeContext, *, max_issues: int = 10) -> str:
+    lines = ["Выбери master-role:"]
+    issues = runtime.role_catalog.issues
+    if not issues:
+        return "\n".join(lines)
+    lines.append("")
+    lines.append(f"Ошибки чтения JSON: {len(issues)}")
+    for issue in issues[:max_issues]:
+        lines.append(f"- {issue.path.name}: {_human_issue_reason(issue.reason)}")
+    if len(issues) > max_issues:
+        lines.append(f"- ... и ещё {len(issues) - max_issues}")
+    return "\n".join(lines)
+
+
+def _human_issue_reason(reason: str) -> str:
+    if reason.startswith("invalid_file_name:"):
+        return "некорректное имя файла (разрешены только [a-z0-9_])"
+    if reason.startswith("duplicate_role_name_casefold:"):
+        winner = reason.split("winner=", 1)[1] if "winner=" in reason else "unknown"
+        return f"дубликат имени роли по регистру; используется файл {winner}"
+    if reason.startswith("role_name_mismatch:"):
+        payload_name = reason.split(":", 1)[1].split("->", 1)[0]
+        return f"role_name в JSON ({payload_name}) не совпадает с именем файла; используется имя файла"
+    return reason
+
+
 async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -36,14 +63,15 @@ async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE
     if update.effective_user.id != runtime.owner_user_id:
         return
     storage: Storage = runtime.storage
-    roles = storage.list_active_roles()
+    refresh_role_catalog(runtime=runtime, storage=storage)
+    roles = runtime.role_catalog.list_active()
     keyboard = [
-        [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"mrole:{role.role_id}")]
+        [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"mrole_name:{role.role_name}")]
         for role in roles
     ]
     keyboard.insert(0, [InlineKeyboardButton(text="➕ Создать master-role", callback_data="mrole_create")])
     await update.message.reply_text(
-        "Выбери master-role:",
+        _master_roles_list_text(runtime),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
