@@ -20,7 +20,7 @@ from app.handlers.messages_common import (
 )
 from app.llm_executor import LLMExecutor
 from app.llm_router import MissingUserField
-from app.models import GroupRole, Role
+from app.models import Role, TeamRole
 from prepost_processing_sdk.contract import PrePostProcessingContext, PrePostProcessingResult
 from app.services.orchestrator_response import parse_orchestrator_response
 from app.services.formatting import format_with_header, format_with_header_raw, render_llm_text, send_formatted_with_fallback
@@ -101,7 +101,7 @@ class ChainContext:
 @dataclass(frozen=True)
 class RoleRequestResult:
     response_text: str
-    group_role: GroupRole
+    group_role: TeamRole
     model_override: str | None
     recovery: SessionRecoveryResult | None
 
@@ -135,7 +135,7 @@ def resolve_role_model_override(
 def roles_require_auth(
     *,
     context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
+    team_id: int,
     roles: list[Role],
 ) -> bool:
     runtime = _runtime(context)
@@ -145,7 +145,7 @@ def roles_require_auth(
     provider_models = runtime.provider_models
     provider_model_map = runtime.provider_model_map
     for role in roles:
-        group_role = storage.get_group_role(chat_id, role.role_id)
+        group_role = storage.get_team_role(team_id, role.role_id)
         model_override = resolve_role_model_override(
             role=role,
             group_role=group_role,
@@ -161,7 +161,7 @@ def roles_require_auth(
 async def _run_role_prepost_processing_phase(
     *,
     context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
+    team_id: int,
     user_id: int,
     role: Role,
     phase: str,
@@ -171,7 +171,7 @@ async def _run_role_prepost_processing_phase(
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     registry = runtime.prepost_processing_registry
-    role_prepost_processing = storage.list_role_prepost_processing(chat_id, role.role_id, enabled_only=True)
+    role_prepost_processing = storage.list_role_prepost_processing_for_team(team_id, role.role_id, enabled_only=True)
     if not role_prepost_processing:
         return payload
 
@@ -181,7 +181,7 @@ async def _run_role_prepost_processing_phase(
         if record is None:
             logger.info(
                 "pre/post processing skip: not discovered group_id=%s role=%s prepost_processing_id=%s phase=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 phase,
@@ -196,7 +196,7 @@ async def _run_role_prepost_processing_phase(
         if denied_permissions:
             logger.info(
                 "pre/post processing skip: unsupported permissions group_id=%s role=%s prepost_processing_id=%s phase=%s denied=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 phase,
@@ -213,7 +213,7 @@ async def _run_role_prepost_processing_phase(
             except Exception:
                 logger.exception(
                     "pre/post processing config parse failed group_id=%s role=%s prepost_processing_id=%s",
-                    chat_id,
+                    team_id,
                     role.role_name,
                     role_prepost_processing.prepost_processing_id,
                 )
@@ -223,7 +223,7 @@ async def _run_role_prepost_processing_phase(
         if errors:
             logger.info(
                 "pre/post processing skip: invalid config group_id=%s role=%s prepost_processing_id=%s errors=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 errors,
@@ -232,7 +232,7 @@ async def _run_role_prepost_processing_phase(
 
         processing_ctx = PrePostProcessingContext(
             chain_id=chain_id,
-            chat_id=chat_id,
+            chat_id=team_id,
             user_id=user_id,
             role_id=role.role_id,
             role_name=role.role_name,
@@ -256,7 +256,7 @@ async def _run_role_prepost_processing_phase(
         except asyncio.TimeoutError:
             logger.info(
                 "pre/post processing timeout group_id=%s role=%s prepost_processing_id=%s phase=%s timeout_sec=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 phase,
@@ -266,7 +266,7 @@ async def _run_role_prepost_processing_phase(
         except Exception:
             logger.exception(
                 "pre/post processing failed group_id=%s role=%s prepost_processing_id=%s phase=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 phase,
@@ -276,7 +276,7 @@ async def _run_role_prepost_processing_phase(
         if result.status != "ok":
             logger.info(
                 "pre/post processing skipped status group_id=%s role=%s prepost_processing_id=%s phase=%s status=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 phase,
@@ -289,7 +289,7 @@ async def _run_role_prepost_processing_phase(
         if output_chars > MAX_PREPOST_PROCESSING_OUTPUT_CHARS:
             logger.info(
                 "pre/post processing skip: output too large group_id=%s role=%s prepost_processing_id=%s phase=%s chars=%s",
-                chat_id,
+                team_id,
                 role.role_name,
                 role_prepost_processing.prepost_processing_id,
                 phase,
@@ -307,7 +307,7 @@ async def _run_role_prepost_processing_phase(
 
         logger.info(
             "pre/post processing ok group_id=%s role=%s prepost_processing_id=%s phase=%s",
-            chat_id,
+            team_id,
             role.role_name,
             role_prepost_processing.prepost_processing_id,
             phase,
@@ -318,7 +318,7 @@ async def _run_role_prepost_processing_phase(
 async def execute_role_request(
     *,
     context: ContextTypes.DEFAULT_TYPE,
-    chat_id: int,
+    team_id: int,
     user_id: int,
     role: Role,
     session_token: str,
@@ -339,7 +339,7 @@ async def execute_role_request(
     llm_executor: LLMExecutor = runtime.llm_executor
     resolver: SessionResolver = runtime.session_resolver
 
-    group_role = storage.get_group_role(chat_id, role.role_id)
+    group_role = storage.get_team_role(team_id, role.role_id)
     model_override = resolve_role_model_override(
         role=role,
         group_role=group_role,
@@ -359,7 +359,7 @@ async def execute_role_request(
     skill_chain_id = uuid4().hex[:8]
     pre_data = await _run_role_prepost_processing_phase(
         context=context,
-        chat_id=chat_id,
+        team_id=team_id,
         user_id=user_id,
         role=role,
         phase="pre",
@@ -374,7 +374,7 @@ async def execute_role_request(
     if not (isinstance(effective_reply_text, str) or effective_reply_text is None):
         effective_reply_text = reply_text
 
-    if storage.list_role_skills(chat_id, role.role_id, enabled_only=True):
+    if storage.list_role_skills_for_team(team_id, role.role_id, enabled_only=True):
         logger.info(
             "execute role request via skill loop role=%s mode=%s model_override=%s",
             role.role_name,
@@ -410,7 +410,8 @@ async def execute_role_request(
                 recovered = await _recover_stale_session_and_resend(
                     exc=exc,
                     user_id=user_id,
-                    chat_id=chat_id,
+                    chat_id=team_id,
+                    team_id=team_id,
                     role=role,
                     session_id=current_session_id,
                     session_token=session_token,
@@ -427,7 +428,7 @@ async def execute_role_request(
                 )
 
         loop_result = await skill_loop.run(
-            chat_id=chat_id,
+            team_id=team_id,
             user_id=user_id,
             role=role,
             session_token=session_token,
@@ -444,7 +445,7 @@ async def execute_role_request(
         response_text = loop_result.final_answer_text
         post_data = await _run_role_prepost_processing_phase(
             context=context,
-            chat_id=chat_id,
+            team_id=team_id,
             user_id=user_id,
             role=role,
             phase="post",
@@ -481,16 +482,16 @@ async def execute_role_request(
     )
     content = "INPUT_JSON:\n" + json.dumps(compact_payload, ensure_ascii=False)
     logger.info(
-        "llm payload full chat_id=%s user_id=%s role=%s mode=%s payload=%s",
-        chat_id,
+        "llm payload full team_id=%s user_id=%s role=%s mode=%s payload=%s",
+        team_id,
         user_id,
         role.role_name,
         group_role.mode,
         json.dumps(full_payload, ensure_ascii=False),
     )
     logger.info(
-        "llm payload built chat_id=%s user_id=%s role=%s mode=%s payload_chars=%s trigger=%s pruned_payload=%s",
-        chat_id,
+        "llm payload built team_id=%s user_id=%s role=%s mode=%s payload_chars=%s trigger=%s pruned_payload=%s",
+        team_id,
         user_id,
         role.role_name,
         group_role.mode,
@@ -501,7 +502,7 @@ async def execute_role_request(
 
     session_id = await resolver.resolve(
         user_id,
-        chat_id,
+        team_id,
         role,
         session_token,
         model_override=model_override,
@@ -519,7 +520,8 @@ async def execute_role_request(
         recovery = await _recover_stale_session_and_resend(
             exc=exc,
             user_id=user_id,
-            chat_id=chat_id,
+            chat_id=team_id,
+            team_id=team_id,
             role=role,
             session_id=session_id,
             session_token=session_token,
@@ -533,7 +535,7 @@ async def execute_role_request(
 
     post_data = await _run_role_prepost_processing_phase(
         context=context,
-        chat_id=chat_id,
+        team_id=team_id,
         user_id=user_id,
         role=role,
         phase="post",
@@ -641,6 +643,7 @@ async def send_role_response(
 async def send_orchestrator_post_event(
     *,
     context: ContextTypes.DEFAULT_TYPE,
+    team_id: int,
     chat_id: int,
     user_id: int,
     reply_to_message_id: int,
@@ -655,13 +658,13 @@ async def send_orchestrator_post_event(
     dispatch_mentions_fn: Callable[..., Awaitable[None]] | None = None,
 ) -> None:
     storage: Storage = _runtime(context).storage
-    group_role = storage.get_group_role(chat_id, orchestrator_role.role_id)
+    group_role = storage.get_team_role(team_id, orchestrator_role.role_id)
     if not group_role.enabled:
         return
     try:
         result = await execute_role_request(
             context=context,
-            chat_id=chat_id,
+            team_id=team_id,
             user_id=user_id,
             role=orchestrator_role,
             session_token=session_token,
@@ -707,6 +710,7 @@ async def send_orchestrator_post_event(
             dispatcher = dispatch_mentions_fn or dispatch_mentions
             await dispatcher(
                 context=context,
+                team_id=team_id,
                 chat_id=chat_id,
                 user_id=user_id,
                 session_token=session_token,
@@ -752,6 +756,7 @@ def extract_delegation_targets(
 async def dispatch_mentions(
     *,
     context: ContextTypes.DEFAULT_TYPE,
+    team_id: int,
     chat_id: int,
     user_id: int,
     session_token: str,
@@ -770,8 +775,8 @@ async def dispatch_mentions(
 
     runtime = _runtime(context)
     storage: Storage = runtime.storage
-    orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
-    available_roles = storage.list_roles_for_group(chat_id)
+    orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
+    available_roles = storage.list_roles_for_team(team_id)
     orchestrator_role = (
         next((r for r in available_roles if r.role_id == orchestrator_group_role.role_id), None)
         if orchestrator_group_role
@@ -821,7 +826,7 @@ async def dispatch_mentions(
                 same_count + 1,
             )
             continue
-        target_group_role = storage.get_group_role(chat_id, target.role_id)
+        target_group_role = storage.get_team_role(team_id, target.role_id)
         if target_group_role.mode == "orchestrator":
             logger.info(
                 "delegation skip: target is orchestrator chain_id=%s source_role=%s target_role=%s",
@@ -840,7 +845,7 @@ async def dispatch_mentions(
             )
             result = await execute_role_request(
                 context=context,
-                chat_id=chat_id,
+                team_id=team_id,
                 user_id=user_id,
                 role=target,
                 session_token=session_token,
@@ -870,6 +875,7 @@ async def dispatch_mentions(
                 next_context = chain_context.with_delegation(delegation_key).next_hop()
                 await send_orchestrator_post_event(
                     context=context,
+                    team_id=team_id,
                     chat_id=chat_id,
                     user_id=user_id,
                     reply_to_message_id=chain_context.reply_to_message_id,
@@ -885,6 +891,7 @@ async def dispatch_mentions(
                 )
             await dispatch_mentions(
                 context=context,
+                team_id=team_id,
                 chat_id=chat_id,
                 user_id=user_id,
                 session_token=session_token,
@@ -896,6 +903,7 @@ async def dispatch_mentions(
             await _handle_missing_user_field(
                 user_id=user_id,
                 chat_id=chat_id,
+                team_id=team_id,
                 message_id=chain_context.reply_to_message_id,
                 role_name=role_public_name(target),
                 content=delegated_text,
@@ -921,6 +929,7 @@ async def dispatch_mentions(
 async def run_chain(
     *,
     context: ContextTypes.DEFAULT_TYPE,
+    team_id: int,
     chat_id: int,
     user_id: int,
     session_token: str,
@@ -940,8 +949,8 @@ async def run_chain(
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     pending_store = runtime.pending_store
-    orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
-    roles_for_group = storage.list_roles_for_group(chat_id)
+    orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
+    roles_for_group = storage.list_roles_for_team(team_id)
     orchestrator_role = (
         next((r for r in roles_for_group if r.role_id == orchestrator_group_role.role_id), None)
         if orchestrator_group_role
@@ -954,7 +963,7 @@ async def run_chain(
     completed_roles = 0
     for role in roles:
         try:
-            group_role = storage.get_group_role(chat_id, role.role_id)
+            group_role = storage.get_team_role(team_id, role.role_id)
             if group_role.mode == "orchestrator":
                 trigger_type = trigger_type_orchestrator
                 mentioned_roles = [role_public_name(r) for r in roles if r.role_id != role.role_id]
@@ -963,7 +972,7 @@ async def run_chain(
                 mentioned_roles = [role_public_name(r) for r in roles] if is_all else [role_public_name(role)]
             result = await execute_role_request(
                 context=context,
-                chat_id=chat_id,
+                team_id=team_id,
                 user_id=user_id,
                 role=role,
                 session_token=session_token,
@@ -1010,6 +1019,7 @@ async def run_chain(
             await _handle_missing_user_field(
                 user_id=user_id,
                 chat_id=chat_id,
+                team_id=team_id,
                 message_id=reply_to_message_id,
                 role_name=role_name,
                 content=user_text,
@@ -1029,6 +1039,7 @@ async def run_chain(
                         role_name,
                         user_text,
                         reply_text=reply_text,
+                        team_id=team_id,
                     )
                 storage.set_user_authorized(user_id, False)
                 await _request_token_for_user(chat_id, user_id, context)
@@ -1063,6 +1074,7 @@ async def run_chain(
         if allow_orchestrator_post_event and orchestrator_role is not None and group_role.mode != "orchestrator":
             await send_orchestrator_post_event(
                 context=context,
+                team_id=team_id,
                 chat_id=chat_id,
                 user_id=user_id,
                 reply_to_message_id=reply_to_message_id,
@@ -1079,6 +1091,7 @@ async def run_chain(
         if chat_id < 0:
             await dispatch_mentions(
                 context=context,
+                team_id=team_id,
                 chat_id=chat_id,
                 user_id=user_id,
                 session_token=session_token,

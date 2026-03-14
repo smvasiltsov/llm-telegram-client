@@ -51,5 +51,12 @@
         "."
       ]
     }
+  },
+  "migration": {
+    "team": {
+      "dual_read_enabled": false,
+      "dual_write_enabled": false,
+      "rollout_mode": "legacy"
+    }
   }
 }

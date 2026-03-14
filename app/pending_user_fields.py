@@ -22,11 +22,21 @@ class PendingUserFieldStore:
                 role_id INTEGER,
                 prompt TEXT NOT NULL,
                 chat_id INTEGER NOT NULL,
+                team_id INTEGER NOT NULL,
                 created_at TEXT NOT NULL
             )
             """
         )
         self._conn.commit()
+        self._ensure_column("pending_user_fields", "team_id", "team_id INTEGER")
+
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        cur = self._conn.cursor()
+        cur.execute(f"PRAGMA table_info({table})")
+        cols = {row["name"] for row in cur.fetchall()}
+        if column not in cols:
+            cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+            self._conn.commit()
 
     def save(
         self,
@@ -36,23 +46,27 @@ class PendingUserFieldStore:
         role_id: int | None,
         prompt: str,
         chat_id: int,
+        team_id: int | None = None,
     ) -> None:
+        if team_id is None:
+            raise ValueError("team_id is required for pending user field")
         now = datetime.now(timezone.utc).isoformat()
         cur = self._conn.cursor()
         cur.execute(
             """
             INSERT INTO pending_user_fields
-                (telegram_user_id, provider_id, key, role_id, prompt, chat_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (telegram_user_id, provider_id, key, role_id, prompt, chat_id, team_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(telegram_user_id) DO UPDATE SET
                 provider_id=excluded.provider_id,
                 key=excluded.key,
                 role_id=excluded.role_id,
                 prompt=excluded.prompt,
                 chat_id=excluded.chat_id,
+                team_id=excluded.team_id,
                 created_at=excluded.created_at
             """,
-            (telegram_user_id, provider_id, key, role_id, prompt, chat_id, now),
+            (telegram_user_id, provider_id, key, role_id, prompt, chat_id, int(team_id), now),
         )
         self._conn.commit()
 
@@ -60,7 +74,7 @@ class PendingUserFieldStore:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT provider_id, key, role_id, prompt, chat_id
+            SELECT provider_id, key, role_id, prompt, chat_id, team_id
             FROM pending_user_fields
             WHERE telegram_user_id = ?
             """,
@@ -69,12 +83,15 @@ class PendingUserFieldStore:
         row = cur.fetchone()
         if not row:
             return None
+        if row["team_id"] is None:
+            return None
         return {
             "provider_id": row["provider_id"],
             "key": row["key"],
             "role_id": row["role_id"],
             "prompt": row["prompt"],
             "chat_id": row["chat_id"],
+            "team_id": int(row["team_id"]),
         }
 
     def delete(self, telegram_user_id: int) -> None:

@@ -35,10 +35,10 @@ def seed_roles(storage: Storage) -> None:
         )
 
 
-def seed_group_roles(storage: Storage, group_id: int) -> None:
+def seed_team_roles(storage: Storage, team_id: int) -> None:
     for role in DEFAULT_ROLES:
         try:
             stored_role = storage.get_role_by_name(role["role_name"])
         except ValueError:
             continue
-        storage.ensure_group_role(group_id, stored_role.role_id)
+        storage.ensure_team_role(team_id, stored_role.role_id)

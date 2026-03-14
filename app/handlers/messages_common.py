@@ -64,6 +64,7 @@ async def _request_user_field_for_user(
 async def _handle_missing_user_field(
     user_id: int,
     chat_id: int,
+    team_id: int,
     message_id: int,
     role_name: str,
     content: str,
@@ -83,6 +84,7 @@ async def _handle_missing_user_field(
     pending.save(
         telegram_user_id=user_id,
         chat_id=chat_id,
+        team_id=team_id,
         message_id=message_id,
         role_name=role_name,
         content=content,
@@ -96,6 +98,7 @@ async def _handle_missing_user_field(
         role_id=exc.role_id,
         prompt=exc.field.prompt,
         chat_id=chat_id,
+        team_id=team_id,
     )
     logger.info("pending user field saved user_id=%s provider=%s key=%s", user_id, exc.provider_id, exc.field.key)
     await _request_user_field_for_user(chat_id, user_id, exc.field, context)
@@ -120,6 +123,7 @@ async def _recover_stale_session_and_resend(
     exc: Exception,
     user_id: int,
     chat_id: int,
+    team_id: int,
     role: Role,
     session_id: str,
     session_token: str,
@@ -156,7 +160,7 @@ async def _recover_stale_session_and_resend(
     llm_executor = runtime.llm_executor
     new_session_id = await resolver.ensure_session(
         telegram_user_id=user_id,
-        group_id=chat_id,
+        team_id=team_id,
         role=role,
         session_token=session_token,
         model_override=model_override,

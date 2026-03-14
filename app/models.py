@@ -34,6 +34,7 @@ class UserRoleSession:
     session_id: str
     created_at: str
     last_used_at: str
+    team_id: int | None = None
 
 
 @dataclass
@@ -42,6 +43,43 @@ class Group:
     title: str | None
     is_active: bool
     created_at: str
+    team_id: int | None = None
+
+
+@dataclass
+class Team:
+    team_id: int
+    public_id: str
+    name: str | None
+    is_active: bool
+    ext_json: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class TeamBinding:
+    team_id: int
+    interface_type: str
+    external_id: str
+    external_title: str | None
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class TeamRole:
+    team_id: int
+    role_id: int
+    system_prompt_override: str | None
+    display_name: str | None
+    model_override: str | None
+    user_prompt_suffix: str | None
+    user_reply_prefix: str | None
+    enabled: bool
+    mode: str
+    is_active: bool
 
 
 @dataclass

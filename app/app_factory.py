@@ -240,4 +240,7 @@ def build_runtime(
         bash_cwd_by_user={},
         tool_mcp_adapter=tool_mcp_adapter,
         llm_clients=llm_clients,
+        team_dual_read_enabled=config.team_dual_read_enabled,
+        team_dual_write_enabled=config.team_dual_write_enabled,
+        team_rollout_mode=config.team_rollout_mode,
     )

@@ -30,6 +30,8 @@ DEFAULT_SKILLS_USAGE_PROMPT = (
 )
 DEFAULT_SKILLS_FOLLOWUP_MODE = "full"
 ALLOWED_SKILLS_FOLLOWUP_MODES = {"full", "compact"}
+DEFAULT_TEAM_ROLLOUT_MODE = "legacy"
+ALLOWED_TEAM_ROLLOUT_MODES = {"legacy", "shadow", "team"}
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,9 @@ class AppConfig:
     tools_bash_max_output_chars: int
     tools_bash_safe_commands: list[str]
     tools_bash_allowed_workdirs: list[str]
+    team_dual_read_enabled: bool
+    team_dual_write_enabled: bool
+    team_rollout_mode: str
 
 
 def load_dotenv(path: str | Path) -> dict[str, str]:
@@ -88,6 +93,8 @@ def load_config(path: str | Path) -> AppConfig:
     skills_raw = raw.get("skills", {}) or {}
     tools_raw = raw.get("tools", {}) or {}
     bash_raw = tools_raw.get("bash", {}) or {}
+    migration_raw = raw.get("migration", {}) or {}
+    team_migration_raw = migration_raw.get("team", {}) or {}
 
     safe_commands_raw = bash_raw.get("safe_commands")
     if safe_commands_raw is None:
@@ -104,6 +111,9 @@ def load_config(path: str | Path) -> AppConfig:
     skills_followup_mode = str(skills_raw.get("followup_mode", DEFAULT_SKILLS_FOLLOWUP_MODE)).strip().lower()
     if skills_followup_mode not in ALLOWED_SKILLS_FOLLOWUP_MODES:
         skills_followup_mode = DEFAULT_SKILLS_FOLLOWUP_MODE
+    team_rollout_mode = str(team_migration_raw.get("rollout_mode", DEFAULT_TEAM_ROLLOUT_MODE)).strip().lower()
+    if team_rollout_mode not in ALLOWED_TEAM_ROLLOUT_MODES:
+        team_rollout_mode = DEFAULT_TEAM_ROLLOUT_MODE
 
     return AppConfig(
         telegram_bot_token=raw["telegram_bot_token"],
@@ -133,4 +143,7 @@ def load_config(path: str | Path) -> AppConfig:
         tools_bash_max_output_chars=int(bash_raw.get("max_output_chars", 12000)),
         tools_bash_safe_commands=safe_commands,
         tools_bash_allowed_workdirs=allowed_workdirs,
+        team_dual_read_enabled=bool(team_migration_raw.get("dual_read_enabled", False)),
+        team_dual_write_enabled=bool(team_migration_raw.get("dual_write_enabled", False)),
+        team_rollout_mode=team_rollout_mode,
     )

@@ -34,6 +34,14 @@ async def main() -> None:
     application = build_application(config, runtime)
     me = await application.bot.get_me()
     runtime.bot_username = me.username or ""
+    logger.info(
+        "Team rollout config mode=%s dual_read=%s dual_write=%s",
+        runtime.team_rollout_mode,
+        runtime.team_dual_read_enabled,
+        runtime.team_dual_write_enabled,
+    )
+    if runtime.team_rollout_mode == "team" and not runtime.team_dual_read_enabled:
+        logger.warning("Team rollout mode is 'team' with dual_read disabled; fallback diagnostics are limited")
     if runtime.tools_bash_enabled and not runtime.tools_bash_password:
         logger.warning("BASH_DANGEROUS_PASSWORD is empty; privileged bash commands will be blocked")
     runtime.plugin_server.start()

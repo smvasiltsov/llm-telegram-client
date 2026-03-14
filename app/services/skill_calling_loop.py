@@ -90,7 +90,7 @@ class SkillCallingLoop:
     async def run(
         self,
         *,
-        chat_id: int,
+        team_id: int,
         user_id: int,
         role: Role,
         session_token: str,
@@ -105,7 +105,8 @@ class SkillCallingLoop:
         max_steps: int | None = None,
         send_step: Callable[[str, str, str | None], Awaitable[SkillStepSendResult]] | None = None,
     ) -> SkillLoopResult:
-        group_role = self._storage.get_group_role(chat_id, role.role_id)
+        chat_id = team_id
+        group_role = self._storage.get_team_role(team_id, role.role_id)
         model_override = resolve_provider_model(
             self._provider_models,
             self._provider_model_map,
@@ -118,7 +119,7 @@ class SkillCallingLoop:
             system_prompt = f"{system_prompt}\n\n{self._skills_usage_prompt}".strip()
         system_prompt = system_prompt or None
         enabled_skills = self._load_enabled_skills(
-            chat_id=chat_id,
+            team_id=team_id,
             role=role,
             model_override=model_override,
         )
@@ -126,7 +127,7 @@ class SkillCallingLoop:
 
         session_id = await self._session_resolver.resolve(
             telegram_user_id=user_id,
-            group_id=chat_id,
+            team_id=team_id,
             role=role,
             session_token=session_token,
             model_override=model_override,
@@ -161,8 +162,8 @@ class SkillCallingLoop:
                 step_index=step_index,
             )
             logger.info(
-                "skill loop payload chat_id=%s user_id=%s role=%s step=%s followup_mode=%s payload=%s",
-                chat_id,
+                "skill loop payload team_id=%s user_id=%s role=%s step=%s followup_mode=%s payload=%s",
+                team_id,
                 user_id,
                 role.role_name,
                 step_index,
@@ -272,18 +273,18 @@ class SkillCallingLoop:
     def _load_enabled_skills(
         self,
         *,
-        chat_id: int,
+        team_id: int,
         role: Role,
         model_override: str | None,
     ) -> dict[str, dict[str, Any]]:
-        enabled = self._storage.list_role_skills(chat_id, role.role_id, enabled_only=True)
+        enabled = self._storage.list_role_skills_for_team(team_id, role.role_id, enabled_only=True)
         result: dict[str, dict[str, Any]] = {}
         for role_skill in enabled:
             record = self._skills_service.get(role_skill.skill_id)
             if record is None:
                 logger.info(
                     "skill loop skip undiscovered skill group_id=%s role=%s skill_id=%s",
-                    chat_id,
+                    team_id,
                     role.role_name,
                     role_skill.skill_id,
                 )

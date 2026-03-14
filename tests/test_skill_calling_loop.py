@@ -52,7 +52,7 @@ class FakeModel:
 
 
 class FakeSessionResolver:
-    async def resolve(self, telegram_user_id: int, group_id: int, role, session_token: str, model_override: str | None = None) -> str:
+    async def resolve(self, telegram_user_id: int, team_id: int, role, session_token: str, model_override: str | None = None) -> str:
         return "session-1"
 
 
@@ -125,7 +125,7 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             )
 
             result = await loop.run(
-                chat_id=group.group_id,
+                team_id=group.team_id,
                 user_id=42,
                 role=role,
                 session_token="token",
@@ -195,7 +195,7 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             )
 
             result = await loop.run(
-                chat_id=group.group_id,
+                team_id=group.team_id,
                 user_id=42,
                 role=role,
                 session_token="token",
@@ -250,7 +250,7 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             )
 
             result = await loop.run(
-                chat_id=group.group_id,
+                team_id=group.team_id,
                 user_id=42,
                 role=role,
                 session_token="token",
@@ -330,7 +330,7 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             )
 
             result = await loop.run(
-                chat_id=group.group_id,
+                team_id=group.team_id,
                 user_id=42,
                 role=role,
                 session_token="token",
@@ -378,7 +378,7 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
 
             with self.assertRaises(MissingUserField) as ctx:
                 await loop.run(
-                    chat_id=group.group_id,
+                    team_id=group.team_id,
                     user_id=42,
                     role=role,
                     session_token="token",

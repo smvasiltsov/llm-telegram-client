@@ -1,0 +1,10 @@
+{
+  "url": "https://<site>.atlassian.net",
+  "username": "your_email@example.com",
+  "token": "your_atlassian_api_token",
+  "timeout_sec": 30,
+  "retry_attempts": 3,
+  "retry_sleep_sec": 3,
+  "max_items": 25,
+  "max_content_chars": 12000
+}

@@ -1,0 +1,7 @@
+id: jira
+version: 0.1.0
+entrypoint: skill:create_skill
+enabled_by_default: false
+timeout_sec: 30
+permissions: []
+description: "Jira Cloud skill with 8 operations selected by arguments.operation."

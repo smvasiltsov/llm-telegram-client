@@ -62,6 +62,9 @@ class RuntimeContext:
     bash_cwd_by_user: dict[int, str]
     tool_mcp_adapter: ToolMCPAdapter
     llm_clients: dict[str, httpx.AsyncClient]
+    team_dual_read_enabled: bool
+    team_dual_write_enabled: bool
+    team_rollout_mode: str
 
     def to_bot_data(self) -> dict[str, Any]:
         return {"runtime": self}

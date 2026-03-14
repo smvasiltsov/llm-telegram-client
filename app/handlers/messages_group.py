@@ -9,7 +9,7 @@ from telegram.ext import ContextTypes
 from app.message_buffer import MessageBuffer
 from app.pending_store import PendingStore
 from app.services.role_pipeline import roles_require_auth, run_chain
-from app.roles_registry import seed_group_roles
+from app.roles_registry import seed_team_roles
 from app.router import RouteResult, route_message
 from app.security import TokenCipher
 from app.storage import Storage
@@ -41,10 +41,10 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
         update.message.text,
     )
     storage: Storage = _runtime(context).storage
-    storage.upsert_group(chat.id, chat.title)
-    seed_group_roles(storage, chat.id)
-    orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat.id)
-    roles_for_group = storage.list_roles_for_group(chat.id)
+    team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
+    seed_team_roles(storage, team_id)
+    orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
+    roles_for_group = storage.list_roles_for_team(team_id)
     orchestrator_role = (
         next((r for r in roles_for_group if r.role_id == orchestrator_group_role.role_id), None)
         if orchestrator_group_role
@@ -124,10 +124,14 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
 
     bot_username = _runtime(context).bot_username
     storage: Storage = _runtime(context).storage
-    roles = storage.list_roles_for_group(chat_id)
+    team_id = storage.resolve_team_id_by_telegram_chat(chat_id)
+    if team_id is None:
+        logger.warning("flush skipped: team binding not found chat_id=%s", chat_id)
+        return
+    roles = storage.list_roles_for_team(team_id)
     owner_user_id = _runtime(context).owner_user_id
     require_bot_mention = _runtime(context).require_bot_mention
-    orchestrator_group_role = storage.get_enabled_orchestrator_for_group(chat_id)
+    orchestrator_group_role = storage.get_enabled_orchestrator_for_team(team_id)
     orchestrator_role = (
         next((r for r in roles if r.role_id == orchestrator_group_role.role_id), None)
         if orchestrator_group_role
@@ -192,7 +196,7 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
     auth = storage.get_auth_token(user_id)
     requires_auth = roles_require_auth(
         context=context,
-        chat_id=chat_id,
+        team_id=team_id,
         roles=route.roles,
     )
 
@@ -206,6 +210,7 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
             role_name,
             route.content,
             reply_text=reply_text,
+            team_id=team_id,
         )
         await _request_token_for_user(chat_id, user_id, context)
         return
@@ -215,6 +220,7 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
     reply_to_message_id = items[0].message_id
     await run_chain(
         context=context,
+        team_id=team_id,
         chat_id=chat_id,
         user_id=user_id,
         session_token=session_token,

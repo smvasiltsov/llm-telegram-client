@@ -32,7 +32,7 @@ class AuthService:
         self,
         telegram_user_id: int,
         token: str,
-        group_id: int | None,
+        team_id: int,
     ) -> bool:
         token = self._normalize_token(token)
         provider = self._provider_registry.get(self._default_provider_id)
@@ -50,34 +50,33 @@ class AuthService:
             return False
 
         existing_session_ids = set(sessions)
-        if group_id is not None:
-            group_roles = self._storage.list_enabled_roles_for_group(group_id)
-            for group_role in group_roles:
-                role = self._storage.get_role_by_id(group_role.role_id)
-                try:
-                    await self._session_resolver.ensure_session(
-                        telegram_user_id=telegram_user_id,
-                        group_id=group_id,
-                        role=role,
-                        session_token=token,
-                        existing_session_ids=existing_session_ids,
+        team_roles = self._storage.list_enabled_roles_for_team(team_id)
+        for team_role in team_roles:
+            role = self._storage.get_role_by_id(team_role.role_id)
+            try:
+                await self._session_resolver.ensure_session(
+                    telegram_user_id=telegram_user_id,
+                    team_id=team_id,
+                    role=role,
+                    session_token=token,
+                    existing_session_ids=existing_session_ids,
+                )
+            except Exception as exc:
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+                    self._logger.error(
+                        "Session warm-up failed user_id=%s role=%s status=%s body=%r",
+                        telegram_user_id,
+                        role.role_name,
+                        exc.response.status_code,
+                        exc.response.text,
                     )
-                except Exception as exc:
-                    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
-                        self._logger.error(
-                            "Session warm-up failed user_id=%s role=%s status=%s body=%r",
-                            telegram_user_id,
-                            role.role_name,
-                            exc.response.status_code,
-                            exc.response.text,
-                        )
-                    else:
-                        self._logger.exception(
-                            "Session warm-up failed user_id=%s role=%s",
-                            telegram_user_id,
-                            role.role_name,
-                        )
-                    return False
+                else:
+                    self._logger.exception(
+                        "Session warm-up failed user_id=%s role=%s",
+                        telegram_user_id,
+                        role.role_name,
+                    )
+                return False
 
         encrypted = self._cipher.encrypt(token)
         self._storage.upsert_auth_token(telegram_user_id, encrypted)

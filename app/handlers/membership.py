@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.runtime import RuntimeContext
-from app.roles_registry import seed_group_roles
+from app.roles_registry import seed_team_roles
 from app.storage import Storage
 
 logger = logging.getLogger("bot")
@@ -23,10 +23,10 @@ async def handle_bot_membership(update: Update, context: ContextTypes.DEFAULT_TY
     old_status = update.my_chat_member.old_chat_member.status
     storage: Storage = runtime.storage
     if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
-        storage.upsert_group(chat.id, chat.title)
-        seed_group_roles(storage, chat.id)
+        team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
+        seed_team_roles(storage, team_id)
     elif new_status in ("left", "kicked"):
-        storage.set_group_active(chat.id, False)
+        storage.set_telegram_team_binding_active(chat.id, False)
 
 
 async def handle_group_seen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -38,5 +38,5 @@ async def handle_group_seen(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     logger.info("group seen chat_id=%s title=%r", chat.id, chat.title)
     storage: Storage = runtime.storage
-    storage.upsert_group(chat.id, chat.title)
-    seed_group_roles(storage, chat.id)
+    team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
+    seed_team_roles(storage, team_id)

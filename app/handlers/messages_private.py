@@ -26,6 +26,13 @@ from app.handlers.messages_common import (
 logger = logging.getLogger("bot")
 
 
+def _resolve_team_id_for_chat(storage: Storage, chat_id: int) -> int:
+    team_id = storage.resolve_team_id_by_telegram_chat(chat_id)
+    if team_id is not None:
+        return team_id
+    return storage.upsert_telegram_team_binding(chat_id, None, is_active=True)
+
+
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -166,6 +173,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             role_id=state["role_id"] if isinstance(state["role_id"], int) or state["role_id"] is None else None,
             prompt=str(state.get("prompt") or "Введите значение ещё раз."),
             chat_id=int(state.get("chat_id", user.id)),
+            team_id=int(state["team_id"]) if state.get("team_id") is not None else None,
         )
         await update.message.reply_text("Не удалось использовать значение. Проверь и отправь ещё раз.")
         scope = "provider" if state.get("role_id") is None else "role"
@@ -218,19 +226,21 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 return
             role_name = role_name.lower()
             target_group_id = int(state["target_group_id"])
+            target_team_id = _resolve_team_id_for_chat(storage, target_group_id)
             exclude_role_id = int(state["role_id"]) if state.get("mode") == "rename" else None
-            if storage.group_role_name_exists(target_group_id, role_name, exclude_role_id=exclude_role_id):
+            if storage.team_role_name_exists(target_team_id, role_name, exclude_role_id=exclude_role_id):
                 await update.message.reply_text("Роль с таким именем уже существует в этой группе. Укажи другое имя.")
                 return
             state["role_name"] = role_name
             if state["mode"] == "rename":
-                storage.set_group_role_display_name(target_group_id, state["role_id"], role_name)
+                storage.set_team_role_display_name(target_team_id, state["role_id"], role_name)
                 pending_roles.pop(user.id, None)
                 await update.message.reply_text(f"Роль переименована в @{role_name}.")
                 return
             if state["mode"] == "clone":
                 source_role = storage.get_role_by_id(state["source_role_id"])
-                source_group_role = storage.get_group_role(state["source_group_id"], source_role.role_id)
+                source_team_id = _resolve_team_id_for_chat(storage, int(state["source_group_id"]))
+                source_group_role = storage.get_team_role(source_team_id, source_role.role_id)
                 internal_name = storage.generate_internal_role_name()
                 role = storage.upsert_role(
                     role_name=internal_name,
@@ -240,31 +250,31 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     llm_model=source_role.llm_model,
                     is_active=True,
                 )
-                storage.ensure_group_role(target_group_id, role.role_id)
-                storage.set_group_role_display_name(target_group_id, role.role_id, role_name)
-                storage.set_group_role_prompt(
-                    target_group_id,
+                storage.ensure_team_role(target_team_id, role.role_id)
+                storage.set_team_role_display_name(target_team_id, role.role_id, role_name)
+                storage.set_team_role_prompt(
+                    target_team_id,
                     role.role_id,
                     source_group_role.system_prompt_override,
                 )
-                storage.set_group_role_model(
-                    target_group_id,
+                storage.set_team_role_model(
+                    target_team_id,
                     role.role_id,
                     source_group_role.model_override,
                 )
-                storage.set_group_role_user_prompt_suffix(
-                    target_group_id,
+                storage.set_team_role_user_prompt_suffix(
+                    target_team_id,
                     role.role_id,
                     source_group_role.user_prompt_suffix,
                 )
-                storage.set_group_role_user_reply_prefix(
-                    target_group_id,
+                storage.set_team_role_user_reply_prefix(
+                    target_team_id,
                     role.role_id,
                     source_group_role.user_reply_prefix,
                 )
                 pending_roles.pop(user.id, None)
                 await update.message.reply_text(
-                    f"Роль @{storage.get_group_role_name(target_group_id, role.role_id)} "
+                    f"Роль @{storage.get_team_role_name(target_team_id, role.role_id)} "
                     f"добавлена в группу {target_group_id}."
                 )
                 return
@@ -298,22 +308,24 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             suffix = text
             if suffix.lower() == "clear":
                 suffix = None
-            storage.set_group_role_user_prompt_suffix(state["target_group_id"], state["role_id"], suffix)
+            target_team_id = _resolve_team_id_for_chat(storage, int(state["target_group_id"]))
+            storage.set_team_role_user_prompt_suffix(target_team_id, state["role_id"], suffix)
             pending_roles.pop(user.id, None)
             await update.message.reply_text(
                 f"Инструкция к сообщениям для "
-                f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
+                f"@{storage.get_team_role_name(target_team_id, state['role_id'])} обновлена."
             )
             return
         if state["step"] == "reply_prefix":
             reply_prefix = text
             if reply_prefix.lower() == "clear":
                 reply_prefix = None
-            storage.set_group_role_user_reply_prefix(state["target_group_id"], state["role_id"], reply_prefix)
+            target_team_id = _resolve_team_id_for_chat(storage, int(state["target_group_id"]))
+            storage.set_team_role_user_reply_prefix(target_team_id, state["role_id"], reply_prefix)
             pending_roles.pop(user.id, None)
             await update.message.reply_text(
                 f"Инструкция для реплаев для "
-                f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
+                f"@{storage.get_team_role_name(target_team_id, state['role_id'])} обновлена."
             )
             return
 
@@ -324,13 +336,20 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 
     auth_service: AuthService = _runtime(context).auth_service
     pending: PendingStore = _runtime(context).pending_store
-    pending_msg = pending.peek(user.id)
+    pending_msg = pending.peek_record(user.id)
     if not pending_msg:
         # Ignore free-form private messages when bot is not waiting for token.
         return
 
-    group_id, _, role_name, _, _ = pending_msg
-    roles_for_group = storage.list_roles_for_group(group_id)
+    group_id = int(pending_msg["chat_id"])
+    role_name = str(pending_msg["role_name"])
+    pending_team_id = pending_msg.get("team_id")
+    if pending_team_id is None:
+        pending.pop_record(user.id)
+        await update.message.reply_text("Ожидающее сообщение устарело. Отправь запрос в группу ещё раз.")
+        return
+    team_id = int(pending_team_id)
+    roles_for_group = storage.list_roles_for_team(team_id)
     if role_name == "__all__":
         target_roles = roles_for_group
     else:
@@ -343,13 +362,13 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
 
     requires_auth = roles_require_auth(
         context=context,
-        chat_id=group_id,
+        team_id=team_id,
         roles=target_roles,
     )
     if not requires_auth:
         return
 
-    ok = await auth_service.validate_and_store(user.id, token, group_id)
+    ok = await auth_service.validate_and_store(user.id, token, team_id)
     if not ok:
         await update.message.reply_text("Токен не прошел проверку. Попробуй еще раз.")
         return
@@ -387,16 +406,17 @@ async def _process_pending_private_text(
 
     if user_id in pending_prompts and (not pending_msg or (auth and auth.is_authorized)):
         group_id, role_id = pending_prompts.pop(user_id)
+        team_id = _resolve_team_id_for_chat(storage, group_id)
         raw_prompt = text.strip()
         if not raw_prompt:
             await context.bot.send_message(chat_id=chat_id, text="Промпт не может быть пустым.")
             return True
         is_clear = raw_prompt.lower() in {"clear", "skip"}
         prompt = "" if is_clear else raw_prompt
-        storage.set_group_role_prompt(group_id, role_id, prompt)
+        storage.set_team_role_prompt(team_id, role_id, prompt)
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"Промпт роли @{storage.get_group_role_name(group_id, role_id)} для группы {group_id} обновлён.",
+            text=f"Промпт роли @{storage.get_team_role_name(team_id, role_id)} для группы {group_id} обновлён.",
         )
         return True
 
@@ -409,13 +429,14 @@ async def _process_pending_private_text(
                 return True
             if suffix.lower() == "clear":
                 suffix = None
-            storage.set_group_role_user_prompt_suffix(state["target_group_id"], state["role_id"], suffix)
+            target_team_id = _resolve_team_id_for_chat(storage, int(state["target_group_id"]))
+            storage.set_team_role_user_prompt_suffix(target_team_id, state["role_id"], suffix)
             pending_roles.pop(user_id, None)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
                     f"Инструкция к сообщениям для "
-                    f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
+                    f"@{storage.get_team_role_name(target_team_id, state['role_id'])} обновлена."
                 ),
             )
             return True
@@ -426,13 +447,14 @@ async def _process_pending_private_text(
                 return True
             if reply_prefix.lower() == "clear":
                 reply_prefix = None
-            storage.set_group_role_user_reply_prefix(state["target_group_id"], state["role_id"], reply_prefix)
+            target_team_id = _resolve_team_id_for_chat(storage, int(state["target_group_id"]))
+            storage.set_team_role_user_reply_prefix(target_team_id, state["role_id"], reply_prefix)
             pending_roles.pop(user_id, None)
             await context.bot.send_message(
                 chat_id=chat_id,
                 text=(
                     f"Инструкция для реплаев для "
-                    f"@{storage.get_group_role_name(state['target_group_id'], state['role_id'])} обновлена."
+                    f"@{storage.get_team_role_name(target_team_id, state['role_id'])} обновлена."
                 ),
             )
             return True
@@ -442,14 +464,24 @@ async def _process_pending_private_text(
 
 async def _process_pending_message_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     pending: PendingStore = _runtime(context).pending_store
-    pending_msg = pending.peek(user_id)
+    pending_msg = pending.peek_record(user_id)
     if not pending_msg:
         logger.info("pending message not found user_id=%s", user_id)
         return False
     original_pending_msg = pending_msg
-    chat_id, message_id, role_name, content, reply_text = pending_msg
+    chat_id = int(pending_msg["chat_id"])
+    message_id = int(pending_msg["message_id"])
+    role_name = str(pending_msg["role_name"])
+    content = str(pending_msg["content"])
+    reply_text = pending_msg["reply_text"]
     storage: Storage = _runtime(context).storage
-    roles = storage.list_roles_for_group(chat_id)
+    pending_team_id = pending_msg.get("team_id")
+    if pending_team_id is None:
+        pending.pop_record(user_id)
+        logger.warning("pending message dropped (missing team_id) user_id=%s chat_id=%s", user_id, chat_id)
+        return False
+    team_id = int(pending_team_id)
+    roles = storage.list_roles_for_team(team_id)
     if role_name == "__all__":
         target_roles = roles
     else:
@@ -465,7 +497,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     auth = storage.get_auth_token(user_id)
     requires_auth = roles_require_auth(
         context=context,
-        chat_id=chat_id,
+        team_id=team_id,
         roles=target_roles,
     )
     if requires_auth and (not auth or not auth.is_authorized):
@@ -476,6 +508,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     session_token = cipher.decrypt(auth.encrypted_token) if auth and auth.encrypted_token else ""
     chain_result = await run_chain(
         context=context,
+        team_id=team_id,
         chat_id=chat_id,
         user_id=user_id,
         session_token=session_token,
@@ -493,9 +526,9 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     )
 
     if not chain_result.had_error:
-        current_pending_msg = pending.peek(user_id)
+        current_pending_msg = pending.peek_record(user_id)
         if current_pending_msg == original_pending_msg:
-            pending.pop(user_id)
+            pending.pop_record(user_id)
         elif current_pending_msg is not None:
             logger.info(
                 "pending message preserved user_id=%s old_role=%s new_role=%s",
