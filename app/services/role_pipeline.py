@@ -171,7 +171,10 @@ async def _run_role_prepost_processing_phase(
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     registry = runtime.prepost_processing_registry
-    role_prepost_processing = storage.list_role_prepost_processing_for_team(team_id, role.role_id, enabled_only=True)
+    team_role_id = storage.resolve_team_role_id(team_id, role.role_id)
+    if team_role_id is None:
+        return payload
+    role_prepost_processing = storage.list_role_prepost_processing_for_team_role(team_role_id, enabled_only=True)
     if not role_prepost_processing:
         return payload
 
@@ -340,6 +343,9 @@ async def execute_role_request(
     resolver: SessionResolver = runtime.session_resolver
 
     group_role = storage.get_team_role(team_id, role.role_id)
+    team_role_id = group_role.team_role_id or storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
+    if team_role_id is None:
+        raise ValueError(f"Team role not found: team_id={team_id} role_id={role.role_id}")
     model_override = resolve_role_model_override(
         role=role,
         group_role=group_role,
@@ -355,7 +361,12 @@ async def execute_role_request(
     )
 
     base_prompt = group_role.system_prompt_override if group_role.system_prompt_override is not None else role.base_system_prompt
-    system_prompt = f"{(base_prompt or '').strip()}\n\n{(role.extra_instruction or '').strip()}".strip() or None
+    extra_instruction = (
+        group_role.extra_instruction_override
+        if group_role.extra_instruction_override is not None
+        else role.extra_instruction
+    )
+    system_prompt = f"{(base_prompt or '').strip()}\n\n{(extra_instruction or '').strip()}".strip() or None
     skill_chain_id = uuid4().hex[:8]
     pre_data = await _run_role_prepost_processing_phase(
         context=context,
@@ -374,7 +385,7 @@ async def execute_role_request(
     if not (isinstance(effective_reply_text, str) or effective_reply_text is None):
         effective_reply_text = reply_text
 
-    if storage.list_role_skills_for_team(team_id, role.role_id, enabled_only=True):
+    if storage.list_role_skills_for_team_role(team_role_id, enabled_only=True):
         logger.info(
             "execute role request via skill loop role=%s mode=%s model_override=%s",
             role.role_name,

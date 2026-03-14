@@ -51,6 +51,7 @@ async def main() -> None:
         await reconcile_active_groups(application.bot, runtime.storage)
         owner_commands = [
             BotCommand("groups", "Список групп и выбор"),
+            BotCommand("roles", "Список master-ролей"),
             BotCommand("tools", "Список инструментов"),
         ]
         if runtime.tools_bash_enabled:

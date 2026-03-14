@@ -29,6 +29,14 @@ def _team_id(storage: Storage, group_id: int) -> int:
     return team_id
 
 
+def _team_role_id(storage: Storage, group_id: int, role_id: int, *, ensure_exists: bool = False) -> int:
+    team_id = _team_id(storage, group_id)
+    team_role_id = storage.resolve_team_role_id(team_id, role_id, ensure_exists=ensure_exists)
+    if team_role_id is None:
+        raise ValueError(f"Team role not found for group_id={group_id} role_id={role_id}")
+    return team_role_id
+
+
 def _list_telegram_groups(storage: Storage) -> list[TelegramGroupView]:
     groups: list[TelegramGroupView] = []
     for binding in storage.list_team_bindings(interface_type="telegram", active_only=True):
@@ -39,6 +47,201 @@ def _list_telegram_groups(storage: Storage) -> list[TelegramGroupView]:
         groups.append(TelegramGroupView(group_id=group_id, title=binding.external_title, team_id=binding.team_id))
     groups.sort(key=lambda item: item.group_id)
     return groups
+
+
+def _preview_text(value: str | None, *, max_len: int = 140) -> str:
+    text = (value or "").strip()
+    if not text:
+        return "(пусто)"
+    text = " ".join(text.split())
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 1].rstrip() + "…"
+
+
+def _master_roles_keyboard(storage: Storage) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append([InlineKeyboardButton(text="➕ Создать master-role", callback_data="mrole_create")])
+    for role in storage.list_active_roles():
+        bindings = storage.list_team_role_bindings_for_role(role.role_id, active_only=True)
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"@{role.role_name} ({len(bindings)})",
+                    callback_data=f"mrole:{role.role_id}",
+                )
+            ]
+        )
+    return InlineKeyboardMarkup(rows)
+
+
+def _master_role_card_text(storage: Storage, role_id: int) -> str:
+    role = storage.get_role_by_id(role_id)
+    bindings = storage.list_team_role_bindings_for_role(role_id, active_only=True)
+    lines = [
+        f"Master-role: @{role.role_name}",
+        f"role_name: `{role.role_name}`",
+        f"Модель по умолчанию: {role.llm_model or '(не задана)'}",
+        "",
+        f"System prompt: {_preview_text(role.base_system_prompt)}",
+        f"Instruction: {_preview_text(role.extra_instruction)}",
+        "",
+        "Привязки к командам:",
+    ]
+    if not bindings:
+        lines.append("- (нет привязок)")
+    else:
+        for b in bindings:
+            team_id = int(b["team_id"])
+            team_name = str(b["team_name"] or f"team:{team_id}")
+            tg_id = b.get("telegram_group_id")
+            tg_title = b.get("telegram_group_title")
+            display = str(b.get("display_name") or role.role_name)
+            status = "ON" if bool(b.get("enabled")) else "OFF"
+            mode = str(b.get("mode") or "normal")
+            if tg_id is not None:
+                title = str(tg_title or team_name)
+                lines.append(f"- {title} ({tg_id}) -> @{display} [{status}|{mode}]")
+            else:
+                lines.append(f"- {team_name} (team_id={team_id}) -> @{display} [{status}|{mode}]")
+    return "\n".join(lines)
+
+
+async def _handle_master_roles_navigation(
+    query: CallbackQuery,
+    data: str,
+    storage: Storage,
+    runtime: RuntimeContext,
+) -> bool:
+    if data == "mroles:list":
+        await query.edit_message_text(
+            "Выбери master-role:",
+            reply_markup=_master_roles_keyboard(storage),
+        )
+        await query.answer()
+        return True
+    if data == "mrole_create":
+        runtime.pending_role_ops[query.from_user.id] = {
+            "mode": "master_create",
+            "step": "name",
+        }
+        await query.edit_message_text(
+            "Отправь внутреннее имя master-role (латиница, цифры, underscore).",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mroles:list")]]
+            ),
+        )
+        await query.answer()
+        return True
+    if data.startswith("mrole:"):
+        role_id = int(data.split(":", 1)[1])
+        await query.edit_message_text(
+            _master_role_card_text(storage, role_id),
+            reply_markup=InlineKeyboardMarkup(
+                [
+                    [InlineKeyboardButton(text="➕ Добавить в команду", callback_data=f"mrole_add:{role_id}")],
+                    [InlineKeyboardButton(text="⬅️ Назад", callback_data="mroles:list")],
+                ]
+            ),
+        )
+        await query.answer()
+        return True
+    if data.startswith("mrole_add:"):
+        role_id = int(data.split(":", 1)[1])
+        groups = _list_telegram_groups(storage)
+        if not groups:
+            await query.edit_message_text(
+                "Нет доступных команд Telegram для привязки.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mrole:{role_id}")]]
+                ),
+            )
+            await query.answer()
+            return True
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    text=(group.title or str(group.group_id)),
+                    callback_data=f"mrole_bind:{role_id}:{group.group_id}",
+                )
+            ]
+            for group in groups
+        ]
+        keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"mrole:{role_id}")])
+        await query.edit_message_text(
+            "Выбери команду для привязки роли:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        await query.answer()
+        return True
+    if data.startswith("mrole_bind:"):
+        _, role_id_str, group_id_str = data.split(":", 2)
+        role_id = int(role_id_str)
+        group_id = int(group_id_str)
+        role = storage.get_role_by_id(role_id)
+        team_id = _team_id(storage, group_id)
+        _, created = storage.bind_master_role_to_team(team_id, role_id)
+        note = "привязана к" if created else "уже привязана к"
+        await query.edit_message_text(
+            f"Роль @{role.role_name} {note} команде {group_id}.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ К роли", callback_data=f"mrole:{role_id}")]]
+            ),
+        )
+        await query.answer()
+        return True
+    return False
+
+
+async def _handle_master_role_create_model(
+    query: CallbackQuery,
+    data: str,
+    storage: Storage,
+    runtime: RuntimeContext,
+) -> bool:
+    if not data.startswith("mrole_create_model:"):
+        return False
+    model_name = data.split(":", 1)[1]
+    pending_roles = runtime.pending_role_ops
+    state = pending_roles.get(query.from_user.id)
+    if not state or state.get("mode") != "master_create" or state.get("step") != "model_select":
+        await query.answer()
+        return True
+
+    provider_model_map = runtime.provider_model_map
+    if model_name != "__skip__" and model_name not in provider_model_map:
+        await query.edit_message_text(
+            "Модель не найдена в llm_providers.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data="mroles:list")]]
+            ),
+        )
+        await query.answer()
+        return True
+    model = None if model_name == "__skip__" else model_name
+    role_name = str(state["role_name"])
+    prompt = str(state.get("prompt", ""))
+    instruction = str(state.get("instruction", ""))
+    role = storage.upsert_role(
+        role_name=role_name,
+        description=f"Master role {role_name}",
+        base_system_prompt=prompt,
+        extra_instruction=instruction,
+        llm_model=model,
+        is_active=True,
+    )
+    pending_roles.pop(query.from_user.id, None)
+    await query.edit_message_text(
+        f"Master-role @{role.role_name} создана.",
+        reply_markup=InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(text="➕ Добавить в команду", callback_data=f"mrole_add:{role.role_id}")],
+                [InlineKeyboardButton(text="Открыть карточку", callback_data=f"mrole:{role.role_id}")],
+            ]
+        ),
+    )
+    await query.answer()
+    return True
 
 
 def _role_public_name(storage: Storage, group_id: int, role_id: int) -> str:
@@ -95,8 +298,8 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
 
 def _role_skills_keyboard(runtime: RuntimeContext, storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    team_id = _team_id(storage, group_id)
-    current = {item.skill_id: item for item in storage.list_role_skills_for_team(team_id, role_id)}
+    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+    current = {item.skill_id: item for item in storage.list_role_skills_for_team_role(team_role_id)}
     for spec in sorted(runtime.skills_registry.list_specs(), key=lambda x: x.skill_id):
         enabled = bool(current.get(spec.skill_id).enabled) if spec.skill_id in current else False
         mark = "ON" if enabled else "OFF"
@@ -114,8 +317,8 @@ def _role_skills_keyboard(runtime: RuntimeContext, storage: Storage, group_id: i
 
 def _role_prepost_processing_keyboard(runtime: RuntimeContext, storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
-    team_id = _team_id(storage, group_id)
-    current = {item.prepost_processing_id: item for item in storage.list_role_prepost_processing_for_team(team_id, role_id)}
+    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+    current = {item.prepost_processing_id: item for item in storage.list_role_prepost_processing_for_team_role(team_role_id)}
     for spec in sorted(runtime.prepost_processing_registry.list_specs(), key=lambda x: x.prepost_processing_id):
         enabled = bool(current.get(spec.prepost_processing_id).enabled) if spec.prepost_processing_id in current else False
         mark = "ON" if enabled else "OFF"
@@ -179,83 +382,44 @@ async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: St
 async def _handle_add_role(query: CallbackQuery, data: str, context: ContextTypes.DEFAULT_TYPE, storage: Storage, runtime: RuntimeContext) -> bool:
     if data.startswith("addrole:"):
         group_id = int(data.split(":", 1)[1])
-        keyboard = [
-            [InlineKeyboardButton(text="Скопировать роль", callback_data=f"addrole_copy:{group_id}")],
-            [InlineKeyboardButton(text="Создать новую", callback_data=f"addrole_create:{group_id}")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")],
-        ]
+        master_roles = storage.list_active_roles()
+        keyboard: list[list[InlineKeyboardButton]] = []
+        for master_role in master_roles:
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"@{master_role.role_name}",
+                        callback_data=f"addrole_master:{group_id}:{master_role.role_id}",
+                    )
+                ]
+            )
+        keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")])
         await query.edit_message_text(
-            "Как добавить роль?",
+            "Выбери master-role для добавления в команду:",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )
         await query.answer()
         return True
-    if data.startswith("addrole_copy:"):
-        target_group_id = int(data.split(":", 1)[1])
-        groups = _list_telegram_groups(storage)
-        keyboard = [
-            [InlineKeyboardButton(text=(group.title or str(group.group_id)), callback_data=f"addrole_srcgrp:{target_group_id}:{group.group_id}")]
-            for group in groups
-        ]
-        keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"addrole:{target_group_id}")])
-        await query.edit_message_text(
-            "Выбери группу-источник:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        await query.answer()
-        return True
-    if data.startswith("addrole_srcgrp:"):
-        _, target_group_id_str, source_group_id_str = data.split(":", 2)
-        target_group_id = int(target_group_id_str)
-        source_group_id = int(source_group_id_str)
-        roles = storage.list_team_roles(_team_id(storage, source_group_id))
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    text=_group_role_caption(storage, source_group_id, group_role.role_id),
-                    callback_data=f"addrole_srcrole:{target_group_id}:{source_group_id}:{group_role.role_id}",
-                )
-            ]
-            for group_role in roles
-        ]
-        keyboard.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"addrole_copy:{target_group_id}")])
-        await query.edit_message_text(
-            "Выбери роль для копирования:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        await query.answer()
-        return True
-    if data.startswith("addrole_srcrole:"):
-        _, target_group_id_str, source_group_id_str, role_id_str = data.split(":", 3)
-        target_group_id = int(target_group_id_str)
-        source_group_id = int(source_group_id_str)
+    if data.startswith("addrole_master:"):
+        _, group_id_str, role_id_str = data.split(":", 2)
+        group_id = int(group_id_str)
         role_id = int(role_id_str)
-        pending_roles = runtime.pending_role_ops
-        pending_roles[query.from_user.id] = {
-            "mode": "clone",
-            "step": "name",
-            "target_group_id": target_group_id,
-            "source_group_id": source_group_id,
-            "source_role_id": role_id,
-        }
+        team_id = _team_id(storage, group_id)
+        role = storage.get_role_by_id(role_id)
+        _, created = storage.bind_master_role_to_team(team_id, role_id)
+        note = "добавлена в" if created else "уже есть в"
         await query.edit_message_text(
-            f"Отправь новое имя роли для копии @{_role_public_name(storage, source_group_id, role_id)}.",
+            f"Роль @{role.role_name} {note} группе {group_id}.",
             reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"addrole_copy:{target_group_id}")]]
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")]]
             ),
         )
         await query.answer()
         return True
-    if data.startswith("addrole_create:"):
-        group_id = int(data.split(":", 1)[1])
-        pending_roles = runtime.pending_role_ops
-        pending_roles[query.from_user.id] = {
-            "mode": "create",
-            "step": "name",
-            "target_group_id": group_id,
-        }
+    if data.startswith("addrole_copy:") or data.startswith("addrole_srcgrp:") or data.startswith("addrole_srcrole:") or data.startswith("addrole_create:"):
+        group_id = int(data.split(":")[1])
         await query.edit_message_text(
-            "Отправь имя новой роли (латиница, цифры, underscore).",
+            "Этот сценарий больше не используется в /groups. Используй добавление из списка master-role.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"addrole:{group_id}")]]
             ),
@@ -568,7 +732,8 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "reset_session":
-        storage.delete_user_role_session_by_team(query.from_user.id, team_id, role_id)
+        team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+        storage.delete_user_role_session_by_team_role(query.from_user.id, team_role_id)
         provider_registry = runtime.provider_registry
         default_provider_id = runtime.default_provider_id
         group_role = storage.get_team_role(team_id, role_id)
@@ -585,11 +750,13 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "delete_role":
+        role_name = _role_public_name(storage, group_id, role_id)
         storage.deactivate_team_role(team_id, role_id)
-        storage.delete_user_role_session_by_team(query.from_user.id, team_id, role_id)
-        storage.delete_role_if_unused(role_id)
+        team_role_id = storage.resolve_team_role_id(team_id, role_id)
+        if team_role_id is not None:
+            storage.delete_user_role_session_by_team_role(query.from_user.id, team_role_id)
         await query.edit_message_text(
-            f"Роль @{_role_public_name(storage, group_id, role_id)} удалена из группы {group_id}.",
+            f"Роль @{role_name} удалена из группы {group_id}.",
         )
         await query.answer()
         return True
@@ -607,7 +774,7 @@ async def _handle_prepost_processing_toggle(
     _, group_id_str, role_id_str, prepost_processing_id = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    team_id = _team_id(storage, group_id)
+    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
     if runtime.prepost_processing_registry.get(prepost_processing_id) is None:
         await query.edit_message_text(
             f"Pre/Post Processing {prepost_processing_id} не найден в реестре.",
@@ -617,12 +784,12 @@ async def _handle_prepost_processing_toggle(
         )
         await query.answer()
         return True
-    current = storage.get_role_prepost_processing_for_team(team_id, role_id, prepost_processing_id)
+    current = storage.get_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
     if current is None:
-        storage.upsert_role_prepost_processing_for_team(team_id, role_id, prepost_processing_id, enabled=True, config=None)
+        storage.upsert_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id, enabled=True, config=None)
         state_note = f"Pre/Post Processing {prepost_processing_id} включен."
     else:
-        storage.set_role_prepost_processing_enabled_for_team(team_id, role_id, prepost_processing_id, not current.enabled)
+        storage.set_role_prepost_processing_enabled_for_team_role(team_role_id, prepost_processing_id, not current.enabled)
         state_note = f"Pre/Post Processing {prepost_processing_id} {'включен' if not current.enabled else 'выключен'}."
     await query.edit_message_text(
         f"{state_note}\n\nPre/Post Processing для роли @{_role_public_name(storage, group_id, role_id)}:",
@@ -643,7 +810,7 @@ async def _handle_skill_toggle(
     _, group_id_str, role_id_str, skill_id = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    team_id = _team_id(storage, group_id)
+    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
     if runtime.skills_registry.get(skill_id) is None:
         await query.edit_message_text(
             f"Skill {skill_id} не найден в реестре.",
@@ -653,12 +820,12 @@ async def _handle_skill_toggle(
         )
         await query.answer()
         return True
-    current = storage.get_role_skill_for_team(team_id, role_id, skill_id)
+    current = storage.get_role_skill_for_team_role(team_role_id, skill_id)
     if current is None:
-        storage.upsert_role_skill_for_team(team_id, role_id, skill_id, enabled=True, config=None)
+        storage.upsert_role_skill_for_team_role(team_role_id, skill_id, enabled=True, config=None)
         state_note = f"Skill {skill_id} включен."
     else:
-        storage.set_role_skill_enabled_for_team(team_id, role_id, skill_id, not current.enabled)
+        storage.set_role_skill_enabled_for_team_role(team_role_id, skill_id, not current.enabled)
         state_note = f"Skill {skill_id} {'включен' if not current.enabled else 'выключен'}."
     await query.edit_message_text(
         f"{state_note}\n\nSkills для роли @{_role_public_name(storage, group_id, role_id)}:",
@@ -739,16 +906,20 @@ async def _handle_add_role_model(query: CallbackQuery, data: str, storage: Stora
         )
     else:
         source_role = storage.get_role_by_id(state["source_role_id"])
-        internal_name = storage.generate_internal_role_name()
-        role = storage.upsert_role(
-            role_name=internal_name,
-            description=source_role.description,
-            base_system_prompt=source_role.base_system_prompt,
-            extra_instruction=source_role.extra_instruction,
-            llm_model=source_role.llm_model,
-            is_active=True,
-        )
+        role = source_role
     storage.ensure_team_role(target_team_id, role.role_id)
+    if state["mode"] == "clone":
+        source_group_id = int(state["source_group_id"])
+        source_team_id = _team_id(storage, source_group_id)
+        source_group_role = storage.get_team_role(source_team_id, source_role.role_id)
+        target_group_role = storage.get_team_role(target_team_id, role.role_id)
+        storage.set_team_role_prompt(target_team_id, role.role_id, source_group_role.system_prompt_override)
+        storage.set_team_role_extra_instruction(target_team_id, role.role_id, source_group_role.extra_instruction_override)
+        storage.set_team_role_model(target_team_id, role.role_id, source_group_role.model_override)
+        storage.set_team_role_user_prompt_suffix(target_team_id, role.role_id, source_group_role.user_prompt_suffix)
+        storage.set_team_role_user_reply_prefix(target_team_id, role.role_id, source_group_role.user_reply_prefix)
+        if source_group_role.team_role_id is not None and target_group_role.team_role_id is not None:
+            storage.clone_team_role_processing_bindings(source_group_role.team_role_id, target_group_role.team_role_id)
     storage.set_team_role_display_name(target_team_id, role.role_id, role_name)
     if model is not None:
         storage.set_team_role_model(target_team_id, role.role_id, model)
@@ -775,11 +946,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     storage: Storage = runtime.storage
     data = query.data or ""
-    if not data.startswith("addrole_model:"):
+    if not data.startswith("addrole_model:") and not data.startswith("mrole_create_model:"):
         runtime.pending_prompts.pop(query.from_user.id, None)
         runtime.pending_role_ops.pop(query.from_user.id, None)
 
     if await _handle_groups_navigation(query, data, storage):
+        return
+    if await _handle_master_roles_navigation(query, data, storage, runtime):
+        return
+    if await _handle_master_role_create_model(query, data, storage, runtime):
         return
     if await _handle_add_role(query, data, context, storage, runtime):
         return

@@ -49,6 +49,19 @@ class Storage:
         cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,))
         return cur.fetchone() is not None
 
+    # LTC-13 safety-net helpers: allow runtime/migrations to branch safely by schema capability.
+    def has_team_role_surrogate_id(self) -> bool:
+        return self._table_has_column("team_roles", "team_role_id")
+
+    def has_session_team_role_id(self) -> bool:
+        return self._table_has_column("user_role_sessions", "team_role_id")
+
+    def has_prepost_team_role_id(self) -> bool:
+        return self._table_has_column("role_prepost_processing", "team_role_id")
+
+    def has_skill_team_role_id(self) -> bool:
+        return self._table_has_column("role_skills_enabled", "team_role_id")
+
     def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         cur = self._conn.cursor()
         cur.execute(f"PRAGMA table_info({table})")
@@ -116,6 +129,7 @@ class Storage:
                 telegram_user_id INTEGER NOT NULL,
                 team_id INTEGER,
                 role_id INTEGER NOT NULL,
+                team_role_id INTEGER,
                 session_id TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 last_used_at TEXT NOT NULL,
@@ -197,6 +211,7 @@ class Storage:
             CREATE TABLE IF NOT EXISTS role_prepost_processing (
                 team_id INTEGER NOT NULL,
                 role_id INTEGER NOT NULL,
+                team_role_id INTEGER,
                 prepost_processing_id TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 config_json TEXT,
@@ -213,6 +228,7 @@ class Storage:
             CREATE TABLE IF NOT EXISTS role_skills_enabled (
                 team_id INTEGER NOT NULL,
                 role_id INTEGER NOT NULL,
+                team_role_id INTEGER,
                 skill_id TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 config_json TEXT,
@@ -229,7 +245,9 @@ class Storage:
             CREATE TABLE IF NOT EXISTS team_roles (
                 team_id INTEGER NOT NULL,
                 role_id INTEGER NOT NULL,
+                team_role_id INTEGER,
                 system_prompt_override TEXT,
+                extra_instruction_override TEXT,
                 display_name TEXT,
                 model_override TEXT,
                 user_prompt_suffix TEXT,
@@ -283,6 +301,118 @@ class Storage:
         self._ensure_column("users", "is_authorized", "is_authorized INTEGER NOT NULL DEFAULT 0")
         self._migrate_role_prepost_processing()
         self._migrate_to_team_only_schema()
+        self._migrate_team_role_surrogate_additive()
+        self._ensure_column("team_roles", "extra_instruction_override", "extra_instruction_override TEXT")
+        self._conn.commit()
+
+    def _migrate_team_role_surrogate_additive(self) -> None:
+        cur = self._conn.cursor()
+        if not self._table_exists("team_roles"):
+            return
+        self._ensure_column("team_roles", "team_role_id", "team_role_id INTEGER")
+        self._ensure_column("user_role_sessions", "team_role_id", "team_role_id INTEGER")
+        self._ensure_column("role_prepost_processing", "team_role_id", "team_role_id INTEGER")
+        self._ensure_column("role_skills_enabled", "team_role_id", "team_role_id INTEGER")
+
+        cur.execute("SELECT COALESCE(MAX(team_role_id), 0) AS max_id FROM team_roles")
+        row = cur.fetchone()
+        next_id = int(row["max_id"] or 0) + 1
+        cur.execute(
+            """
+            SELECT team_id, role_id
+            FROM team_roles
+            WHERE team_role_id IS NULL
+            ORDER BY team_id, role_id
+            """
+        )
+        for tr in cur.fetchall():
+            cur.execute(
+                """
+                UPDATE team_roles
+                SET team_role_id = ?
+                WHERE team_id = ? AND role_id = ?
+                """,
+                (next_id, int(tr["team_id"]), int(tr["role_id"])),
+            )
+            next_id += 1
+
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_team_roles_team_role_id
+            ON team_roles(team_role_id)
+            WHERE team_role_id IS NOT NULL
+            """
+        )
+        cur.execute(
+            """
+            CREATE TRIGGER IF NOT EXISTS trg_team_roles_assign_team_role_id
+            AFTER INSERT ON team_roles
+            FOR EACH ROW
+            WHEN NEW.team_role_id IS NULL
+            BEGIN
+                UPDATE team_roles
+                SET team_role_id = (
+                    SELECT COALESCE(MAX(team_role_id), 0) + 1
+                    FROM team_roles
+                    WHERE NOT (team_id = NEW.team_id AND role_id = NEW.role_id)
+                )
+                WHERE team_id = NEW.team_id AND role_id = NEW.role_id;
+            END
+            """
+        )
+
+        cur.execute(
+            """
+            UPDATE user_role_sessions
+            SET team_role_id = (
+                SELECT tr.team_role_id
+                FROM team_roles tr
+                WHERE tr.team_id = user_role_sessions.team_id
+                  AND tr.role_id = user_role_sessions.role_id
+                LIMIT 1
+            )
+            WHERE team_role_id IS NULL AND team_id IS NOT NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE role_prepost_processing
+            SET team_role_id = (
+                SELECT tr.team_role_id
+                FROM team_roles tr
+                WHERE tr.team_id = role_prepost_processing.team_id
+                  AND tr.role_id = role_prepost_processing.role_id
+                LIMIT 1
+            )
+            WHERE team_role_id IS NULL
+            """
+        )
+        cur.execute(
+            """
+            UPDATE role_skills_enabled
+            SET team_role_id = (
+                SELECT tr.team_role_id
+                FROM team_roles tr
+                WHERE tr.team_id = role_skills_enabled.team_id
+                  AND tr.role_id = role_skills_enabled.role_id
+                LIMIT 1
+            )
+            WHERE team_role_id IS NULL
+            """
+        )
+
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_user_role_sessions_team_role_id "
+            "ON user_role_sessions(team_role_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_role_prepost_processing_team_role_id "
+            "ON role_prepost_processing(team_role_id)"
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_role_skills_enabled_team_role_id "
+            "ON role_skills_enabled(team_role_id)"
+        )
         self._conn.commit()
 
     def _migrate_teams_additive(self) -> None:
@@ -371,6 +501,7 @@ class Storage:
                     team_id,
                     role_id,
                     system_prompt_override,
+                    extra_instruction_override,
                     display_name,
                     model_override,
                     user_prompt_suffix,
@@ -383,6 +514,7 @@ class Storage:
                     g.team_id,
                     gr.role_id,
                     gr.system_prompt_override,
+                    NULL,
                     gr.display_name,
                     gr.model_override,
                     gr.user_prompt_suffix,
@@ -396,6 +528,7 @@ class Storage:
                 """
             )
         if self._table_has_column("user_role_sessions", "group_id") and self._table_exists("groups"):
+            self._ensure_column("user_role_sessions", "team_id", "team_id INTEGER")
             cur.execute(
                 """
                 UPDATE user_role_sessions
@@ -1422,47 +1555,13 @@ class Storage:
             is_active=team_role.is_active,
         )
 
-    def ensure_team_role(self, team_id: int, role_id: int) -> TeamRole:
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO team_roles (
-                team_id,
-                role_id,
-                system_prompt_override,
-                display_name,
-                model_override,
-                user_prompt_suffix,
-                user_reply_prefix,
-                enabled,
-                mode,
-                is_active
-            )
-            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, 1, 'normal', 1)
-            ON CONFLICT(team_id, role_id) DO NOTHING
-            """,
-            (team_id, role_id),
-        )
-        self._conn.commit()
-        return self.get_team_role(team_id, role_id)
-
-    def get_team_role(self, team_id: int, role_id: int) -> TeamRole:
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT team_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
-            FROM team_roles
-            WHERE team_id = ? AND role_id = ?
-            """,
-            (team_id, role_id),
-        )
-        row = cur.fetchone()
-        if not row:
-            raise ValueError(f"Team role not found: team_id={team_id} role_id={role_id}")
+    def _row_to_team_role(self, row: sqlite3.Row) -> TeamRole:
         return TeamRole(
             team_id=row["team_id"],
             role_id=row["role_id"],
+            team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
             system_prompt_override=row["system_prompt_override"],
+            extra_instruction_override=row["extra_instruction_override"] if "extra_instruction_override" in row.keys() else None,
             display_name=row["display_name"],
             model_override=row["model_override"],
             user_prompt_suffix=row["user_prompt_suffix"],
@@ -1472,11 +1571,135 @@ class Storage:
             is_active=bool(row["is_active"]),
         )
 
+    def resolve_team_role_id(self, team_id: int, role_id: int, *, ensure_exists: bool = False) -> int | None:
+        if ensure_exists:
+            self.ensure_team_role(team_id, role_id)
+        cur = self._conn.cursor()
+        if self.has_team_role_surrogate_id():
+            cur.execute(
+                "SELECT team_role_id FROM team_roles WHERE team_id = ? AND role_id = ?",
+                (team_id, role_id),
+            )
+            row = cur.fetchone()
+            if row and row["team_role_id"] is not None:
+                return int(row["team_role_id"])
+        cur.execute(
+            "SELECT 1 FROM team_roles WHERE team_id = ? AND role_id = ?",
+            (team_id, role_id),
+        )
+        if cur.fetchone() is None:
+            return None
+        return None
+
+    def resolve_team_role_identity(self, team_role_id: int) -> tuple[int, int] | None:
+        if not self.has_team_role_surrogate_id():
+            return None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT team_id, role_id
+            FROM team_roles
+            WHERE team_role_id = ?
+            LIMIT 1
+            """,
+            (team_role_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return int(row["team_id"]), int(row["role_id"])
+
+    def ensure_team_role(self, team_id: int, role_id: int) -> TeamRole:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO team_roles (
+                team_id,
+                role_id,
+                system_prompt_override,
+                extra_instruction_override,
+                display_name,
+                model_override,
+                user_prompt_suffix,
+                user_reply_prefix,
+                enabled,
+                mode,
+                is_active
+            )
+            VALUES (?, ?, NULL, NULL, NULL, NULL, NULL, NULL, 1, 'normal', 1)
+            ON CONFLICT(team_id, role_id) DO NOTHING
+            """,
+            (team_id, role_id),
+        )
+        self._conn.commit()
+        return self.get_team_role(team_id, role_id)
+
+    def bind_master_role_to_team(self, team_id: int, role_id: int) -> tuple[TeamRole, bool]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT is_active
+            FROM team_roles
+            WHERE team_id = ? AND role_id = ?
+            LIMIT 1
+            """,
+            (team_id, role_id),
+        )
+        row = cur.fetchone()
+        if row is None:
+            team_role = self.ensure_team_role(team_id, role_id)
+            return team_role, True
+        if not bool(row["is_active"]):
+            cur.execute(
+                """
+                UPDATE team_roles
+                SET is_active = 1, enabled = 1
+                WHERE team_id = ? AND role_id = ?
+                """,
+                (team_id, role_id),
+            )
+            self._conn.commit()
+            return self.get_team_role(team_id, role_id), True
+        return self.get_team_role(team_id, role_id), False
+
+    def get_team_role(self, team_id: int, role_id: int) -> TeamRole:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            FROM team_roles
+            WHERE team_id = ? AND role_id = ?
+            """,
+            (team_id, role_id),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Team role not found: team_id={team_id} role_id={role_id}")
+        return self._row_to_team_role(row)
+
+    def get_team_role_by_id(self, team_role_id: int) -> TeamRole:
+        if not self.has_team_role_surrogate_id():
+            raise ValueError("team_role_id is not supported by current schema")
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            FROM team_roles
+            WHERE team_role_id = ?
+            LIMIT 1
+            """,
+            (team_role_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        return self._row_to_team_role(row)
+
     def list_team_roles(self, team_id: int) -> list[TeamRole]:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
             FROM team_roles
             WHERE team_id = ? AND is_active = 1
             ORDER BY role_id
@@ -1484,27 +1707,13 @@ class Storage:
             (team_id,),
         )
         rows = cur.fetchall()
-        return [
-            TeamRole(
-                team_id=row["team_id"],
-                role_id=row["role_id"],
-                system_prompt_override=row["system_prompt_override"],
-                display_name=row["display_name"],
-                model_override=row["model_override"],
-                user_prompt_suffix=row["user_prompt_suffix"],
-                user_reply_prefix=row["user_reply_prefix"],
-                enabled=bool(row["enabled"]),
-                mode=str(row["mode"] or "normal"),
-                is_active=bool(row["is_active"]),
-            )
-            for row in rows
-        ]
+        return [self._row_to_team_role(row) for row in rows]
 
     def list_enabled_roles_for_team(self, team_id: int) -> list[TeamRole]:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
             FROM team_roles
             WHERE team_id = ? AND is_active = 1 AND enabled = 1
             ORDER BY role_id
@@ -1512,27 +1721,13 @@ class Storage:
             (team_id,),
         )
         rows = cur.fetchall()
-        return [
-            TeamRole(
-                team_id=row["team_id"],
-                role_id=row["role_id"],
-                system_prompt_override=row["system_prompt_override"],
-                display_name=row["display_name"],
-                model_override=row["model_override"],
-                user_prompt_suffix=row["user_prompt_suffix"],
-                user_reply_prefix=row["user_reply_prefix"],
-                enabled=bool(row["enabled"]),
-                mode=str(row["mode"] or "normal"),
-                is_active=bool(row["is_active"]),
-            )
-            for row in rows
-        ]
+        return [self._row_to_team_role(row) for row in rows]
 
     def get_enabled_orchestrator_for_team(self, team_id: int) -> TeamRole | None:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, system_prompt_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
             FROM team_roles
             WHERE team_id = ? AND is_active = 1 AND enabled = 1 AND mode = 'orchestrator'
             ORDER BY role_id
@@ -1545,19 +1740,7 @@ class Storage:
             return None
         if len(rows) > 1:
             raise ValueError(f"Multiple enabled orchestrators found for team_id={team_id}")
-        row = rows[0]
-        return TeamRole(
-            team_id=row["team_id"],
-            role_id=row["role_id"],
-            system_prompt_override=row["system_prompt_override"],
-            display_name=row["display_name"],
-            model_override=row["model_override"],
-            user_prompt_suffix=row["user_prompt_suffix"],
-            user_reply_prefix=row["user_reply_prefix"],
-            enabled=bool(row["enabled"]),
-            mode=str(row["mode"] or "normal"),
-            is_active=bool(row["is_active"]),
-        )
+        return self._row_to_team_role(rows[0])
 
     def list_roles_for_team(self, team_id: int) -> list[Role]:
         cur = self._conn.cursor()
@@ -1591,6 +1774,90 @@ class Storage:
                 is_active=bool(row["is_active"]),
                 mention_name=row["mention_name"],
             )
+            for row in rows
+        ]
+
+    def list_team_role_bindings_for_role(self, role_id: int, *, active_only: bool = True) -> list[dict[str, object]]:
+        cur = self._conn.cursor()
+        if active_only:
+            cur.execute(
+                """
+                SELECT
+                    tr.team_id,
+                    t.name AS team_name,
+                    tr.display_name,
+                    tr.enabled,
+                    tr.mode,
+                    (
+                        SELECT tb.external_id
+                        FROM team_bindings tb
+                        WHERE tb.team_id = tr.team_id
+                          AND tb.interface_type = 'telegram'
+                          AND tb.is_active = 1
+                        ORDER BY tb.external_id
+                        LIMIT 1
+                    ) AS telegram_group_id,
+                    (
+                        SELECT tb.external_title
+                        FROM team_bindings tb
+                        WHERE tb.team_id = tr.team_id
+                          AND tb.interface_type = 'telegram'
+                          AND tb.is_active = 1
+                        ORDER BY tb.external_id
+                        LIMIT 1
+                    ) AS telegram_group_title
+                FROM team_roles tr
+                JOIN teams t ON t.team_id = tr.team_id
+                WHERE tr.role_id = ? AND tr.is_active = 1
+                ORDER BY tr.team_id
+                """,
+                (role_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT
+                    tr.team_id,
+                    t.name AS team_name,
+                    tr.display_name,
+                    tr.enabled,
+                    tr.mode,
+                    (
+                        SELECT tb.external_id
+                        FROM team_bindings tb
+                        WHERE tb.team_id = tr.team_id
+                          AND tb.interface_type = 'telegram'
+                          AND tb.is_active = 1
+                        ORDER BY tb.external_id
+                        LIMIT 1
+                    ) AS telegram_group_id,
+                    (
+                        SELECT tb.external_title
+                        FROM team_bindings tb
+                        WHERE tb.team_id = tr.team_id
+                          AND tb.interface_type = 'telegram'
+                          AND tb.is_active = 1
+                        ORDER BY tb.external_id
+                        LIMIT 1
+                    ) AS telegram_group_title
+                FROM team_roles tr
+                JOIN teams t ON t.team_id = tr.team_id
+                WHERE tr.role_id = ?
+                ORDER BY tr.team_id
+                """,
+                (role_id,),
+            )
+        rows = cur.fetchall()
+        return [
+            {
+                "team_id": int(row["team_id"]),
+                "team_name": row["team_name"],
+                "display_name": row["display_name"],
+                "enabled": bool(row["enabled"]),
+                "mode": str(row["mode"] or "normal"),
+                "telegram_group_id": row["telegram_group_id"],
+                "telegram_group_title": row["telegram_group_title"],
+            }
             for row in rows
         ]
 
@@ -1710,6 +1977,18 @@ class Storage:
             WHERE team_id = ? AND role_id = ?
             """,
             (model_override, team_id, role_id),
+        )
+        self._conn.commit()
+
+    def set_team_role_extra_instruction(self, team_id: int, role_id: int, extra_instruction_override: str | None) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET extra_instruction_override = ?
+            WHERE team_id = ? AND role_id = ?
+            """,
+            (extra_instruction_override, team_id, role_id),
         )
         self._conn.commit()
 
@@ -1853,6 +2132,11 @@ class Storage:
         self.ensure_team_role(team_id, role_id)
         self.set_team_role_model(team_id, role_id, model_override)
 
+    def set_group_role_extra_instruction(self, group_id: int, role_id: int, extra_instruction_override: str | None) -> None:
+        team_id = self.resolve_team_id_by_group_id_legacy(group_id)
+        self.ensure_team_role(team_id, role_id)
+        self.set_team_role_extra_instruction(team_id, role_id, extra_instruction_override)
+
     def set_group_role_user_prompt_suffix(self, group_id: int, role_id: int, user_prompt_suffix: str | None) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.ensure_team_role(team_id, role_id)
@@ -1897,10 +2181,13 @@ class Storage:
         return self.get_user_role_session_by_team(telegram_user_id, team_id, role_id)
 
     def get_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int) -> UserRoleSession | None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if self.has_session_team_role_id() and team_role_id is not None:
+            return self.get_user_role_session_by_team_role(telegram_user_id, team_role_id)
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT telegram_user_id, team_id, role_id, session_id, created_at, last_used_at
+            SELECT telegram_user_id, team_id, role_id, team_role_id, session_id, created_at, last_used_at
             FROM user_role_sessions
             WHERE telegram_user_id = ? AND team_id = ? AND role_id = ?
             LIMIT 1
@@ -1915,6 +2202,47 @@ class Storage:
             group_id=self.resolve_telegram_chat_id_by_team_id(team_id) or 0,
             team_id=row["team_id"],
             role_id=row["role_id"],
+            team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
+            session_id=row["session_id"],
+            created_at=row["created_at"],
+            last_used_at=row["last_used_at"],
+        )
+
+    def get_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int) -> UserRoleSession | None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return None
+        team_id, role_id = identity
+        cur = self._conn.cursor()
+        if self.has_session_team_role_id():
+            cur.execute(
+                """
+                SELECT telegram_user_id, team_id, role_id, team_role_id, session_id, created_at, last_used_at
+                FROM user_role_sessions
+                WHERE telegram_user_id = ? AND team_role_id = ?
+                LIMIT 1
+                """,
+                (telegram_user_id, team_role_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT telegram_user_id, team_id, role_id, NULL as team_role_id, session_id, created_at, last_used_at
+                FROM user_role_sessions
+                WHERE telegram_user_id = ? AND team_id = ? AND role_id = ?
+                LIMIT 1
+                """,
+                (telegram_user_id, team_id, role_id),
+            )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return UserRoleSession(
+            telegram_user_id=row["telegram_user_id"],
+            group_id=self.resolve_telegram_chat_id_by_team_id(team_id) or 0,
+            team_id=team_id,
+            role_id=role_id,
+            team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
             session_id=row["session_id"],
             created_at=row["created_at"],
             last_used_at=row["last_used_at"],
@@ -1925,6 +2253,10 @@ class Storage:
         self.save_user_role_session_by_team(telegram_user_id, team_id, role_id, session_id)
 
     def save_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int, session_id: str) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id, ensure_exists=True)
+        if team_role_id is not None:
+            self.save_user_role_session_by_team_role(telegram_user_id, team_role_id, session_id)
+            return
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1939,7 +2271,45 @@ class Storage:
         )
         self._conn.commit()
 
+    def save_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int, session_id: str) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        team_id, role_id = identity
+        now = _utc_now()
+        cur = self._conn.cursor()
+        if self.has_session_team_role_id():
+            cur.execute(
+                """
+                INSERT INTO user_role_sessions (
+                    telegram_user_id, team_id, role_id, team_role_id, session_id, created_at, last_used_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id, team_id, role_id) DO UPDATE SET
+                    team_role_id=excluded.team_role_id,
+                    session_id=excluded.session_id,
+                    last_used_at=excluded.last_used_at
+                """,
+                (telegram_user_id, team_id, role_id, team_role_id, session_id, now, now),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO user_role_sessions (telegram_user_id, team_id, role_id, session_id, created_at, last_used_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(telegram_user_id, team_id, role_id) DO UPDATE SET
+                    session_id=excluded.session_id,
+                    last_used_at=excluded.last_used_at
+                """,
+                (telegram_user_id, team_id, role_id, session_id, now, now),
+            )
+        self._conn.commit()
+
     def delete_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if self.has_session_team_role_id() and team_role_id is not None:
+            self.delete_user_role_session_by_team_role(telegram_user_id, team_role_id)
+            return
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -1950,11 +2320,39 @@ class Storage:
         )
         self._conn.commit()
 
+    def delete_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
+        cur = self._conn.cursor()
+        if self.has_session_team_role_id():
+            cur.execute(
+                """
+                DELETE FROM user_role_sessions
+                WHERE telegram_user_id = ? AND team_role_id = ?
+                """,
+                (telegram_user_id, team_role_id),
+            )
+        else:
+            cur.execute(
+                """
+                DELETE FROM user_role_sessions
+                WHERE telegram_user_id = ? AND team_id = ? AND role_id = ?
+                """,
+                (telegram_user_id, team_id, role_id),
+            )
+        self._conn.commit()
+
     def touch_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.touch_user_role_session_by_team(telegram_user_id, team_id, role_id)
 
     def touch_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if self.has_session_team_role_id() and team_role_id is not None:
+            self.touch_user_role_session_by_team_role(telegram_user_id, team_role_id)
+            return
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1965,6 +2363,33 @@ class Storage:
             """,
             (now, telegram_user_id, team_id, role_id),
         )
+        self._conn.commit()
+
+    def touch_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
+        now = _utc_now()
+        cur = self._conn.cursor()
+        if self.has_session_team_role_id():
+            cur.execute(
+                """
+                UPDATE user_role_sessions
+                SET last_used_at = ?
+                WHERE telegram_user_id = ? AND team_role_id = ?
+                """,
+                (now, telegram_user_id, team_role_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE user_role_sessions
+                SET last_used_at = ?
+                WHERE telegram_user_id = ? AND team_id = ? AND role_id = ?
+                """,
+                (now, telegram_user_id, team_id, role_id),
+            )
         self._conn.commit()
 
     def list_user_sessions(self, telegram_user_id: int) -> list[str]:
@@ -1984,94 +2409,95 @@ class Storage:
         enabled: bool = True,
         config: dict | None = None,
     ) -> RolePrePostProcessing:
-        now = _utc_now()
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
-        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO role_prepost_processing (team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(team_id, role_id, prepost_processing_id) DO UPDATE SET
-                enabled=excluded.enabled,
-                config_json=excluded.config_json,
-                updated_at=excluded.updated_at
-            """,
-            (team_id, role_id, prepost_processing_id, 1 if enabled else 0, config_json, now, now),
+        got = self.upsert_role_prepost_processing_for_team(
+            team_id,
+            role_id,
+            prepost_processing_id,
+            enabled=enabled,
+            config=config,
         )
-        self._conn.commit()
-        role_prepost_processing = self.get_role_prepost_processing(group_id, role_id, prepost_processing_id)
-        if role_prepost_processing is None:
-            raise RuntimeError("Failed to upsert role pre/post processing")
-        return role_prepost_processing
+        return RolePrePostProcessing(
+            group_id=group_id,
+            role_id=got.role_id,
+            team_role_id=got.team_role_id,
+            prepost_processing_id=got.prepost_processing_id,
+            enabled=got.enabled,
+            config_json=got.config_json,
+            created_at=got.created_at,
+            updated_at=got.updated_at,
+        )
 
     def get_role_prepost_processing(self, group_id: int, role_id: int, prepost_processing_id: str) -> RolePrePostProcessing | None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
-            FROM role_prepost_processing
-            WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
-            """,
-            (team_id, role_id, prepost_processing_id),
-        )
-        row = cur.fetchone()
-        if not row:
+        got = self.get_role_prepost_processing_for_team(team_id, role_id, prepost_processing_id)
+        if got is None:
             return None
         return RolePrePostProcessing(
             group_id=group_id,
-            role_id=row["role_id"],
-            prepost_processing_id=row["prepost_processing_id"],
-            enabled=bool(row["enabled"]),
-            config_json=row["config_json"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            role_id=got.role_id,
+            team_role_id=got.team_role_id,
+            prepost_processing_id=got.prepost_processing_id,
+            enabled=got.enabled,
+            config_json=got.config_json,
+            created_at=got.created_at,
+            updated_at=got.updated_at,
         )
 
     def list_role_prepost_processing(self, group_id: int, role_id: int, *, enabled_only: bool = False) -> list[RolePrePostProcessing]:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
-        cur = self._conn.cursor()
-        if enabled_only:
-            cur.execute(
-                """
-                SELECT team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
-                FROM role_prepost_processing
-                WHERE team_id = ? AND role_id = ? AND enabled = 1
-                ORDER BY prepost_processing_id
-                """,
-                (team_id, role_id),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
-                FROM role_prepost_processing
-                WHERE team_id = ? AND role_id = ?
-                ORDER BY prepost_processing_id
-                """,
-                (team_id, role_id),
-            )
-        rows = cur.fetchall()
+        rows = self.list_role_prepost_processing_for_team(team_id, role_id, enabled_only=enabled_only)
         return [
             RolePrePostProcessing(
                 group_id=group_id,
-                role_id=row["role_id"],
-                prepost_processing_id=row["prepost_processing_id"],
-                enabled=bool(row["enabled"]),
-                config_json=row["config_json"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
+                role_id=row.role_id,
+                team_role_id=row.team_role_id,
+                prepost_processing_id=row.prepost_processing_id,
+                enabled=row.enabled,
+                config_json=row.config_json,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
             )
             for row in rows
         ]
 
     def list_role_prepost_processing_for_team(self, team_id: int, role_id: int, *, enabled_only: bool = False) -> list[RolePrePostProcessing]:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return []
+        return self.list_role_prepost_processing_for_team_role(team_role_id, enabled_only=enabled_only)
+
+    def list_role_prepost_processing_for_team_role(self, team_role_id: int, *, enabled_only: bool = False) -> list[RolePrePostProcessing]:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return []
+        team_id, role_id = identity
         cur = self._conn.cursor()
-        if enabled_only:
+        if self.has_prepost_team_role_id():
+            if enabled_only:
+                cur.execute(
+                    """
+                    SELECT team_id, role_id, team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                    FROM role_prepost_processing
+                    WHERE team_role_id = ? AND enabled = 1
+                    ORDER BY prepost_processing_id
+                    """,
+                    (team_role_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT team_id, role_id, team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                    FROM role_prepost_processing
+                    WHERE team_role_id = ?
+                    ORDER BY prepost_processing_id
+                    """,
+                    (team_role_id,),
+                )
+        elif enabled_only:
             cur.execute(
                 """
-                SELECT team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                SELECT team_id, role_id, NULL AS team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
                 FROM role_prepost_processing
                 WHERE team_id = ? AND role_id = ? AND enabled = 1
                 ORDER BY prepost_processing_id
@@ -2081,7 +2507,7 @@ class Storage:
         else:
             cur.execute(
                 """
-                SELECT team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                SELECT team_id, role_id, NULL AS team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
                 FROM role_prepost_processing
                 WHERE team_id = ? AND role_id = ?
                 ORDER BY prepost_processing_id
@@ -2094,6 +2520,7 @@ class Storage:
             RolePrePostProcessing(
                 group_id=group_id,
                 role_id=row["role_id"],
+                team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
                 prepost_processing_id=row["prepost_processing_id"],
                 enabled=bool(row["enabled"]),
                 config_json=row["config_json"],
@@ -2112,42 +2539,98 @@ class Storage:
         enabled: bool = True,
         config: dict | None = None,
     ) -> RolePrePostProcessing:
+        team_role_id = self.resolve_team_role_id(team_id, role_id, ensure_exists=True)
+        if team_role_id is None:
+            raise ValueError(f"Team role not found: team_id={team_id} role_id={role_id}")
+        return self.upsert_role_prepost_processing_for_team_role(
+            team_role_id, prepost_processing_id, enabled=enabled, config=config
+        )
+
+    def upsert_role_prepost_processing_for_team_role(
+        self,
+        team_role_id: int,
+        prepost_processing_id: str,
+        *,
+        enabled: bool = True,
+        config: dict | None = None,
+    ) -> RolePrePostProcessing:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        team_id, role_id = identity
         now = _utc_now()
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO role_prepost_processing (team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(team_id, role_id, prepost_processing_id) DO UPDATE SET
-                enabled=excluded.enabled,
-                config_json=excluded.config_json,
-                updated_at=excluded.updated_at
-            """,
-            (team_id, role_id, prepost_processing_id, 1 if enabled else 0, config_json, now, now),
-        )
+        if self.has_prepost_team_role_id():
+            cur.execute(
+                """
+                INSERT INTO role_prepost_processing (
+                    team_id, role_id, team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(team_id, role_id, prepost_processing_id) DO UPDATE SET
+                    team_role_id=excluded.team_role_id,
+                    enabled=excluded.enabled,
+                    config_json=excluded.config_json,
+                    updated_at=excluded.updated_at
+                """,
+                (team_id, role_id, team_role_id, prepost_processing_id, 1 if enabled else 0, config_json, now, now),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO role_prepost_processing (team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(team_id, role_id, prepost_processing_id) DO UPDATE SET
+                    enabled=excluded.enabled,
+                    config_json=excluded.config_json,
+                    updated_at=excluded.updated_at
+                """,
+                (team_id, role_id, prepost_processing_id, 1 if enabled else 0, config_json, now, now),
+            )
         self._conn.commit()
-        got = self.get_role_prepost_processing_for_team(team_id, role_id, prepost_processing_id)
+        got = self.get_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
         if got is None:
             raise RuntimeError("Failed to upsert team role pre/post processing")
         return got
 
     def get_role_prepost_processing_for_team(self, team_id: int, role_id: int, prepost_processing_id: str) -> RolePrePostProcessing | None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return None
+        return self.get_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
+
+    def get_role_prepost_processing_for_team_role(self, team_role_id: int, prepost_processing_id: str) -> RolePrePostProcessing | None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return None
+        team_id, role_id = identity
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
-            FROM role_prepost_processing
-            WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
-            """,
-            (team_id, role_id, prepost_processing_id),
-        )
+        if self.has_prepost_team_role_id():
+            cur.execute(
+                """
+                SELECT team_id, role_id, team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                FROM role_prepost_processing
+                WHERE team_role_id = ? AND prepost_processing_id = ?
+                """,
+                (team_role_id, prepost_processing_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT team_id, role_id, NULL AS team_role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                FROM role_prepost_processing
+                WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
+                """,
+                (team_id, role_id, prepost_processing_id),
+            )
         row = cur.fetchone()
         if not row:
             return None
         return RolePrePostProcessing(
             group_id=self.resolve_telegram_chat_id_by_team_id(team_id) or 0,
             role_id=row["role_id"],
+            team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
             prepost_processing_id=row["prepost_processing_id"],
             enabled=bool(row["enabled"]),
             config_json=row["config_json"],
@@ -2162,16 +2645,41 @@ class Storage:
         prepost_processing_id: str,
         enabled: bool,
     ) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        self.set_role_prepost_processing_enabled_for_team_role(team_role_id, prepost_processing_id, enabled)
+
+    def set_role_prepost_processing_enabled_for_team_role(
+        self,
+        team_role_id: int,
+        prepost_processing_id: str,
+        enabled: bool,
+    ) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
         now = _utc_now()
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            UPDATE role_prepost_processing
-            SET enabled = ?, updated_at = ?
-            WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
-            """,
-            (1 if enabled else 0, now, team_id, role_id, prepost_processing_id),
-        )
+        if self.has_prepost_team_role_id():
+            cur.execute(
+                """
+                UPDATE role_prepost_processing
+                SET enabled = ?, updated_at = ?
+                WHERE team_role_id = ? AND prepost_processing_id = ?
+                """,
+                (1 if enabled else 0, now, team_role_id, prepost_processing_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE role_prepost_processing
+                SET enabled = ?, updated_at = ?
+                WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
+                """,
+                (1 if enabled else 0, now, team_id, role_id, prepost_processing_id),
+            )
         self._conn.commit()
 
     def set_role_prepost_processing_config_for_team(
@@ -2181,28 +2689,72 @@ class Storage:
         prepost_processing_id: str,
         config: dict | None,
     ) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        self.set_role_prepost_processing_config_for_team_role(team_role_id, prepost_processing_id, config)
+
+    def set_role_prepost_processing_config_for_team_role(
+        self,
+        team_role_id: int,
+        prepost_processing_id: str,
+        config: dict | None,
+    ) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
         now = _utc_now()
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            UPDATE role_prepost_processing
-            SET config_json = ?, updated_at = ?
-            WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
-            """,
-            (config_json, now, team_id, role_id, prepost_processing_id),
-        )
+        if self.has_prepost_team_role_id():
+            cur.execute(
+                """
+                UPDATE role_prepost_processing
+                SET config_json = ?, updated_at = ?
+                WHERE team_role_id = ? AND prepost_processing_id = ?
+                """,
+                (config_json, now, team_role_id, prepost_processing_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE role_prepost_processing
+                SET config_json = ?, updated_at = ?
+                WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
+                """,
+                (config_json, now, team_id, role_id, prepost_processing_id),
+            )
         self._conn.commit()
 
     def delete_role_prepost_processing_for_team(self, team_id: int, role_id: int, prepost_processing_id: str) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        self.delete_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
+
+    def delete_role_prepost_processing_for_team_role(self, team_role_id: int, prepost_processing_id: str) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            DELETE FROM role_prepost_processing
-            WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
-            """,
-            (team_id, role_id, prepost_processing_id),
-        )
+        if self.has_prepost_team_role_id():
+            cur.execute(
+                """
+                DELETE FROM role_prepost_processing
+                WHERE team_role_id = ? AND prepost_processing_id = ?
+                """,
+                (team_role_id, prepost_processing_id),
+            )
+        else:
+            cur.execute(
+                """
+                DELETE FROM role_prepost_processing
+                WHERE team_id = ? AND role_id = ? AND prepost_processing_id = ?
+                """,
+                (team_id, role_id, prepost_processing_id),
+            )
         self._conn.commit()
 
     def set_role_prepost_processing_enabled(self, group_id: int, role_id: int, prepost_processing_id: str, enabled: bool) -> None:
@@ -2226,94 +2778,89 @@ class Storage:
         enabled: bool = True,
         config: dict | None = None,
     ) -> RoleSkill:
-        now = _utc_now()
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
-        config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO role_skills_enabled (team_id, role_id, skill_id, enabled, config_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(team_id, role_id, skill_id) DO UPDATE SET
-                enabled=excluded.enabled,
-                config_json=excluded.config_json,
-                updated_at=excluded.updated_at
-            """,
-            (team_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
+        got = self.upsert_role_skill_for_team(team_id, role_id, skill_id, enabled=enabled, config=config)
+        return RoleSkill(
+            group_id=group_id,
+            role_id=got.role_id,
+            team_role_id=got.team_role_id,
+            skill_id=got.skill_id,
+            enabled=got.enabled,
+            config_json=got.config_json,
+            created_at=got.created_at,
+            updated_at=got.updated_at,
         )
-        self._conn.commit()
-        role_skill = self.get_role_skill(group_id, role_id, skill_id)
-        if role_skill is None:
-            raise RuntimeError("Failed to upsert role skill")
-        return role_skill
 
     def get_role_skill(self, group_id: int, role_id: int, skill_id: str) -> RoleSkill | None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
-        cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-            FROM role_skills_enabled
-            WHERE team_id = ? AND role_id = ? AND skill_id = ?
-            """,
-            (team_id, role_id, skill_id),
-        )
-        row = cur.fetchone()
-        if not row:
+        got = self.get_role_skill_for_team(team_id, role_id, skill_id)
+        if got is None:
             return None
         return RoleSkill(
             group_id=group_id,
-            role_id=row["role_id"],
-            skill_id=row["skill_id"],
-            enabled=bool(row["enabled"]),
-            config_json=row["config_json"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
+            role_id=got.role_id,
+            team_role_id=got.team_role_id,
+            skill_id=got.skill_id,
+            enabled=got.enabled,
+            config_json=got.config_json,
+            created_at=got.created_at,
+            updated_at=got.updated_at,
         )
 
     def list_role_skills(self, group_id: int, role_id: int, *, enabled_only: bool = False) -> list[RoleSkill]:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
-        cur = self._conn.cursor()
-        if enabled_only:
-            cur.execute(
-                """
-                SELECT team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-                FROM role_skills_enabled
-                WHERE team_id = ? AND role_id = ? AND enabled = 1
-                ORDER BY skill_id
-                """,
-                (team_id, role_id),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-                FROM role_skills_enabled
-                WHERE team_id = ? AND role_id = ?
-                ORDER BY skill_id
-                """,
-                (team_id, role_id),
-            )
-        rows = cur.fetchall()
+        rows = self.list_role_skills_for_team(team_id, role_id, enabled_only=enabled_only)
         return [
             RoleSkill(
                 group_id=group_id,
-                role_id=row["role_id"],
-                skill_id=row["skill_id"],
-                enabled=bool(row["enabled"]),
-                config_json=row["config_json"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
+                role_id=row.role_id,
+                team_role_id=row.team_role_id,
+                skill_id=row.skill_id,
+                enabled=row.enabled,
+                config_json=row.config_json,
+                created_at=row.created_at,
+                updated_at=row.updated_at,
             )
             for row in rows
         ]
 
     def list_role_skills_for_team(self, team_id: int, role_id: int, *, enabled_only: bool = False) -> list[RoleSkill]:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return []
+        return self.list_role_skills_for_team_role(team_role_id, enabled_only=enabled_only)
+
+    def list_role_skills_for_team_role(self, team_role_id: int, *, enabled_only: bool = False) -> list[RoleSkill]:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return []
+        team_id, role_id = identity
         cur = self._conn.cursor()
-        if enabled_only:
+        if self.has_skill_team_role_id():
+            if enabled_only:
+                cur.execute(
+                    """
+                    SELECT team_id, role_id, team_role_id, skill_id, enabled, config_json, created_at, updated_at
+                    FROM role_skills_enabled
+                    WHERE team_role_id = ? AND enabled = 1
+                    ORDER BY skill_id
+                    """,
+                    (team_role_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT team_id, role_id, team_role_id, skill_id, enabled, config_json, created_at, updated_at
+                    FROM role_skills_enabled
+                    WHERE team_role_id = ?
+                    ORDER BY skill_id
+                    """,
+                    (team_role_id,),
+                )
+        elif enabled_only:
             cur.execute(
                 """
-                SELECT team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                SELECT team_id, role_id, NULL AS team_role_id, skill_id, enabled, config_json, created_at, updated_at
                 FROM role_skills_enabled
                 WHERE team_id = ? AND role_id = ? AND enabled = 1
                 ORDER BY skill_id
@@ -2323,7 +2870,7 @@ class Storage:
         else:
             cur.execute(
                 """
-                SELECT team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                SELECT team_id, role_id, NULL AS team_role_id, skill_id, enabled, config_json, created_at, updated_at
                 FROM role_skills_enabled
                 WHERE team_id = ? AND role_id = ?
                 ORDER BY skill_id
@@ -2336,6 +2883,7 @@ class Storage:
             RoleSkill(
                 group_id=group_id,
                 role_id=row["role_id"],
+                team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
                 skill_id=row["skill_id"],
                 enabled=bool(row["enabled"]),
                 config_json=row["config_json"],
@@ -2354,42 +2902,96 @@ class Storage:
         enabled: bool = True,
         config: dict | None = None,
     ) -> RoleSkill:
+        team_role_id = self.resolve_team_role_id(team_id, role_id, ensure_exists=True)
+        if team_role_id is None:
+            raise ValueError(f"Team role not found: team_id={team_id} role_id={role_id}")
+        return self.upsert_role_skill_for_team_role(team_role_id, skill_id, enabled=enabled, config=config)
+
+    def upsert_role_skill_for_team_role(
+        self,
+        team_role_id: int,
+        skill_id: str,
+        *,
+        enabled: bool = True,
+        config: dict | None = None,
+    ) -> RoleSkill:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        team_id, role_id = identity
         now = _utc_now()
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO role_skills_enabled (team_id, role_id, skill_id, enabled, config_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(team_id, role_id, skill_id) DO UPDATE SET
-                enabled=excluded.enabled,
-                config_json=excluded.config_json,
-                updated_at=excluded.updated_at
-            """,
-            (team_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
-        )
+        if self.has_skill_team_role_id():
+            cur.execute(
+                """
+                INSERT INTO role_skills_enabled (
+                    team_id, role_id, team_role_id, skill_id, enabled, config_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(team_id, role_id, skill_id) DO UPDATE SET
+                    team_role_id=excluded.team_role_id,
+                    enabled=excluded.enabled,
+                    config_json=excluded.config_json,
+                    updated_at=excluded.updated_at
+                """,
+                (team_id, role_id, team_role_id, skill_id, 1 if enabled else 0, config_json, now, now),
+            )
+        else:
+            cur.execute(
+                """
+                INSERT INTO role_skills_enabled (team_id, role_id, skill_id, enabled, config_json, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(team_id, role_id, skill_id) DO UPDATE SET
+                    enabled=excluded.enabled,
+                    config_json=excluded.config_json,
+                    updated_at=excluded.updated_at
+                """,
+                (team_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
+            )
         self._conn.commit()
-        got = self.get_role_skill_for_team(team_id, role_id, skill_id)
+        got = self.get_role_skill_for_team_role(team_role_id, skill_id)
         if got is None:
             raise RuntimeError("Failed to upsert team role skill")
         return got
 
     def get_role_skill_for_team(self, team_id: int, role_id: int, skill_id: str) -> RoleSkill | None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return None
+        return self.get_role_skill_for_team_role(team_role_id, skill_id)
+
+    def get_role_skill_for_team_role(self, team_role_id: int, skill_id: str) -> RoleSkill | None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return None
+        team_id, role_id = identity
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
-            FROM role_skills_enabled
-            WHERE team_id = ? AND role_id = ? AND skill_id = ?
-            """,
-            (team_id, role_id, skill_id),
-        )
+        if self.has_skill_team_role_id():
+            cur.execute(
+                """
+                SELECT team_id, role_id, team_role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills_enabled
+                WHERE team_role_id = ? AND skill_id = ?
+                """,
+                (team_role_id, skill_id),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT team_id, role_id, NULL AS team_role_id, skill_id, enabled, config_json, created_at, updated_at
+                FROM role_skills_enabled
+                WHERE team_id = ? AND role_id = ? AND skill_id = ?
+                """,
+                (team_id, role_id, skill_id),
+            )
         row = cur.fetchone()
         if not row:
             return None
         return RoleSkill(
             group_id=self.resolve_telegram_chat_id_by_team_id(team_id) or 0,
             role_id=row["role_id"],
+            team_role_id=row["team_role_id"] if "team_role_id" in row.keys() else None,
             skill_id=row["skill_id"],
             enabled=bool(row["enabled"]),
             config_json=row["config_json"],
@@ -2398,42 +3000,139 @@ class Storage:
         )
 
     def set_role_skill_enabled_for_team(self, team_id: int, role_id: int, skill_id: str, enabled: bool) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        self.set_role_skill_enabled_for_team_role(team_role_id, skill_id, enabled)
+
+    def set_role_skill_enabled_for_team_role(self, team_role_id: int, skill_id: str, enabled: bool) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
         now = _utc_now()
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            UPDATE role_skills_enabled
-            SET enabled = ?, updated_at = ?
-            WHERE team_id = ? AND role_id = ? AND skill_id = ?
-            """,
-            (1 if enabled else 0, now, team_id, role_id, skill_id),
-        )
+        if self.has_skill_team_role_id():
+            cur.execute(
+                """
+                UPDATE role_skills_enabled
+                SET enabled = ?, updated_at = ?
+                WHERE team_role_id = ? AND skill_id = ?
+                """,
+                (1 if enabled else 0, now, team_role_id, skill_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE role_skills_enabled
+                SET enabled = ?, updated_at = ?
+                WHERE team_id = ? AND role_id = ? AND skill_id = ?
+                """,
+                (1 if enabled else 0, now, team_id, role_id, skill_id),
+            )
         self._conn.commit()
 
     def set_role_skill_config_for_team(self, team_id: int, role_id: int, skill_id: str, config: dict | None) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        self.set_role_skill_config_for_team_role(team_role_id, skill_id, config)
+
+    def set_role_skill_config_for_team_role(self, team_role_id: int, skill_id: str, config: dict | None) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
         now = _utc_now()
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            UPDATE role_skills_enabled
-            SET config_json = ?, updated_at = ?
-            WHERE team_id = ? AND role_id = ? AND skill_id = ?
-            """,
-            (config_json, now, team_id, role_id, skill_id),
-        )
+        if self.has_skill_team_role_id():
+            cur.execute(
+                """
+                UPDATE role_skills_enabled
+                SET config_json = ?, updated_at = ?
+                WHERE team_role_id = ? AND skill_id = ?
+                """,
+                (config_json, now, team_role_id, skill_id),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE role_skills_enabled
+                SET config_json = ?, updated_at = ?
+                WHERE team_id = ? AND role_id = ? AND skill_id = ?
+                """,
+                (config_json, now, team_id, role_id, skill_id),
+            )
         self._conn.commit()
 
     def delete_role_skill_for_team(self, team_id: int, role_id: int, skill_id: str) -> None:
+        team_role_id = self.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        self.delete_role_skill_for_team_role(team_role_id, skill_id)
+
+    def delete_role_skill_for_team_role(self, team_role_id: int, skill_id: str) -> None:
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            return
+        team_id, role_id = identity
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            DELETE FROM role_skills_enabled
-            WHERE team_id = ? AND role_id = ? AND skill_id = ?
-            """,
-            (team_id, role_id, skill_id),
-        )
+        if self.has_skill_team_role_id():
+            cur.execute(
+                """
+                DELETE FROM role_skills_enabled
+                WHERE team_role_id = ? AND skill_id = ?
+                """,
+                (team_role_id, skill_id),
+            )
+        else:
+            cur.execute(
+                """
+                DELETE FROM role_skills_enabled
+                WHERE team_id = ? AND role_id = ? AND skill_id = ?
+                """,
+                (team_id, role_id, skill_id),
+            )
         self._conn.commit()
+
+    def clone_team_role_processing_bindings(self, source_team_role_id: int, target_team_role_id: int) -> None:
+        source_identity = self.resolve_team_role_identity(source_team_role_id)
+        target_identity = self.resolve_team_role_identity(target_team_role_id)
+        if source_identity is None or target_identity is None:
+            raise ValueError("Team role not found for clone")
+
+        for item in self.list_role_prepost_processing_for_team_role(source_team_role_id, enabled_only=False):
+            config = None
+            if item.config_json:
+                try:
+                    loaded = json.loads(item.config_json)
+                    if isinstance(loaded, dict):
+                        config = loaded
+                except Exception:
+                    config = None
+            self.upsert_role_prepost_processing_for_team_role(
+                target_team_role_id,
+                item.prepost_processing_id,
+                enabled=item.enabled,
+                config=config,
+            )
+
+        for item in self.list_role_skills_for_team_role(source_team_role_id, enabled_only=False):
+            config = None
+            if item.config_json:
+                try:
+                    loaded = json.loads(item.config_json)
+                    if isinstance(loaded, dict):
+                        config = loaded
+                except Exception:
+                    config = None
+            self.upsert_role_skill_for_team_role(
+                target_team_role_id,
+                item.skill_id,
+                enabled=item.enabled,
+                config=config,
+            )
 
     def set_role_skill_enabled(self, group_id: int, role_id: int, skill_id: str, enabled: bool) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)

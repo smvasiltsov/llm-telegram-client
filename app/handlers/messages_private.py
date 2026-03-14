@@ -219,6 +219,49 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     asyncio.create_task(_flush_private_buffered(update.effective_chat.id, user.id, context))
             return
         text = update.message.text.strip()
+        if state.get("mode") == "master_create":
+            if state["step"] == "name":
+                role_name = text.lstrip("@").strip().lower()
+                if not re.match(r"^[A-Za-z0-9_]+$", role_name):
+                    await update.message.reply_text("Имя роли должно быть латиницей, цифрами или _. Попробуй еще раз.")
+                    return
+                if storage.role_exists(role_name):
+                    await update.message.reply_text("Master-role с таким именем уже существует. Укажи другое имя.")
+                    return
+                state["role_name"] = role_name
+                state["step"] = "prompt"
+                await update.message.reply_text("Отправь system prompt для master-role (или 'skip').")
+                return
+            if state["step"] == "prompt":
+                prompt = "" if text.lower() in {"skip", "clear"} else text
+                state["prompt"] = prompt
+                state["step"] = "instruction"
+                await update.message.reply_text("Отправь instruction для master-role (или 'skip').")
+                return
+            if state["step"] == "instruction":
+                instruction = "" if text.lower() in {"skip", "clear"} else text
+                state["instruction"] = instruction
+                state["step"] = "model_select"
+                provider_models = _runtime(context).provider_models
+                provider_registry = _runtime(context).provider_registry
+                if not provider_models:
+                    await update.message.reply_text("Список моделей не настроен в llm_providers.")
+                    return
+                buttons = []
+                for model in provider_models:
+                    provider = provider_registry.get(model.provider_id)
+                    label = model_label(model, provider)
+                    buttons.append([InlineKeyboardButton(text=label, callback_data=f"mrole_create_model:{model.full_id}")])
+                buttons.append([InlineKeyboardButton(text="Без модели", callback_data="mrole_create_model:__skip__")])
+                buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="mroles:list")])
+                await update.message.reply_text(
+                    "Выбери LLM-модель для master-role:",
+                    reply_markup=InlineKeyboardMarkup(buttons),
+                )
+                return
+            if state["step"] == "model_select":
+                await update.message.reply_text("Выбери модель кнопкой ниже.")
+                return
         if state["step"] == "name":
             role_name = text.lstrip("@").strip()
             if not re.match(r"^[A-Za-z0-9_]+$", role_name):
@@ -241,21 +284,19 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 source_role = storage.get_role_by_id(state["source_role_id"])
                 source_team_id = _resolve_team_id_for_chat(storage, int(state["source_group_id"]))
                 source_group_role = storage.get_team_role(source_team_id, source_role.role_id)
-                internal_name = storage.generate_internal_role_name()
-                role = storage.upsert_role(
-                    role_name=internal_name,
-                    description=source_role.description,
-                    base_system_prompt=source_role.base_system_prompt,
-                    extra_instruction=source_role.extra_instruction,
-                    llm_model=source_role.llm_model,
-                    is_active=True,
-                )
+                role = source_role
                 storage.ensure_team_role(target_team_id, role.role_id)
+                target_group_role = storage.get_team_role(target_team_id, role.role_id)
                 storage.set_team_role_display_name(target_team_id, role.role_id, role_name)
                 storage.set_team_role_prompt(
                     target_team_id,
                     role.role_id,
                     source_group_role.system_prompt_override,
+                )
+                storage.set_team_role_extra_instruction(
+                    target_team_id,
+                    role.role_id,
+                    source_group_role.extra_instruction_override,
                 )
                 storage.set_team_role_model(
                     target_team_id,
@@ -272,6 +313,8 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                     role.role_id,
                     source_group_role.user_reply_prefix,
                 )
+                if target_group_role.team_role_id is not None and source_group_role.team_role_id is not None:
+                    storage.clone_team_role_processing_bindings(source_group_role.team_role_id, target_group_role.team_role_id)
                 pending_roles.pop(user.id, None)
                 await update.message.reply_text(
                     f"Роль @{storage.get_team_role_name(target_team_id, role.role_id)} "

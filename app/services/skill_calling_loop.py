@@ -277,7 +277,10 @@ class SkillCallingLoop:
         role: Role,
         model_override: str | None,
     ) -> dict[str, dict[str, Any]]:
-        enabled = self._storage.list_role_skills_for_team(team_id, role.role_id, enabled_only=True)
+        team_role_id = self._storage.resolve_team_role_id(team_id, role.role_id)
+        if team_role_id is None:
+            return {}
+        enabled = self._storage.list_role_skills_for_team_role(team_role_id, enabled_only=True)
         result: dict[str, dict[str, Any]] = {}
         for role_skill in enabled:
             record = self._skills_service.get(role_skill.skill_id)

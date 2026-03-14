@@ -41,11 +41,18 @@ def main() -> int:
     )
     parser.add_argument("--db-path", default="bot.sqlite3", help="Path to source SQLite DB")
     parser.add_argument("--expect-table", action="append", default=[], help="Table name expected after migration")
+    parser.add_argument("--forbid-table", action="append", default=[], help="Table name forbidden after migration")
     parser.add_argument(
         "--expect-column",
         action="append",
         default=[],
         help="Expected column in format table:column (repeatable)",
+    )
+    parser.add_argument(
+        "--forbid-column",
+        action="append",
+        default=[],
+        help="Forbidden column in format table:column (repeatable)",
     )
     args = parser.parse_args()
 
@@ -64,6 +71,8 @@ def main() -> int:
         try:
             missing_tables: list[str] = []
             missing_columns: list[str] = []
+            unexpected_tables: list[str] = []
+            unexpected_columns: list[str] = []
 
             for table in args.expect_table:
                 if not _has_table(conn, table):
@@ -77,13 +86,24 @@ def main() -> int:
                 if column not in _list_columns(conn, table):
                     missing_columns.append(f"{table}:{column}")
 
-            ok = not missing_tables and not missing_columns
+            for table in args.forbid_table:
+                if _has_table(conn, table):
+                    unexpected_tables.append(table)
+
+            for raw in args.forbid_column:
+                table, column = _parse_expect_column(raw)
+                if _has_table(conn, table) and column in _list_columns(conn, table):
+                    unexpected_columns.append(f"{table}:{column}")
+
+            ok = not missing_tables and not missing_columns and not unexpected_tables and not unexpected_columns
             result = {
                 "ok": ok,
                 "source_db": str(source_path),
                 "smoke_db": str(smoke_db),
                 "missing_tables": missing_tables,
                 "missing_columns": missing_columns,
+                "unexpected_tables": unexpected_tables,
+                "unexpected_columns": unexpected_columns,
             }
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if ok else 1

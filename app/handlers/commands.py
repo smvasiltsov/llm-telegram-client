@@ -27,6 +27,27 @@ def _list_telegram_groups(storage: Storage) -> list[tuple[int, str | None, int]]
     return result
 
 
+async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    if not update.message or not update.effective_user:
+        return
+    runtime: RuntimeContext = context.application.bot_data["runtime"]
+    if update.effective_user.id != runtime.owner_user_id:
+        return
+    storage: Storage = runtime.storage
+    roles = storage.list_active_roles()
+    keyboard = [
+        [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"mrole:{role.role_id}")]
+        for role in roles
+    ]
+    keyboard.insert(0, [InlineKeyboardButton(text="➕ Создать master-role", callback_data="mrole_create")])
+    await update.message.reply_text(
+        "Выбери master-role:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
 async def handle_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -149,7 +170,9 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("Группа не найдена.")
         return
     role = storage.get_role_for_team_by_name(team_id, role_name)
-    storage.delete_user_role_session_by_team(update.effective_user.id, team_id, role.role_id)
+    team_role_id = storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
+    if team_role_id is not None:
+        storage.delete_user_role_session_by_team_role(update.effective_user.id, team_role_id)
     provider_registry = runtime.provider_registry
     default_provider_id = runtime.default_provider_id
     group_role = storage.get_team_role(team_id, role.role_id)

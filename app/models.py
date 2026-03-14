@@ -35,6 +35,7 @@ class UserRoleSession:
     created_at: str
     last_used_at: str
     team_id: int | None = None
+    team_role_id: int | None = None
 
 
 @dataclass
@@ -72,7 +73,9 @@ class TeamBinding:
 class TeamRole:
     team_id: int
     role_id: int
+    team_role_id: int | None
     system_prompt_override: str | None
+    extra_instruction_override: str | None
     display_name: str | None
     model_override: str | None
     user_prompt_suffix: str | None
@@ -109,6 +112,7 @@ class AuthToken:
 class RolePrePostProcessing:
     group_id: int
     role_id: int
+    team_role_id: int | None
     prepost_processing_id: str
     enabled: bool
     config_json: str | None
@@ -120,6 +124,7 @@ class RolePrePostProcessing:
 class RoleSkill:
     group_id: int
     role_id: int
+    team_role_id: int | None
     skill_id: str
     enabled: bool
     config_json: str | None

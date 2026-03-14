@@ -16,6 +16,7 @@ from app.handlers.commands import (
 from app.handlers.commands import (
     handle_group_roles as cmd_handle_group_roles,
     handle_groups as cmd_handle_groups,
+    handle_roles_master as cmd_handle_roles_master,
     handle_role_reset_session as cmd_handle_role_reset_session,
     handle_role_set_prompt as cmd_handle_role_set_prompt,
     handle_tools as cmd_handle_tools,
@@ -55,10 +56,11 @@ def register_handlers(
     group_buffered_handler: HandlerFn,
 ) -> None:
     application.add_handler(CommandHandler("groups", cmd_handle_groups, filters=filters.ChatType.PRIVATE))
+    application.add_handler(CommandHandler("roles", cmd_handle_roles_master, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("tools", cmd_handle_tools, filters=filters.ChatType.PRIVATE))
     if tools_bash_enabled:
         application.add_handler(CommandHandler("bash", cmd_handle_bash, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CommandHandler("roles", cmd_handle_group_roles, filters=filters.ChatType.PRIVATE))
+    application.add_handler(CommandHandler("group_roles", cmd_handle_group_roles, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("role_set_prompt", cmd_handle_role_set_prompt, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("role_reset_session", cmd_handle_role_reset_session, filters=filters.ChatType.PRIVATE))
     application.add_handler(CallbackQueryHandler(cb_handle_callback))
