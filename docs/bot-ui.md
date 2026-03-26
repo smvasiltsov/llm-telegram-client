@@ -28,6 +28,7 @@
 - Внутри команды показываются только активные привязки ролей.
 - Добавление роли в команду выполняется из master-role списка.
 - Если файл роли удален или переименован, старые привязки этой identity деактивируются при refresh.
+- Создание роли "с нуля" в контексте команды не используется как primary flow.
 
 ## Роль в карточке команды
 В карточке привязанной роли доступны:
@@ -46,3 +47,14 @@
 - Команды управления работают только в личке.
 - Master defaults для роли берутся из JSON-каталога.
 - Team overrides применяются поверх master defaults.
+
+## Команды проверки UI-потоков
+- `python3 -m unittest tests.test_ltc12_manual_json_bind_runtime tests.test_ltc12_hot_reload_full_scenario tests.test_ltc13_storage_team_role_api`
+- Ручной smoke:
+  - `/roles` (список + карточка + привязка к команде),
+  - `/groups` (список команд + карточка привязки роли),
+  - callbacks (toggle/mode/model/reset/delete binding).
+
+## Known Issues
+- Неблокирующий legacy-тест в broader suite:
+  - `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.

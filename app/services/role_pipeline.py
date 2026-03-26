@@ -27,6 +27,7 @@ from app.services.orchestrator_response import parse_orchestrator_response
 from app.services.formatting import format_with_header, format_with_header_raw, render_llm_text, send_formatted_with_fallback
 from app.services.plugin_pipeline import build_plugin_reply_markup
 from app.services.prompt_builder import build_llm_payload_json, resolve_provider_model, role_requires_auth
+from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.services.skill_calling_loop import SkillCallingLoop, SkillStepSendResult
 from app.session_resolver import SessionResolver
 from app.storage import Storage
@@ -105,6 +106,9 @@ class RoleRequestResult:
     group_role: TeamRole
     model_override: str | None
     recovery: SessionRecoveryResult | None
+    team_role_id: int | None = None
+    busy_request_id: str | None = None
+    busy_acquired: bool = False
 
 
 @dataclass(frozen=True)
@@ -117,7 +121,7 @@ class ChainRunResult:
 def resolve_role_model_override(
     *,
     role: Role,
-    group_role: GroupRole,
+    group_role: TeamRole,
     provider_models: list,
     provider_model_map: dict,
     provider_registry: dict,
@@ -131,6 +135,42 @@ def resolve_role_model_override(
         )
     logger.warning("Provider model list is empty for role=%s", role.role_name)
     return group_role.model_override or role.llm_model
+
+
+def _runtime_status_service(context: ContextTypes.DEFAULT_TYPE) -> RoleRuntimeStatusService:
+    runtime = _runtime(context)
+    service = getattr(runtime, "role_runtime_status_service", None)
+    if isinstance(service, RoleRuntimeStatusService):
+        return service
+    # Backward-compatible fallback for tests/builders that do not inject runtime service.
+    service = RoleRuntimeStatusService(
+        runtime.storage,
+        free_transition_delay_sec=int(getattr(runtime, "free_transition_delay_sec", 0) or 0),
+    )
+    setattr(runtime, "role_runtime_status_service", service)
+    return service
+
+
+def _release_busy_for_role(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    team_id: int,
+    role_id: int,
+    release_reason: str,
+) -> None:
+    storage: Storage = _runtime(context).storage
+    team_role_id = storage.resolve_team_role_id(team_id, role_id)
+    if team_role_id is None:
+        return
+    try:
+        _runtime_status_service(context).release_busy(team_role_id=int(team_role_id), release_reason=release_reason)
+    except Exception:
+        logger.exception(
+            "busy release failed team_id=%s role_id=%s reason=%s",
+            team_id,
+            role_id,
+            release_reason,
+        )
 
 
 def roles_require_auth(
@@ -386,6 +426,35 @@ async def execute_role_request(
     if not (isinstance(effective_reply_text, str) or effective_reply_text is None):
         effective_reply_text = reply_text
 
+    status_service = _runtime_status_service(context)
+    status_service.cleanup_stale()
+    busy_request_id = uuid4().hex
+    busy_acquired = False
+    acquire = status_service.acquire_busy(
+        team_role_id=int(team_role_id),
+        busy_request_id=busy_request_id,
+        busy_owner_user_id=user_id,
+        busy_origin="group",
+        preview_text=effective_user_text,
+        preview_source="user",
+    )
+    if not acquire.acquired:
+        blocker = acquire.blockers[0] if acquire.blockers else None
+        blocker_preview = (blocker.preview_text or "").strip() if blocker is not None else ""
+        busy_text = "Роль сейчас занята. Попробуй чуть позже."
+        if blocker_preview:
+            busy_text += f"\nТекущая задача: {blocker_preview}"
+        return RoleRequestResult(
+            response_text=busy_text,
+            group_role=group_role,
+            model_override=model_override,
+            recovery=None,
+            team_role_id=int(team_role_id),
+            busy_request_id=None,
+            busy_acquired=False,
+        )
+    busy_acquired = True
+
     if storage.list_role_skills_for_team_role(team_role_id, enabled_only=True):
         logger.info(
             "execute role request via skill loop role=%s mode=%s model_override=%s",
@@ -439,21 +508,31 @@ async def execute_role_request(
                     session_id=recovered.new_session_id,
                 )
 
-        loop_result = await skill_loop.run(
-            team_id=team_id,
-            user_id=user_id,
-            role=role,
-            session_token=session_token,
-            user_text=effective_user_text,
-            reply_text=effective_reply_text,
-            actor_username=actor_username,
-            trigger_type=trigger_type,
-            mentioned_roles=mentioned_roles,
-            recipient=recipient,
-            llm_answer_text=llm_answer_text,
-            llm_answer_role_name=llm_answer_role_name,
-            send_step=_send_skill_step,
-        )
+        try:
+            loop_result = await skill_loop.run(
+                team_id=team_id,
+                user_id=user_id,
+                role=role,
+                session_token=session_token,
+                user_text=effective_user_text,
+                reply_text=effective_reply_text,
+                actor_username=actor_username,
+                trigger_type=trigger_type,
+                mentioned_roles=mentioned_roles,
+                recipient=recipient,
+                llm_answer_text=llm_answer_text,
+                llm_answer_role_name=llm_answer_role_name,
+                send_step=_send_skill_step,
+                on_skill_progress=lambda text: status_service.update_preview(
+                    team_role_id=int(team_role_id),
+                    preview_text=text,
+                    preview_source="skill_engine",
+                ),
+            )
+        except Exception:
+            if busy_acquired:
+                status_service.release_busy(team_role_id=int(team_role_id), release_reason="llm_failed_no_retry")
+            raise
         response_text = loop_result.final_answer_text
         post_data = await _run_role_prepost_processing_phase(
             context=context,
@@ -477,6 +556,9 @@ async def execute_role_request(
             group_role=group_role,
             model_override=loop_result.model_override,
             recovery=recovery,
+            team_role_id=int(team_role_id),
+            busy_request_id=busy_request_id,
+            busy_acquired=busy_acquired,
         )
 
     full_payload, compact_payload = build_llm_payload_json(
@@ -542,6 +624,8 @@ async def execute_role_request(
             context=context,
         )
         if recovery is None:
+            if busy_acquired:
+                status_service.release_busy(team_role_id=int(team_role_id), release_reason="llm_failed_no_retry")
             raise
         response_text = recovery.response_text
 
@@ -567,6 +651,9 @@ async def execute_role_request(
         group_role=group_role,
         model_override=model_override,
         recovery=recovery,
+        team_role_id=int(team_role_id),
+        busy_request_id=busy_request_id,
+        busy_acquired=busy_acquired,
     )
 
 
@@ -673,6 +760,7 @@ async def send_orchestrator_post_event(
     group_role = storage.get_team_role(team_id, orchestrator_role.role_id)
     if not group_role.enabled:
         return
+    result: RoleRequestResult | None = None
     try:
         result = await execute_role_request(
             context=context,
@@ -718,6 +806,11 @@ async def send_orchestrator_post_event(
             model_override=result.model_override,
             apply_plugins=True,
         )
+        if result.busy_acquired and result.team_role_id is not None:
+            _runtime_status_service(context).release_busy(
+                team_role_id=int(result.team_role_id),
+                release_reason="response_sent",
+            )
         if chain_context is not None:
             dispatcher = dispatch_mentions_fn or dispatch_mentions
             await dispatcher(
@@ -731,6 +824,18 @@ async def send_orchestrator_post_event(
                 chain_context=chain_context,
             )
     except Exception:
+        if result is not None and result.busy_acquired and result.team_role_id is not None:
+            _runtime_status_service(context).release_busy(
+                team_role_id=int(result.team_role_id),
+                release_reason="delivery_failed",
+            )
+        else:
+            _release_busy_for_role(
+                context=context,
+                team_id=team_id,
+                role_id=orchestrator_role.role_id,
+                release_reason="llm_failed_no_retry",
+            )
         logger.exception(
             "Failed to send post-event to orchestrator chat_id=%s orchestrator_role=%s source_role=%s",
             chat_id,
@@ -884,6 +989,11 @@ async def dispatch_mentions(
                 model_override=result.model_override,
                 apply_plugins=True,
             )
+            if result.busy_acquired and result.team_role_id is not None:
+                _runtime_status_service(context).release_busy(
+                    team_role_id=int(result.team_role_id),
+                    release_reason="response_sent",
+                )
             if orchestrator_role is not None:
                 next_context = chain_context.with_delegation(delegation_key).next_hop()
                 await send_orchestrator_post_event(
@@ -913,6 +1023,12 @@ async def dispatch_mentions(
                 chain_context=chain_context.with_delegation(delegation_key).next_hop(),
             )
         except MissingUserField as exc:
+            _release_busy_for_role(
+                context=context,
+                team_id=team_id,
+                role_id=target.role_id,
+                release_reason="llm_failed_no_retry",
+            )
             await _handle_missing_user_field(
                 user_id=user_id,
                 chat_id=chat_id,
@@ -927,9 +1043,21 @@ async def dispatch_mentions(
             return
         except Exception as exc:
             if _is_unauthorized(exc):
+                _release_busy_for_role(
+                    context=context,
+                    team_id=team_id,
+                    role_id=target.role_id,
+                    release_reason="llm_failed_no_retry",
+                )
                 storage.set_user_authorized(user_id, False)
                 await _request_token_for_user(chat_id, user_id, context)
                 return
+            _release_busy_for_role(
+                context=context,
+                team_id=team_id,
+                role_id=target.role_id,
+                release_reason="delivery_failed",
+            )
             logger.exception(
                 "delegation failed chain_id=%s source_role=%s target_role=%s hop=%s",
                 chain_context.chain_id,
@@ -1033,6 +1161,12 @@ async def run_chain(
                 else:
                     logger.info("orchestrator response parse fallback role=%s", role.role_name)
         except MissingUserField as exc:
+            _release_busy_for_role(
+                context=context,
+                team_id=team_id,
+                role_id=role.role_id,
+                release_reason="llm_failed_no_retry",
+            )
             role_name = pending_role_name or ("__all__" if is_all else role_public_name(role))
             await _handle_missing_user_field(
                 user_id=user_id,
@@ -1047,6 +1181,12 @@ async def run_chain(
             )
             return ChainRunResult(completed_roles=completed_roles, had_error=True, stopped=True)
         except Exception as exc:
+            _release_busy_for_role(
+                context=context,
+                team_id=team_id,
+                role_id=role.role_id,
+                release_reason="llm_failed_no_retry",
+            )
             if _is_unauthorized(exc):
                 if save_pending_on_unauthorized:
                     role_name = pending_role_name or ("__all__" if is_all else role_public_name(roles[0]))
@@ -1071,16 +1211,32 @@ async def run_chain(
             had_error = True
             continue
 
-        response_text = await send_role_response(
-            context=context,
-            chat_id=chat_id,
-            user_id=user_id,
-            role=role,
-            response_text=response_text,
-            reply_to_message_id=reply_to_message_id,
-            model_override=model_override,
-            apply_plugins=apply_plugins,
-        )
+        try:
+            response_text = await send_role_response(
+                context=context,
+                chat_id=chat_id,
+                user_id=user_id,
+                role=role,
+                response_text=response_text,
+                reply_to_message_id=reply_to_message_id,
+                model_override=model_override,
+                apply_plugins=apply_plugins,
+            )
+            if result.busy_acquired and result.team_role_id is not None:
+                _runtime_status_service(context).release_busy(
+                    team_role_id=int(result.team_role_id),
+                    release_reason="response_sent",
+                )
+        except Exception:
+            _release_busy_for_role(
+                context=context,
+                team_id=team_id,
+                role_id=role.role_id,
+                release_reason="delivery_failed",
+            )
+            logger.exception("response delivery failed user_id=%s role=%s", user_id, role.role_name)
+            had_error = True
+            continue
         chain_context = ChainContext.create(
             origin=chain_origin,
             reply_to_message_id=reply_to_message_id,

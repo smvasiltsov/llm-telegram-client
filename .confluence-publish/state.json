@@ -32,16 +32,16 @@
     {
       "doc_path": "10-product-and-user-flows/10-1-bot-ui-in-telegram.md",
       "page_id": "5439508",
-      "content_hash": "5adea732738a2ecb0e86adc93f5273f81ac1e49430b0800ed61271c49d311ccb",
-      "last_published_at": "2026-03-14T14:09:58.760109+00:00",
-      "last_published_version": 1
+      "content_hash": "b4513502c26dd2f9b1e67a30ed34855c1d72835daf543a5622c834bcca1eb7a5",
+      "last_published_at": "2026-03-15T07:48:35.962936+00:00",
+      "last_published_version": 2
     },
     {
       "doc_path": "10-product-and-user-flows/10-2-group-role-management.md",
       "page_id": "5472257",
-      "content_hash": "273b71dfb737eaca112ba1b7c7d64c5004bfcf1675eacd7608f9196a547869b8",
-      "last_published_at": "2026-03-14T14:09:59.743524+00:00",
-      "last_published_version": 2
+      "content_hash": "4a72e6f84c582130673f6d63f09483ab410ea61e71de6245bc100d867fc3cdad",
+      "last_published_at": "2026-03-15T07:48:36.891969+00:00",
+      "last_published_version": 3
     },
     {
       "doc_path": "10-product-and-user-flows/10-3-typical-user-scenarios.md",
@@ -67,16 +67,23 @@
     {
       "doc_path": "20-architecture/20-1-system-architecture-overview.md",
       "page_id": "5242895",
-      "content_hash": "8fac6147b8109a575895401b10d16dc331600f098bf0c54000c9881acabf9cb4",
-      "last_published_at": "2026-03-14T14:10:02.808570+00:00",
+      "content_hash": "c751ac0b35b96242859e4944f6632675a84e81bd83a302a4d5a94ff97c7a041a",
+      "last_published_at": "2026-03-15T07:48:38.698247+00:00",
+      "last_published_version": 2
+    },
+    {
+      "doc_path": "20-architecture/20-10-ltc-14-team-abstraction.md",
+      "page_id": "8323087",
+      "content_hash": "43d239b8cdf95117fb59a81b5c9bce272e37512b85e99b7a7ab3667b845655b0",
+      "last_published_at": "2026-03-15T07:48:39.491444+00:00",
       "last_published_version": 1
     },
     {
       "doc_path": "20-architecture/20-2-runtime-context-and-core-components.md",
       "page_id": "5406740",
-      "content_hash": "48edd4aa248390bd66a3aebd0240f7feba2060eec50e16212f7175940fb3c3a7",
-      "last_published_at": "2026-03-14T14:10:03.952811+00:00",
-      "last_published_version": 1
+      "content_hash": "d7bd03e70d5b206695e3b575a3e77018c31f25a693a87a3269168f6c14604e77",
+      "last_published_at": "2026-03-15T07:48:40.334601+00:00",
+      "last_published_version": 2
     },
     {
       "doc_path": "20-architecture/20-3-message-processing-pipeline-group-private.md",
@@ -88,9 +95,9 @@
     {
       "doc_path": "20-architecture/20-4-data-model-and-storage-sqlite-entities.md",
       "page_id": "5636097",
-      "content_hash": "42905dce10ea638265ef4f1eec418817fd93bc9d577b4be2cc6b3fb37184a7cf",
-      "last_published_at": "2026-03-14T14:10:05.717997+00:00",
-      "last_published_version": 2
+      "content_hash": "ab97cf1646c0705f5b74b10758f728ce095efcc1656a73b400641df77903aa09",
+      "last_published_at": "2026-03-15T07:48:41.194961+00:00",
+      "last_published_version": 3
     },
     {
       "doc_path": "20-architecture/20-5-security-threat-model.md",
@@ -102,23 +109,37 @@
     {
       "doc_path": "20-architecture/20-6-runtime-flows.md",
       "page_id": "5341204",
-      "content_hash": "84d485cac1f2858a9b846244d37247865f7a02a5a5aa9f8e38f9cafddd019f63",
-      "last_published_at": "2026-03-14T14:10:07.742617+00:00",
-      "last_published_version": 1
+      "content_hash": "0d6854bd9092a140458b1bb7a6ad017703fd16da2b3199bd976a8fa189196c9e",
+      "last_published_at": "2026-03-15T07:48:42.040950+00:00",
+      "last_published_version": 2
     },
     {
       "doc_path": "20-architecture/20-7-ltc-12-role-json-catalog-and-runtime-behavior.md",
       "page_id": "7962625",
-      "content_hash": "b23da45b669da0c51122d5d0eff48321c8d0e8b2394f8117a7edc09f12ece797",
-      "last_published_at": "2026-03-14T14:10:08.527831+00:00",
+      "content_hash": "7d674ea964de82bec001a0c1c4499f3ee88f5a00c129b8e7793adfeb46e1a875",
+      "last_published_at": "2026-03-15T07:48:42.914210+00:00",
+      "last_published_version": 2
+    },
+    {
+      "doc_path": "20-architecture/20-8-interface-runtime-and-contracts.md",
+      "page_id": "7897096",
+      "content_hash": "6c9e3efb25a2d5ac89bd30a5df9cfdf19e0246a0b8ff1ceda4c5697be494d860",
+      "last_published_at": "2026-03-15T07:48:43.790560+00:00",
+      "last_published_version": 1
+    },
+    {
+      "doc_path": "20-architecture/20-9-ltc-13-master-role-team-bindings.md",
+      "page_id": "8323106",
+      "content_hash": "6c1b9eac3b1f01fa9ea70d044f8eb99512eb964fe61cdafc4da32e8106bb5e37",
+      "last_published_at": "2026-03-15T07:48:44.599999+00:00",
       "last_published_version": 1
     },
     {
       "doc_path": "20-architecture/_index.md",
       "page_id": "5570561",
-      "content_hash": "0863eda3b4a07084e024e09fa5e37aa988b311a2a455b4f3013ce4beb302d86e",
-      "last_published_at": "2026-03-14T14:10:02.115054+00:00",
-      "last_published_version": 2
+      "content_hash": "19ca9a1fe478733899da7db796759bd4ebbea2f816070354f2f5384c0a38dfbc",
+      "last_published_at": "2026-03-15T07:48:37.788919+00:00",
+      "last_published_version": 3
     },
     {
       "doc_path": "30-llm-integration/30-1-providers-overview.md",
@@ -221,9 +242,9 @@
     {
       "doc_path": "50-development/50-2-codebase-structure-and-layering.md",
       "page_id": "5996565",
-      "content_hash": "82acd7162f1cdf1dbd539ef03a5b0f9773c112644b0d421feaf146201849f2f7",
-      "last_published_at": "2026-03-14T14:10:21.487066+00:00",
-      "last_published_version": 1
+      "content_hash": "5a1d23c8d1c81da23da662828b5eed4163893414aac1fe15318e85198e1669d4",
+      "last_published_at": "2026-03-15T07:48:46.360028+00:00",
+      "last_published_version": 2
     },
     {
       "doc_path": "50-development/50-3-adding-new-provider.md",
@@ -235,9 +256,9 @@
     {
       "doc_path": "50-development/50-4-local-validation-and-smoke-tests.md",
       "page_id": "5439527",
-      "content_hash": "16336b8dad05fbbd3984ed2faeefc070b00309eebe2420c2807d858524390011",
-      "last_published_at": "2026-03-14T14:10:22.904579+00:00",
-      "last_published_version": 1
+      "content_hash": "9452dc8a8d8207370b7f0606bca8caa5f4a5a928084067edaa32a3ae9e9f9c7c",
+      "last_published_at": "2026-03-15T07:48:47.235718+00:00",
+      "last_published_version": 2
     },
     {
       "doc_path": "50-development/50-5-observability-and-logs.md",
@@ -249,16 +270,23 @@
     {
       "doc_path": "50-development/50-6-role-json-agent-guide.md",
       "page_id": "8028161",
-      "content_hash": "f477bdbda565a7af7b31174cc9820e6c42b3a0f6147603eb8a6e8d8d210adc0d",
-      "last_published_at": "2026-03-14T14:10:24.560991+00:00",
+      "content_hash": "e6cebae1d01b8cb518d797f51c5ce058e40bc26d408e59146ee599be4697ccf6",
+      "last_published_at": "2026-03-15T07:48:48.208628+00:00",
+      "last_published_version": 2
+    },
+    {
+      "doc_path": "50-development/50-7-interface-sdk-developer-guide.md",
+      "page_id": "8028180",
+      "content_hash": "5a50aa8710e6298a6c62f719924cf9cdb500115c1edc828fd30168732e8f5c9d",
+      "last_published_at": "2026-03-15T07:48:48.969792+00:00",
       "last_published_version": 1
     },
     {
       "doc_path": "50-development/_index.md",
       "page_id": "5996545",
-      "content_hash": "2ae2bf52e49e7c5f4a681522a33b39aec82cc327d4f6547f22956a10958ca47e",
-      "last_published_at": "2026-03-14T14:10:20.109906+00:00",
-      "last_published_version": 2
+      "content_hash": "2de6749a6cd2183de65e72d796a2557f2145da71c419eebe272dfaccb54333bd",
+      "last_published_at": "2026-03-15T07:48:45.484738+00:00",
+      "last_published_version": 3
     },
     {
       "doc_path": "60-operations-and-quality/60-1-troubleshooting.md",

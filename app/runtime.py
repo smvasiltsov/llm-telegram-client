@@ -16,6 +16,7 @@ from app.plugins import PluginManager
 from app.prepost_processing.registry import PrePostProcessingRegistry
 from app.role_catalog import RoleCatalog
 from app.security import TokenCipher
+from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.session_resolver import SessionResolver
 from app.skills.registry import SkillRegistry
 from app.skills.service import SkillService
@@ -31,6 +32,7 @@ class RuntimeContext:
     llm_router: LLMRouter
     llm_executor: LLMExecutor
     session_resolver: SessionResolver
+    role_runtime_status_service: RoleRuntimeStatusService
     pending_store: PendingStore
     message_buffer: MessageBuffer
     private_buffer: MessageBuffer
@@ -66,6 +68,10 @@ class RuntimeContext:
     team_dual_read_enabled: bool
     team_dual_write_enabled: bool
     team_rollout_mode: str
+    interface_active: str
+    interface_modules_dir: str
+    interface_runtime_mode: str
+    free_transition_delay_sec: int
     role_catalog: RoleCatalog
 
     def to_bot_data(self) -> dict[str, Any]:

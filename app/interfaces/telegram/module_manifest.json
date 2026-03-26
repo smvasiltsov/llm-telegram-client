@@ -1,0 +1,7 @@
+{
+  "interface_id": "telegram",
+  "module_path": "app.interfaces.telegram.adapter",
+  "factory": "create_adapter",
+  "runtime_mode": "single",
+  "status": "active"
+}

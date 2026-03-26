@@ -21,4 +21,7 @@ It covers:
 - message processing pipelines,
 - SQLite data model and persistence,
 - security threat model and runtime flow patterns,
-- LTC-12 role JSON catalog behavior and identity rules.
+- LTC-12 role JSON catalog behavior and identity rules,
+- LTC-13 master-role and team-role binding model,
+- LTC-14 team abstraction over transport bindings,
+- LTC-17 interface runtime and core adapter contracts.

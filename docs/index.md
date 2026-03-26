@@ -2,6 +2,9 @@
 
 - Обзор архитектуры: `docs/overview.md`
 - LTC-12: Role JSON Catalog: `docs/ltc-12-roles-json.md`
+- LTC-13: Master Role + Team Bindings: `docs/ltc-13-master-role-team-bindings.md`
+- LTC-14: Team Abstraction: `docs/ltc-14-team-abstraction.md`
+- LTC-17: Interface SDK and Core Contract: `docs/ltc-17-interface-sdk.md`
 - Role JSON Guide for AI Agents (EN): `docs/roles-json-agent-guide.md`
 - Разработка model-callable skills: `docs/skills_dev/README.md`
 - Провайдеры LLM: `docs/providers.md`

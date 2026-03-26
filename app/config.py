@@ -32,6 +32,11 @@ DEFAULT_SKILLS_FOLLOWUP_MODE = "full"
 ALLOWED_SKILLS_FOLLOWUP_MODES = {"full", "compact"}
 DEFAULT_TEAM_ROLLOUT_MODE = "legacy"
 ALLOWED_TEAM_ROLLOUT_MODES = {"legacy", "shadow", "team"}
+DEFAULT_INTERFACE_ACTIVE = "telegram"
+DEFAULT_INTERFACE_MODULES_DIR = "app.interfaces"
+DEFAULT_INTERFACE_RUNTIME_MODE = "single"
+ALLOWED_INTERFACE_RUNTIME_MODES = {"single"}
+DEFAULT_FREE_TRANSITION_DELAY_SEC = 0
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,10 @@ class AppConfig:
     team_dual_read_enabled: bool
     team_dual_write_enabled: bool
     team_rollout_mode: str
+    interface_active: str
+    interface_modules_dir: str
+    interface_runtime_mode: str
+    free_transition_delay_sec: int
 
 
 def load_dotenv(path: str | Path) -> dict[str, str]:
@@ -95,6 +104,8 @@ def load_config(path: str | Path) -> AppConfig:
     bash_raw = tools_raw.get("bash", {}) or {}
     migration_raw = raw.get("migration", {}) or {}
     team_migration_raw = migration_raw.get("team", {}) or {}
+    interface_raw = raw.get("interface", {}) or {}
+    runtime_status_raw = raw.get("runtime_status", {}) or {}
 
     safe_commands_raw = bash_raw.get("safe_commands")
     if safe_commands_raw is None:
@@ -114,6 +125,9 @@ def load_config(path: str | Path) -> AppConfig:
     team_rollout_mode = str(team_migration_raw.get("rollout_mode", DEFAULT_TEAM_ROLLOUT_MODE)).strip().lower()
     if team_rollout_mode not in ALLOWED_TEAM_ROLLOUT_MODES:
         team_rollout_mode = DEFAULT_TEAM_ROLLOUT_MODE
+    interface_runtime_mode = str(interface_raw.get("runtime_mode", DEFAULT_INTERFACE_RUNTIME_MODE)).strip().lower()
+    if interface_runtime_mode not in ALLOWED_INTERFACE_RUNTIME_MODES:
+        interface_runtime_mode = DEFAULT_INTERFACE_RUNTIME_MODE
 
     return AppConfig(
         telegram_bot_token=raw["telegram_bot_token"],
@@ -146,4 +160,9 @@ def load_config(path: str | Path) -> AppConfig:
         team_dual_read_enabled=bool(team_migration_raw.get("dual_read_enabled", False)),
         team_dual_write_enabled=bool(team_migration_raw.get("dual_write_enabled", False)),
         team_rollout_mode=team_rollout_mode,
+        interface_active=str(interface_raw.get("active", DEFAULT_INTERFACE_ACTIVE)).strip().lower() or DEFAULT_INTERFACE_ACTIVE,
+        interface_modules_dir=str(interface_raw.get("modules_dir", DEFAULT_INTERFACE_MODULES_DIR)).strip()
+        or DEFAULT_INTERFACE_MODULES_DIR,
+        interface_runtime_mode=interface_runtime_mode,
+        free_transition_delay_sec=max(0, int(runtime_status_raw.get("free_transition_delay_sec", DEFAULT_FREE_TRANSITION_DELAY_SEC))),
     )

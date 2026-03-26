@@ -21,4 +21,7 @@ It includes:
 - codebase layering model,
 - adding and validating providers,
 - smoke tests and observability practices,
-- role JSON authoring guidance for AI agents.
+- role JSON authoring guidance for AI agents,
+- master-role/team-binding implementation guidance (LTC-13),
+- team abstraction migration checks (LTC-14),
+- LTC-17 interface SDK guide for external transport adapters.

@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from uuid import uuid4
 
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from app.core.use_cases import (
+    bind_master_role_to_group,
+    clear_team_role_prompt,
+    clear_team_role_reply_prefix,
+    clear_team_role_suffix,
+    delete_team_role_binding,
+    get_team_role_state,
+    list_team_role_states,
+    list_telegram_groups,
+    master_roles_list_text,
+    reset_team_role_session,
+    resolve_team_id,
+    resolve_team_role_id,
+    set_team_role_enabled,
+    set_team_role_mode,
+    set_team_role_model,
+)
 from app.llm_providers import model_label
 from app.role_catalog_service import (
     create_master_role_json,
@@ -14,45 +31,23 @@ from app.role_catalog_service import (
     refresh_role_catalog,
 )
 from app.runtime import RuntimeContext
-from app.services.prompt_builder import provider_id_from_model, resolve_provider_model
+from app.services.prompt_builder import resolve_provider_model
 from app.storage import Storage
 from app.utils import split_message
 
 logger = logging.getLogger("bot")
 
 
-@dataclass(frozen=True)
-class TelegramGroupView:
-    group_id: int
-    title: str | None
-    team_id: int
-
-
 def _team_id(storage: Storage, group_id: int) -> int:
-    team_id = storage.resolve_team_id_by_telegram_chat(group_id)
-    if team_id is None:
-        raise ValueError(f"Telegram group binding not found: {group_id}")
-    return team_id
+    return resolve_team_id(storage, group_id)
 
 
 def _team_role_id(storage: Storage, group_id: int, role_id: int, *, ensure_exists: bool = False) -> int:
-    team_id = _team_id(storage, group_id)
-    team_role_id = storage.resolve_team_role_id(team_id, role_id, ensure_exists=ensure_exists)
-    if team_role_id is None:
-        raise ValueError(f"Team role not found for group_id={group_id} role_id={role_id}")
-    return team_role_id
+    return resolve_team_role_id(storage, group_id, role_id, ensure_exists=ensure_exists)
 
 
-def _list_telegram_groups(storage: Storage) -> list[TelegramGroupView]:
-    groups: list[TelegramGroupView] = []
-    for binding in storage.list_team_bindings(interface_type="telegram", active_only=True):
-        try:
-            group_id = int(binding.external_id)
-        except Exception:
-            continue
-        groups.append(TelegramGroupView(group_id=group_id, title=binding.external_title, team_id=binding.team_id))
-    groups.sort(key=lambda item: item.group_id)
-    return groups
+def _list_telegram_groups(storage: Storage):
+    return list_telegram_groups(storage)
 
 
 def _preview_text(value: str | None, *, max_len: int = 140) -> str:
@@ -63,6 +58,16 @@ def _preview_text(value: str | None, *, max_len: int = 140) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 1].rstrip() + "…"
+
+
+def _runtime_status_caption(storage: Storage, team_role_id: int | None) -> tuple[str, str | None]:
+    if team_role_id is None:
+        return "FREE", None
+    status = storage.get_team_role_runtime_status(team_role_id)
+    if status is None:
+        return "FREE", None
+    state = "BUSY" if status.status == "busy" else "FREE"
+    return state, status.preview_text
 
 
 def _master_roles_keyboard(storage: Storage, runtime: RuntimeContext) -> InlineKeyboardMarkup:
@@ -87,29 +92,7 @@ def _master_roles_keyboard(storage: Storage, runtime: RuntimeContext) -> InlineK
 
 
 def _master_roles_list_text(runtime: RuntimeContext, *, max_issues: int = 10) -> str:
-    lines = ["Выбери master-role:"]
-    issues = runtime.role_catalog.issues
-    if not issues:
-        return "\n".join(lines)
-    lines.append("")
-    lines.append(f"Ошибки чтения JSON: {len(issues)}")
-    for issue in issues[:max_issues]:
-        lines.append(f"- {issue.path.name}: {_human_issue_reason(issue.reason)}")
-    if len(issues) > max_issues:
-        lines.append(f"- ... и ещё {len(issues) - max_issues}")
-    return "\n".join(lines)
-
-
-def _human_issue_reason(reason: str) -> str:
-    if reason.startswith("invalid_file_name:"):
-        return "некорректное имя файла (разрешены только [a-z0-9_])"
-    if reason.startswith("duplicate_role_name_casefold:"):
-        winner = reason.split("winner=", 1)[1] if "winner=" in reason else "unknown"
-        return f"дубликат имени роли по регистру; используется файл {winner}"
-    if reason.startswith("role_name_mismatch:"):
-        payload_name = reason.split(":", 1)[1].split("->", 1)[0]
-        return f"role_name в JSON ({payload_name}) не совпадает с именем файла; используется имя файла"
-    return reason
+    return master_roles_list_text(runtime, max_issues=max_issues)
 
 
 def _master_role_card_text(storage: Storage, runtime: RuntimeContext, role_name: str) -> str:
@@ -232,12 +215,10 @@ async def _handle_master_roles_navigation(
     if data.startswith("mrole_bind_name:"):
         _, role_name, group_id_str = data.split(":", 2)
         group_id = int(group_id_str)
-        role = ensure_role_identity_by_name(runtime=runtime, storage=storage, role_name=role_name)
-        team_id = _team_id(storage, group_id)
-        _, created = storage.bind_master_role_to_team(team_id, role.role_id)
+        bound_role_name, created = bind_master_role_to_group(runtime, storage, group_id=group_id, role_name=role_name)
         note = "привязана к" if created else "уже привязана к"
         await query.edit_message_text(
-            f"Роль @{role.role_name} {note} команде {group_id}.",
+            f"Роль @{bound_role_name} {note} команде {group_id}.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ К роли", callback_data=f"mrole_name:{role_name}")]]
             ),
@@ -299,11 +280,11 @@ async def _handle_master_role_create_model(
 
 
 def _role_public_name(storage: Storage, group_id: int, role_id: int) -> str:
-    return storage.get_team_role_name(_team_id(storage, group_id), role_id)
+    return get_team_role_state(storage, group_id, role_id).public_name
 
 
 def _group_role_caption(storage: Storage, group_id: int, role_id: int) -> str:
-    group_role = storage.get_team_role(_team_id(storage, group_id), role_id)
+    group_role = get_team_role_state(storage, group_id, role_id)
     status = "on" if group_role.enabled else "off"
     mode = "orch" if group_role.mode == "orchestrator" else "normal"
     return f"@{_role_public_name(storage, group_id, role_id)} [{status}|{mode}]"
@@ -311,13 +292,15 @@ def _group_role_caption(storage: Storage, group_id: int, role_id: int) -> str:
 
 def _group_roles_keyboard(storage: Storage, group_id: int) -> list[list[InlineKeyboardButton]]:
     rows: list[list[InlineKeyboardButton]] = []
-    for group_role in storage.list_team_roles(_team_id(storage, group_id)):
+    for group_role in list_team_role_states(storage, group_id):
         status = "ON" if group_role.enabled else "OFF"
         mode = "ORCH" if group_role.mode == "orchestrator" else "ROLE"
+        team_role_id = _team_role_id(storage, group_id, group_role.role_id, ensure_exists=False)
+        run_state, _ = _runtime_status_caption(storage, team_role_id)
         rows.append(
             [
                 InlineKeyboardButton(
-                    text=f"@{_role_public_name(storage, group_id, group_role.role_id)} [{status}|{mode}]",
+                    text=f"@{group_role.public_name} [{status}|{mode}|{run_state}]",
                     callback_data=f"role:{group_id}:{group_role.role_id}",
                 )
             ]
@@ -342,6 +325,7 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
         [InlineKeyboardButton(text="Инструкция к сообщениям", callback_data=f"act:set_suffix:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Инструкция для реплаев", callback_data=f"act:set_reply_prefix:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="LLM-модель", callback_data=f"act:set_model:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="🔒 Lock Groups", callback_data=f"act:lock_groups:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Переименовать роль", callback_data=f"act:rename_role:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Сбросить сессию", callback_data=f"act:reset_session:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Удалить роль", callback_data=f"act:delete_role:{group_id}:{role_id}")],
@@ -416,11 +400,13 @@ async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: St
         _, group_id_str, role_id_str = data.split(":", 2)
         group_id = int(group_id_str)
         role_id = int(role_id_str)
-        team_id = _team_id(storage, group_id)
-        group_role = storage.get_team_role(team_id, role_id)
+        group_role = get_team_role_state(storage, group_id, role_id)
         state = f"enabled={'yes' if group_role.enabled else 'no'}, mode={group_role.mode}"
+        team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=False)
+        run_state, preview = _runtime_status_caption(storage, team_role_id)
+        preview_line = f"\npreview: {_preview_text(preview, max_len=100)}" if preview else ""
         await query.edit_message_text(
-            f"Роль @{_role_public_name(storage, group_id, role_id)} ({state}). Выбери действие:",
+            f"Роль @{_role_public_name(storage, group_id, role_id)} ({state}, runtime={run_state}).{preview_line}\nВыбери действие:",
             reply_markup=_role_actions_keyboard(
                 group_id,
                 role_id,
@@ -429,6 +415,110 @@ async def _handle_groups_navigation(query: CallbackQuery, data: str, storage: St
             ),
         )
         await query.answer()
+        return True
+    return False
+
+
+def _lock_groups_keyboard(storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
+    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+    current = {item.lock_group_id: item for item in storage.list_lock_groups_for_team_role(team_role_id, active_only=True)}
+    all_groups = storage.list_role_lock_groups(active_only=True)
+    rows: list[list[InlineKeyboardButton]] = []
+
+    for group in current.values():
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"➖ {group.name}",
+                    callback_data=f"lockg:remove:{group_id}:{role_id}:{group.lock_group_id}",
+                )
+            ]
+        )
+    for group in all_groups:
+        if group.lock_group_id in current:
+            continue
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=f"➕ {group.name}",
+                    callback_data=f"lockg:add:{group_id}:{role_id}:{group.lock_group_id}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="🆕 Создать группу и добавить",
+                callback_data=f"lockg:create:{group_id}:{role_id}",
+            )
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _lock_groups_text(storage: Storage, group_id: int, role_id: int) -> str:
+    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+    run_state, preview = _runtime_status_caption(storage, team_role_id)
+    linked = storage.list_lock_groups_for_team_role(team_role_id, active_only=True)
+    lines = [
+        f"Lock groups для @{_role_public_name(storage, group_id, role_id)}",
+        f"Runtime: {run_state}",
+    ]
+    if preview:
+        lines.append(f"Preview: {_preview_text(preview, max_len=100)}")
+    lines.append("")
+    lines.append("Текущие группы:")
+    if not linked:
+        lines.append("- (нет)")
+    else:
+        for item in linked:
+            lines.append(f"- {item.name}")
+    lines.append("")
+    lines.append("Нажми ➕/➖ для управления зависимостями.")
+    return "\n".join(lines)
+
+
+async def _handle_lock_groups(query: CallbackQuery, data: str, storage: Storage) -> bool:
+    if data.startswith("lockg:create:"):
+        _, _, group_id_str, role_id_str = data.split(":", 3)
+        group_id = int(group_id_str)
+        role_id = int(role_id_str)
+        team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+        lock_group_name = f"lock_group_{team_role_id}_{uuid4().hex[:6]}"
+        lock_group = storage.create_role_lock_group(lock_group_name, description="LTC-18 auto-created")
+        storage.add_team_role_to_lock_group(lock_group.lock_group_id, team_role_id)
+        await query.edit_message_text(
+            _lock_groups_text(storage, group_id, role_id),
+            reply_markup=_lock_groups_keyboard(storage, group_id, role_id),
+        )
+        await query.answer("Группа создана и привязана")
+        return True
+    if data.startswith("lockg:add:"):
+        _, _, group_id_str, role_id_str, lock_group_id_str = data.split(":", 4)
+        group_id = int(group_id_str)
+        role_id = int(role_id_str)
+        lock_group_id = int(lock_group_id_str)
+        team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+        storage.add_team_role_to_lock_group(lock_group_id, team_role_id)
+        await query.edit_message_text(
+            _lock_groups_text(storage, group_id, role_id),
+            reply_markup=_lock_groups_keyboard(storage, group_id, role_id),
+        )
+        await query.answer("Роль добавлена в lock-group")
+        return True
+    if data.startswith("lockg:remove:"):
+        _, _, group_id_str, role_id_str, lock_group_id_str = data.split(":", 4)
+        group_id = int(group_id_str)
+        role_id = int(role_id_str)
+        lock_group_id = int(lock_group_id_str)
+        team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
+        storage.remove_team_role_from_lock_group(lock_group_id, team_role_id)
+        await query.edit_message_text(
+            _lock_groups_text(storage, group_id, role_id),
+            reply_markup=_lock_groups_keyboard(storage, group_id, role_id),
+        )
+        await query.answer("Роль удалена из lock-group")
         return True
     return False
 
@@ -457,12 +547,10 @@ async def _handle_add_role(query: CallbackQuery, data: str, context: ContextType
     if data.startswith("addrole_master_name:"):
         _, group_id_str, role_name = data.split(":", 2)
         group_id = int(group_id_str)
-        team_id = _team_id(storage, group_id)
-        role = ensure_role_identity_by_name(runtime=runtime, storage=storage, role_name=role_name)
-        _, created = storage.bind_master_role_to_team(team_id, role.role_id)
+        bound_role_name, created = bind_master_role_to_group(runtime, storage, group_id=group_id, role_name=role_name)
         note = "добавлена в" if created else "уже есть в"
         await query.edit_message_text(
-            f"Роль @{role.role_name} {note} группе {group_id}.",
+            f"Роль @{bound_role_name} {note} группе {group_id}.",
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")]]
             ),
@@ -488,12 +576,12 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
     _, action, group_id_str, role_id_str = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    team_id = _team_id(storage, group_id)
+    team_id = resolve_team_id(storage, group_id)
     role = storage.get_role_by_id(role_id)
     group_role = storage.get_team_role(team_id, role_id)
     if action == "toggle_enabled":
         try:
-            storage.set_team_role_enabled(team_id, role_id, not group_role.enabled)
+            updated = set_team_role_enabled(storage, group_id=group_id, role_id=role_id, enabled=not group_role.enabled)
         except ValueError as exc:
             await query.edit_message_text(
                 f"Не удалось изменить статус роли: {exc}",
@@ -503,7 +591,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             )
             await query.answer()
             return True
-        updated = storage.get_team_role(team_id, role_id)
         logger.info(
             "group_role toggle_enabled group_id=%s role_id=%s role=%s enabled=%s mode=%s actor_user_id=%s",
             group_id,
@@ -529,9 +616,13 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "set_mode_orchestrator":
-        previous_orchestrator = storage.get_enabled_orchestrator_for_team(team_id)
         try:
-            storage.set_team_role_mode(team_id, role_id, "orchestrator")
+            updated, previous_orchestrator_role_id = set_team_role_mode(
+                storage,
+                group_id=group_id,
+                role_id=role_id,
+                mode="orchestrator",
+            )
         except ValueError as exc:
             await query.edit_message_text(
                 f"Не удалось изменить режим роли: {exc}",
@@ -541,7 +632,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             )
             await query.answer()
             return True
-        updated = storage.get_team_role(team_id, role_id)
         logger.info(
             "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s previous_orchestrator_role_id=%s",
             group_id,
@@ -549,13 +639,13 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             _role_public_name(storage, group_id, role_id),
             updated.mode,
             query.from_user.id,
-            previous_orchestrator.role_id if previous_orchestrator else None,
+            previous_orchestrator_role_id,
         )
         note = "Роль назначена оркестратором."
-        if previous_orchestrator and previous_orchestrator.role_id != role_id:
+        if previous_orchestrator_role_id is not None and previous_orchestrator_role_id != role_id:
             note = (
                 f"{note}\nПредыдущий оркестратор "
-                f"@{_role_public_name(storage, group_id, previous_orchestrator.role_id)} переведен в normal."
+                f"@{_role_public_name(storage, group_id, previous_orchestrator_role_id)} переведен в normal."
             )
         await query.edit_message_text(
             f"{note}\n\nРоль @{_role_public_name(storage, group_id, role_id)} "
@@ -571,7 +661,12 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         return True
     if action == "set_mode_normal":
         try:
-            storage.set_team_role_mode(team_id, role_id, "normal")
+            updated, _ = set_team_role_mode(
+                storage,
+                group_id=group_id,
+                role_id=role_id,
+                mode="normal",
+            )
         except ValueError as exc:
             await query.edit_message_text(
                 f"Не удалось изменить режим роли: {exc}",
@@ -581,7 +676,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             )
             await query.answer()
             return True
-        updated = storage.get_team_role(team_id, role_id)
         logger.info(
             "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s",
             group_id,
@@ -639,7 +733,7 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "clear_prompt":
-        storage.set_team_role_prompt(team_id, role_id, "")
+        clear_team_role_prompt(storage, group_id=group_id, role_id=role_id)
         await query.edit_message_text(
             "Системный промпт очищен.",
             reply_markup=InlineKeyboardMarkup(
@@ -666,7 +760,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "set_model":
-        group_role = storage.get_team_role(team_id, role_id)
         provider_models = runtime.provider_models
         provider_model_map = runtime.provider_model_map
         provider_registry = runtime.provider_registry
@@ -704,6 +797,13 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         )
         await query.answer()
         return True
+    if action == "lock_groups":
+        await query.edit_message_text(
+            _lock_groups_text(storage, group_id, role_id),
+            reply_markup=_lock_groups_keyboard(storage, group_id, role_id),
+        )
+        await query.answer()
+        return True
     if action == "set_suffix":
         pending_roles = runtime.pending_role_ops
         pending_roles[query.from_user.id] = {
@@ -712,7 +812,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             "target_group_id": group_id,
             "role_id": role_id,
         }
-        group_role = storage.get_team_role(team_id, role_id)
         current_suffix = group_role.user_prompt_suffix or "(не задано)"
         text = (
             "Эта инструкция будет добавляться перед каждым сообщением пользователя и уходить в LLM одним сообщением.\n\n"
@@ -735,7 +834,7 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "clear_suffix":
-        storage.set_team_role_user_prompt_suffix(team_id, role_id, None)
+        clear_team_role_suffix(storage, group_id=group_id, role_id=role_id)
         await query.edit_message_text(
             "Инструкция к сообщениям очищена.",
             reply_markup=InlineKeyboardMarkup(
@@ -752,7 +851,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             "target_group_id": group_id,
             "role_id": role_id,
         }
-        group_role = storage.get_team_role(team_id, role_id)
         current_prefix = group_role.user_reply_prefix or "(не задано)"
         text = (
             "Эта инструкция будет добавляться перед текстом сообщения, на которое пользователь отвечает.\n\n"
@@ -775,7 +873,7 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "clear_reply_prefix":
-        storage.set_team_role_user_reply_prefix(team_id, role_id, None)
+        clear_team_role_reply_prefix(storage, group_id=group_id, role_id=role_id)
         await query.edit_message_text(
             "Инструкция для реплаев очищена.",
             reply_markup=InlineKeyboardMarkup(
@@ -785,29 +883,14 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "reset_session":
-        team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
-        storage.delete_user_role_session_by_team_role(query.from_user.id, team_role_id)
-        provider_registry = runtime.provider_registry
-        default_provider_id = runtime.default_provider_id
-        group_role = storage.get_team_role(team_id, role_id)
-        model_override = group_role.model_override or role.llm_model
-        provider_id = provider_id_from_model(model_override, default_provider_id, provider_registry)
-        provider = provider_registry.get(provider_id)
-        if provider:
-            for field in provider.user_fields.values():
-                if field.scope == "role":
-                    storage.delete_provider_user_value(provider_id, field.key, role_id)
+        role_name = reset_team_role_session(runtime, storage, group_id=group_id, role_id=role_id, user_id=query.from_user.id)
         await query.edit_message_text(
-            f"Сессия для роли @{_role_public_name(storage, group_id, role_id)} в группе {group_id} сброшена.",
+            f"Сессия для роли @{role_name} в группе {group_id} сброшена.",
         )
         await query.answer()
         return True
     if action == "delete_role":
-        role_name = _role_public_name(storage, group_id, role_id)
-        storage.deactivate_team_role(team_id, role_id)
-        team_role_id = storage.resolve_team_role_id(team_id, role_id)
-        if team_role_id is not None:
-            storage.delete_user_role_session_by_team_role(query.from_user.id, team_role_id)
+        role_name = delete_team_role_binding(storage, group_id=group_id, role_id=role_id, user_id=query.from_user.id)
         await query.edit_message_text(
             f"Роль @{role_name} удалена из группы {group_id}.",
         )
@@ -894,7 +977,6 @@ async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, r
     _, group_id_str, role_id_str, model_name = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    team_id = _team_id(storage, group_id)
     provider_model_map = runtime.provider_model_map
     if model_name not in provider_model_map:
         await query.edit_message_text(
@@ -905,7 +987,7 @@ async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, r
         )
         await query.answer()
         return True
-    storage.set_team_role_model(team_id, role_id, model_name)
+    set_team_role_model(storage, group_id=group_id, role_id=role_id, model_name=model_name)
     provider_registry = runtime.provider_registry
     provider_model_map = runtime.provider_model_map
     model_obj = provider_model_map.get(model_name)
@@ -948,6 +1030,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if await _handle_master_role_create_model(query, data, storage, runtime):
         return
     if await _handle_add_role(query, data, context, storage, runtime):
+        return
+    if await _handle_lock_groups(query, data, storage):
         return
     if await _handle_action(query, data, context, storage, runtime):
         return

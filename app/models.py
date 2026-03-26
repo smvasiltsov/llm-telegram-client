@@ -86,6 +86,36 @@ class TeamRole:
 
 
 @dataclass
+class TeamRoleRuntimeStatus:
+    team_role_id: int
+    status: str
+    status_version: int
+    busy_request_id: str | None
+    busy_owner_user_id: int | None
+    busy_origin: str | None
+    preview_text: str | None
+    preview_source: str | None
+    busy_since: str | None
+    lease_expires_at: str | None
+    last_heartbeat_at: str | None
+    free_release_requested_at: str | None
+    free_release_delay_until: str | None
+    free_release_reason_pending: str | None
+    last_release_reason: str | None
+    updated_at: str
+
+
+@dataclass
+class RoleLockGroup:
+    lock_group_id: int
+    name: str
+    description: str | None
+    is_active: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass
 class GroupRole:
     group_id: int
     role_id: int

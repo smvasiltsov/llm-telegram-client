@@ -16,11 +16,13 @@ doc:
 # 10.1 Bot UI in Telegram
 
 ## Entry Points
-LTC is managed through Telegram itself and exposes two interaction surfaces:
+Telegram UI exposes two interaction surfaces:
 - group chats for role-based AI conversations,
 - private chat with the bot for configuration.
 
-The primary command for configuration is `/groups` in private chat.
+Primary private commands:
+- `/groups` for team bindings and team-role operations,
+- `/roles` for master-role catalog operations.
 
 ## Group Chat Experience
 In a group, the user sends a message and mentions a role (for example, `@analyst`).
@@ -32,11 +34,13 @@ Expected behavior:
 - response is posted back to the same group thread.
 
 ## Private Configuration UI
-The private UI is navigation-driven and centered on groups and roles:
-- open `/groups`,
-- select target group,
-- open role card,
-- adjust role settings.
+The private UI is navigation-driven and split by domain level:
+- `/roles`: master-role list from `roles_catalog/*.json` (hot-reload each request),
+- `/groups`: team-scoped role bindings and overrides.
+
+`/roles` list shows:
+- valid roles,
+- catalog validation errors (invalid name, malformed JSON, duplicate case-fold, role_name mismatch).
 
 Role card actions include:
 - system prompt,
@@ -64,3 +68,15 @@ When raw HTML mode is enabled and Telegram rejects markup, the bot falls back to
 - Commands are intended for private chat.
 - Group interaction is kept lightweight: users invoke roles, while configuration stays in private UI.
 - Sensitive provider fields are requested interactively when required.
+
+## Validation Commands
+```bash
+python3 -m unittest \
+  tests.test_ltc12_hot_reload_full_scenario \
+  tests.test_ltc12_manual_json_bind_runtime \
+  tests.test_ltc13_storage_team_role_api
+```
+
+## Known Issues
+- Non-blocking legacy regression in broader suite:
+  `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.

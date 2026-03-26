@@ -56,3 +56,11 @@ On refresh, if active `team_roles.role_name` is absent in loaded catalog:
 - Case-fold duplicate winner depends on stable file sort order.
 - Invalid basename files are ignored as role sources.
 - Renaming a file changes identity; previous bindings are deactivated.
+
+## Check Commands
+- `python3 -m unittest tests.test_role_catalog tests.test_ltc12_role_catalog_service tests.test_ltc12_hot_reload_full_scenario tests.test_ltc12_manual_json_bind_runtime`
+- `python3 -m unittest tests.test_role_catalog_export tests.test_ltc12_runtime_json_switch`
+
+## Out of Scope
+- Hot-reload через fs watcher (используется reload на запрос/действие, без фонового watching).
+- Авто-перенос team bindings при rename роли (binding деактивируется, не переносится).

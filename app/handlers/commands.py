@@ -5,53 +5,20 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.core.use_cases import (
+    list_team_role_states,
+    list_telegram_groups,
+    master_roles_list_text,
+    reset_team_role_session,
+    resolve_team_id,
+)
 from app.runtime import RuntimeContext
 from app.role_catalog_service import refresh_role_catalog
-from app.services.prompt_builder import provider_id_from_model
 from app.services.tool_exec import execute_bash_command
-from app.storage import Storage
 from app.tools import ToolService
 from app.utils import split_message
 
 logger = logging.getLogger("bot")
-
-
-def _list_telegram_groups(storage: Storage) -> list[tuple[int, str | None, int]]:
-    result: list[tuple[int, str | None, int]] = []
-    for binding in storage.list_team_bindings(interface_type="telegram", active_only=True):
-        try:
-            group_id = int(binding.external_id)
-        except Exception:
-            continue
-        result.append((group_id, binding.external_title, binding.team_id))
-    result.sort(key=lambda item: item[0])
-    return result
-
-
-def _master_roles_list_text(runtime: RuntimeContext, *, max_issues: int = 10) -> str:
-    lines = ["Выбери master-role:"]
-    issues = runtime.role_catalog.issues
-    if not issues:
-        return "\n".join(lines)
-    lines.append("")
-    lines.append(f"Ошибки чтения JSON: {len(issues)}")
-    for issue in issues[:max_issues]:
-        lines.append(f"- {issue.path.name}: {_human_issue_reason(issue.reason)}")
-    if len(issues) > max_issues:
-        lines.append(f"- ... и ещё {len(issues) - max_issues}")
-    return "\n".join(lines)
-
-
-def _human_issue_reason(reason: str) -> str:
-    if reason.startswith("invalid_file_name:"):
-        return "некорректное имя файла (разрешены только [a-z0-9_])"
-    if reason.startswith("duplicate_role_name_casefold:"):
-        winner = reason.split("winner=", 1)[1] if "winner=" in reason else "unknown"
-        return f"дубликат имени роли по регистру; используется файл {winner}"
-    if reason.startswith("role_name_mismatch:"):
-        payload_name = reason.split(":", 1)[1].split("->", 1)[0]
-        return f"role_name в JSON ({payload_name}) не совпадает с именем файла; используется имя файла"
-    return reason
 
 
 async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -62,8 +29,7 @@ async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE
     runtime: RuntimeContext = context.application.bot_data["runtime"]
     if update.effective_user.id != runtime.owner_user_id:
         return
-    storage: Storage = runtime.storage
-    refresh_role_catalog(runtime=runtime, storage=storage)
+    refresh_role_catalog(runtime=runtime, storage=runtime.storage)
     roles = runtime.role_catalog.list_active()
     keyboard = [
         [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"mrole_name:{role.role_name}")]
@@ -71,7 +37,7 @@ async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE
     ]
     keyboard.insert(0, [InlineKeyboardButton(text="➕ Создать master-role", callback_data="mrole_create")])
     await update.message.reply_text(
-        _master_roles_list_text(runtime),
+        master_roles_list_text(runtime),
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -84,15 +50,13 @@ async def handle_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     runtime: RuntimeContext = context.application.bot_data["runtime"]
     if update.effective_user.id != runtime.owner_user_id:
         return
-    storage: Storage = runtime.storage
-    groups = _list_telegram_groups(storage)
+    groups = list_telegram_groups(runtime.storage)
     if not groups:
         await update.message.reply_text("Бот пока не добавлен ни в одну группу.")
         return
     keyboard = [
-        [InlineKeyboardButton(text=(title or "(без названия)"), callback_data=f"grp:{group_id}")]
+        [InlineKeyboardButton(text=(group.title or "(без названия)"), callback_data=f"grp:{group.group_id}")]
         for group in groups
-        for group_id, title, _team_id in [group]
     ]
     await update.message.reply_text(
         "Выбери группу:",
@@ -116,25 +80,24 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text("group_id должен быть числом.")
         return
-    storage: Storage = runtime.storage
-    team_id = storage.resolve_team_id_by_telegram_chat(group_id)
-    if team_id is None:
+    try:
+        list_team_role_states(runtime.storage, group_id)
+    except ValueError:
         await update.message.reply_text("Группа не найдена.")
         return
-    group_roles = storage.list_team_roles(team_id)
+    group_roles = list_team_role_states(runtime.storage, group_id)
     if not group_roles:
         await update.message.reply_text("Роли для группы не настроены.")
         return
     keyboard = []
     for group_role in group_roles:
-        role = storage.get_role_by_id(group_role.role_id)
         status = "ON" if group_role.enabled else "OFF"
         mode = "ORCH" if group_role.mode == "orchestrator" else "ROLE"
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=f"@{storage.get_team_role_name(team_id, role.role_id)} [{status}|{mode}]",
-                    callback_data=f"role:{group_id}:{role.role_id}",
+                    text=f"@{group_role.public_name} [{status}|{mode}]",
+                    callback_data=f"role:{group_id}:{group_role.role_id}",
                 )
             ]
         )
@@ -164,16 +127,16 @@ async def handle_role_set_prompt(update: Update, context: ContextTypes.DEFAULT_T
     if not prompt:
         await update.message.reply_text("Prompt не может быть пустым.")
         return
-    storage: Storage = runtime.storage
-    team_id = storage.resolve_team_id_by_telegram_chat(group_id)
-    if team_id is None:
+    try:
+        team_id = resolve_team_id(runtime.storage, group_id)
+    except ValueError:
         await update.message.reply_text("Группа не найдена.")
         return
-    role = storage.get_role_for_team_by_name(team_id, role_name)
-    storage.ensure_team_role(team_id, role.role_id)
-    storage.set_team_role_prompt(team_id, role.role_id, prompt)
+    role = runtime.storage.get_role_for_team_by_name(team_id, role_name)
+    runtime.storage.ensure_team_role(team_id, role.role_id)
+    runtime.storage.set_team_role_prompt(team_id, role.role_id, prompt)
     await update.message.reply_text(
-        f"Промпт роли @{storage.get_team_role_name(team_id, role.role_id)} для группы {group_id} обновлён."
+        f"Промпт роли @{runtime.storage.get_team_role_name(team_id, role.role_id)} для группы {group_id} обновлён."
     )
 
 
@@ -192,27 +155,21 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
         await update.message.reply_text("group_id должен быть числом.")
         return
     role_name = context.args[1].lstrip("@")
-    storage: Storage = runtime.storage
-    team_id = storage.resolve_team_id_by_telegram_chat(group_id)
-    if team_id is None:
+    try:
+        team_id = resolve_team_id(runtime.storage, group_id)
+    except ValueError:
         await update.message.reply_text("Группа не найдена.")
         return
-    role = storage.get_role_for_team_by_name(team_id, role_name)
-    team_role_id = storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
-    if team_role_id is not None:
-        storage.delete_user_role_session_by_team_role(update.effective_user.id, team_role_id)
-    provider_registry = runtime.provider_registry
-    default_provider_id = runtime.default_provider_id
-    group_role = storage.get_team_role(team_id, role.role_id)
-    model_override = group_role.model_override or role.llm_model
-    provider_id = provider_id_from_model(model_override, default_provider_id, provider_registry)
-    provider = provider_registry.get(provider_id)
-    if provider:
-        for field in provider.user_fields.values():
-            if field.scope == "role":
-                storage.delete_provider_user_value(provider_id, field.key, role.role_id)
+    role = runtime.storage.get_role_for_team_by_name(team_id, role_name)
+    public_name = reset_team_role_session(
+        runtime,
+        runtime.storage,
+        group_id=group_id,
+        role_id=role.role_id,
+        user_id=update.effective_user.id,
+    )
     await update.message.reply_text(
-        f"Сессия для роли @{storage.get_team_role_name(team_id, role.role_id)} в группе {group_id} сброшена. "
+        f"Сессия для роли @{public_name} в группе {group_id} сброшена. "
         "Новый чат будет создан при следующем запросе."
     )
 

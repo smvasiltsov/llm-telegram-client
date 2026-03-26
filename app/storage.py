@@ -4,7 +4,7 @@ import secrets
 import sqlite3
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +12,7 @@ from app.models import (
     AuthToken,
     Group,
     GroupRole,
+    RoleLockGroup,
     Role,
     RolePrePostProcessing,
     RoleSkill,
@@ -19,6 +20,7 @@ from app.models import (
     Team,
     TeamBinding,
     TeamRole,
+    TeamRoleRuntimeStatus,
     User,
     UserRoleSession,
 )
@@ -35,6 +37,10 @@ class SessionResolution:
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _iso_plus_seconds(ts: str, seconds: int) -> str:
+    return (datetime.fromisoformat(ts) + timedelta(seconds=max(0, int(seconds)))).isoformat()
 
 
 class Storage:
@@ -80,6 +86,16 @@ class Storage:
     def has_legacy_roles_table(self) -> bool:
         return self._table_exists("roles")
 
+    # LTC-18 safety-net helpers: runtime status and lock-group schema capability checks.
+    def has_team_role_runtime_status_table(self) -> bool:
+        return self._table_exists("team_role_runtime_status")
+
+    def has_role_lock_groups_table(self) -> bool:
+        return self._table_exists("role_lock_groups")
+
+    def has_role_lock_group_members_table(self) -> bool:
+        return self._table_exists("role_lock_group_members")
+
     def _ensure_column(self, table: str, column: str, ddl: str) -> None:
         cur = self._conn.cursor()
         cur.execute(f"PRAGMA table_info({table})")
@@ -87,6 +103,12 @@ class Storage:
         if column not in cols:
             cur.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
             self._conn.commit()
+
+    def _create_index_if_column_exists(self, *, index_name: str, table: str, column: str) -> None:
+        if not self._table_has_column(table, column):
+            return
+        cur = self._conn.cursor()
+        cur.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table}({column})")
 
     def _init_schema(self) -> None:
         cur = self._conn.cursor()
@@ -303,8 +325,68 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_role_runtime_status (
+                team_role_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'free',
+                status_version INTEGER NOT NULL DEFAULT 1,
+                busy_request_id TEXT,
+                busy_owner_user_id INTEGER,
+                busy_origin TEXT,
+                preview_text TEXT,
+                preview_source TEXT,
+                busy_since TEXT,
+                lease_expires_at TEXT,
+                last_heartbeat_at TEXT,
+                free_release_requested_at TEXT,
+                free_release_delay_until TEXT,
+                free_release_reason_pending TEXT,
+                last_release_reason TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id),
+                CHECK (status IN ('free', 'busy'))
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_lock_groups (
+                lock_group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_lock_group_members (
+                lock_group_id INTEGER NOT NULL,
+                team_role_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (lock_group_id, team_role_id),
+                FOREIGN KEY (lock_group_id) REFERENCES role_lock_groups(lock_group_id),
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
+            )
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_chain_step ON skill_runs(chain_id, step_index, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_created ON skill_runs(skill_id, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_status ON team_role_runtime_status(status)")
+        self._create_index_if_column_exists(
+            index_name="idx_team_role_runtime_status_lease",
+            table="team_role_runtime_status",
+            column="lease_expires_at",
+        )
+        self._create_index_if_column_exists(
+            index_name="idx_team_role_runtime_status_delay_until",
+            table="team_role_runtime_status",
+            column="free_release_delay_until",
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_role_lock_group_members_team_role ON role_lock_group_members(team_role_id)")
         cur.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_team_roles_unique_display_name
@@ -323,7 +405,87 @@ class Storage:
         self._migrate_to_team_only_schema()
         self._migrate_team_role_surrogate_additive()
         self._migrate_role_name_bindings_additive()
+        self._migrate_role_runtime_status_additive()
         self._ensure_column("team_roles", "extra_instruction_override", "extra_instruction_override TEXT")
+        self._conn.commit()
+
+    def _migrate_role_runtime_status_additive(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS team_role_runtime_status (
+                team_role_id INTEGER PRIMARY KEY,
+                status TEXT NOT NULL DEFAULT 'free',
+                status_version INTEGER NOT NULL DEFAULT 1,
+                busy_request_id TEXT,
+                busy_owner_user_id INTEGER,
+                busy_origin TEXT,
+                preview_text TEXT,
+                preview_source TEXT,
+                busy_since TEXT,
+                lease_expires_at TEXT,
+                last_heartbeat_at TEXT,
+                free_release_requested_at TEXT,
+                free_release_delay_until TEXT,
+                free_release_reason_pending TEXT,
+                last_release_reason TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id),
+                CHECK (status IN ('free', 'busy'))
+            )
+            """
+        )
+        self._ensure_column("team_role_runtime_status", "free_release_requested_at", "free_release_requested_at TEXT")
+        self._ensure_column("team_role_runtime_status", "free_release_delay_until", "free_release_delay_until TEXT")
+        self._ensure_column("team_role_runtime_status", "free_release_reason_pending", "free_release_reason_pending TEXT")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_lock_groups (
+                lock_group_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS role_lock_group_members (
+                lock_group_id INTEGER NOT NULL,
+                team_role_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (lock_group_id, team_role_id),
+                FOREIGN KEY (lock_group_id) REFERENCES role_lock_groups(lock_group_id),
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_status ON team_role_runtime_status(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_lease ON team_role_runtime_status(lease_expires_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_delay_until ON team_role_runtime_status(free_release_delay_until)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_role_lock_group_members_team_role ON role_lock_group_members(team_role_id)")
+
+        now = _utc_now()
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO team_role_runtime_status (
+                team_role_id,
+                status,
+                status_version,
+                updated_at
+            )
+            SELECT
+                tr.team_role_id,
+                'free',
+                1,
+                ?
+            FROM team_roles tr
+            WHERE tr.team_role_id IS NOT NULL AND tr.is_active = 1
+            """,
+            (now,),
+        )
         self._conn.commit()
 
     def _migrate_role_name_bindings_additive(self) -> None:
@@ -1666,6 +1828,38 @@ class Storage:
             is_active=bool(row["is_active"]),
         )
 
+    @staticmethod
+    def _row_to_team_role_runtime_status(row: sqlite3.Row) -> TeamRoleRuntimeStatus:
+        return TeamRoleRuntimeStatus(
+            team_role_id=int(row["team_role_id"]),
+            status=str(row["status"] or "free"),
+            status_version=int(row["status_version"] or 1),
+            busy_request_id=row["busy_request_id"],
+            busy_owner_user_id=int(row["busy_owner_user_id"]) if row["busy_owner_user_id"] is not None else None,
+            busy_origin=row["busy_origin"],
+            preview_text=row["preview_text"],
+            preview_source=row["preview_source"],
+            busy_since=row["busy_since"],
+            lease_expires_at=row["lease_expires_at"],
+            last_heartbeat_at=row["last_heartbeat_at"],
+            free_release_requested_at=row["free_release_requested_at"] if "free_release_requested_at" in row.keys() else None,
+            free_release_delay_until=row["free_release_delay_until"] if "free_release_delay_until" in row.keys() else None,
+            free_release_reason_pending=row["free_release_reason_pending"] if "free_release_reason_pending" in row.keys() else None,
+            last_release_reason=row["last_release_reason"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_role_lock_group(row: sqlite3.Row) -> RoleLockGroup:
+        return RoleLockGroup(
+            lock_group_id=int(row["lock_group_id"]),
+            name=str(row["name"]),
+            description=row["description"],
+            is_active=bool(row["is_active"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
     def resolve_team_role_id(self, team_id: int, role_id: int, *, ensure_exists: bool = False) -> int | None:
         if ensure_exists:
             self.ensure_team_role(team_id, role_id)
@@ -1955,6 +2149,698 @@ class Storage:
             }
             for row in rows
         ]
+
+    def ensure_team_role_runtime_status(self, team_role_id: int) -> TeamRoleRuntimeStatus:
+        self.get_team_role_by_id(team_role_id)
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO team_role_runtime_status (
+                team_role_id, status, status_version, updated_at
+            )
+            VALUES (?, 'free', 1, ?)
+            """,
+            (team_role_id, now),
+        )
+        self._conn.commit()
+        status = self.get_team_role_runtime_status(team_role_id)
+        if status is None:
+            raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
+        return status
+
+    def get_team_role_runtime_status(self, team_role_id: int) -> TeamRoleRuntimeStatus | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                team_role_id, status, status_version, busy_request_id, busy_owner_user_id,
+                busy_origin, preview_text, preview_source, busy_since, lease_expires_at,
+                last_heartbeat_at, free_release_requested_at, free_release_delay_until, free_release_reason_pending,
+                last_release_reason, updated_at
+            FROM team_role_runtime_status
+            WHERE team_role_id = ?
+            LIMIT 1
+            """,
+            (team_role_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_team_role_runtime_status(row)
+
+    def list_team_role_runtime_statuses(self, team_id: int, *, active_only: bool = True) -> list[TeamRoleRuntimeStatus]:
+        cur = self._conn.cursor()
+        if active_only:
+            cur.execute(
+                """
+                SELECT
+                    rs.team_role_id, rs.status, rs.status_version, rs.busy_request_id, rs.busy_owner_user_id,
+                    rs.busy_origin, rs.preview_text, rs.preview_source, rs.busy_since, rs.lease_expires_at,
+                    rs.last_heartbeat_at, rs.free_release_requested_at, rs.free_release_delay_until,
+                    rs.free_release_reason_pending, rs.last_release_reason, rs.updated_at
+                FROM team_role_runtime_status rs
+                JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
+                WHERE tr.team_id = ? AND tr.is_active = 1
+                ORDER BY tr.role_id
+                """,
+                (team_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT
+                    rs.team_role_id, rs.status, rs.status_version, rs.busy_request_id, rs.busy_owner_user_id,
+                    rs.busy_origin, rs.preview_text, rs.preview_source, rs.busy_since, rs.lease_expires_at,
+                    rs.last_heartbeat_at, rs.free_release_requested_at, rs.free_release_delay_until,
+                    rs.free_release_reason_pending, rs.last_release_reason, rs.updated_at
+                FROM team_role_runtime_status rs
+                JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
+                WHERE tr.team_id = ?
+                ORDER BY tr.role_id
+                """,
+                (team_id,),
+            )
+        return [self._row_to_team_role_runtime_status(row) for row in cur.fetchall()]
+
+    def update_team_role_runtime_preview(
+        self,
+        team_role_id: int,
+        *,
+        preview_text: str | None,
+        preview_source: str | None,
+        now: str | None = None,
+    ) -> None:
+        self.ensure_team_role_runtime_status(team_role_id)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET preview_text = ?, preview_source = ?, updated_at = ?
+            WHERE team_role_id = ?
+            """,
+            (preview_text, preview_source, now or _utc_now(), team_role_id),
+        )
+        self._conn.commit()
+
+    def mark_team_role_runtime_busy(
+        self,
+        team_role_id: int,
+        *,
+        busy_request_id: str,
+        busy_owner_user_id: int | None,
+        busy_origin: str | None,
+        preview_text: str | None,
+        preview_source: str | None,
+        busy_since: str,
+        lease_expires_at: str | None,
+        now: str | None = None,
+    ) -> TeamRoleRuntimeStatus:
+        self.ensure_team_role_runtime_status(team_role_id)
+        ts = now or _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET
+                status = 'busy',
+                status_version = status_version + 1,
+                busy_request_id = ?,
+                busy_owner_user_id = ?,
+                busy_origin = ?,
+                preview_text = ?,
+                preview_source = ?,
+                busy_since = ?,
+                lease_expires_at = ?,
+                last_heartbeat_at = ?,
+                free_release_requested_at = NULL,
+                free_release_delay_until = NULL,
+                free_release_reason_pending = NULL,
+                updated_at = ?
+            WHERE team_role_id = ?
+            """,
+            (
+                busy_request_id,
+                busy_owner_user_id,
+                busy_origin,
+                preview_text,
+                preview_source,
+                busy_since,
+                lease_expires_at,
+                busy_since,
+                ts,
+                team_role_id,
+            ),
+        )
+        self._conn.commit()
+        status = self.get_team_role_runtime_status(team_role_id)
+        if status is None:
+            raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
+        return status
+
+    def mark_team_role_runtime_free(
+        self,
+        team_role_id: int,
+        *,
+        release_reason: str | None,
+        now: str | None = None,
+    ) -> TeamRoleRuntimeStatus:
+        self.ensure_team_role_runtime_status(team_role_id)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET
+                status = 'free',
+                status_version = status_version + 1,
+                busy_request_id = NULL,
+                busy_owner_user_id = NULL,
+                busy_origin = NULL,
+                preview_text = NULL,
+                preview_source = NULL,
+                busy_since = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = ?,
+                free_release_requested_at = NULL,
+                free_release_delay_until = NULL,
+                free_release_reason_pending = NULL,
+                last_release_reason = ?,
+                updated_at = ?
+            WHERE team_role_id = ?
+            """,
+            (now or _utc_now(), release_reason, now or _utc_now(), team_role_id),
+        )
+        self._conn.commit()
+        status = self.get_team_role_runtime_status(team_role_id)
+        if status is None:
+            raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
+        return status
+
+    def mark_team_role_runtime_release_requested(
+        self,
+        team_role_id: int,
+        *,
+        release_reason: str | None,
+        requested_at: str,
+        delay_until: str,
+    ) -> TeamRoleRuntimeStatus:
+        self.ensure_team_role_runtime_status(team_role_id)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET
+                status = 'busy',
+                status_version = status_version + 1,
+                free_release_requested_at = ?,
+                free_release_delay_until = ?,
+                free_release_reason_pending = ?,
+                updated_at = ?
+            WHERE team_role_id = ? AND status = 'busy'
+            """,
+            (requested_at, delay_until, release_reason, requested_at, team_role_id),
+        )
+        self._conn.commit()
+        status = self.get_team_role_runtime_status(team_role_id)
+        if status is None:
+            raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
+        return status
+
+    def finalize_due_team_role_runtime_releases(self, *, now: str | None = None, limit: int = 100) -> int:
+        ts = now or _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET
+                status = 'free',
+                status_version = status_version + 1,
+                busy_request_id = NULL,
+                busy_owner_user_id = NULL,
+                busy_origin = NULL,
+                preview_text = NULL,
+                preview_source = NULL,
+                busy_since = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = ?,
+                last_release_reason = COALESCE(free_release_reason_pending, 'delayed_release'),
+                free_release_requested_at = NULL,
+                free_release_delay_until = NULL,
+                free_release_reason_pending = NULL,
+                updated_at = ?
+            WHERE team_role_id IN (
+                SELECT team_role_id
+                FROM team_role_runtime_status
+                WHERE status = 'busy'
+                  AND free_release_delay_until IS NOT NULL
+                  AND free_release_delay_until <= ?
+                ORDER BY free_release_delay_until, team_role_id
+                LIMIT ?
+            )
+            """,
+            (ts, ts, ts, limit),
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
+    def list_due_team_role_runtime_releases(
+        self,
+        *,
+        now: str | None = None,
+        limit: int = 100,
+    ) -> list[TeamRoleRuntimeStatus]:
+        ts = now or _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                team_role_id, status, status_version, busy_request_id, busy_owner_user_id,
+                busy_origin, preview_text, preview_source, busy_since, lease_expires_at,
+                last_heartbeat_at, free_release_requested_at, free_release_delay_until, free_release_reason_pending,
+                last_release_reason, updated_at
+            FROM team_role_runtime_status
+            WHERE status = 'busy'
+              AND free_release_delay_until IS NOT NULL
+              AND free_release_delay_until <= ?
+            ORDER BY free_release_delay_until, team_role_id
+            LIMIT ?
+            """,
+            (ts, limit),
+        )
+        return [self._row_to_team_role_runtime_status(row) for row in cur.fetchall()]
+
+    def heartbeat_team_role_runtime_status(
+        self,
+        team_role_id: int,
+        *,
+        lease_expires_at: str | None,
+        now: str | None = None,
+    ) -> None:
+        self.ensure_team_role_runtime_status(team_role_id)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET
+                last_heartbeat_at = ?,
+                lease_expires_at = ?,
+                updated_at = ?
+            WHERE team_role_id = ? AND status = 'busy'
+            """,
+            (now or _utc_now(), lease_expires_at, now or _utc_now(), team_role_id),
+        )
+        self._conn.commit()
+
+    def create_role_lock_group(self, name: str, description: str | None = None, *, is_active: bool = True) -> RoleLockGroup:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO role_lock_groups (name, description, is_active, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(name) DO UPDATE SET
+                description = excluded.description,
+                is_active = excluded.is_active,
+                updated_at = excluded.updated_at
+            """,
+            (name, description, 1 if is_active else 0, now, now),
+        )
+        self._conn.commit()
+        group = self.get_role_lock_group_by_name(name)
+        if group is None:
+            raise ValueError(f"Lock group not found after upsert: name={name}")
+        return group
+
+    def get_role_lock_group_by_name(self, name: str) -> RoleLockGroup | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT lock_group_id, name, description, is_active, created_at, updated_at
+            FROM role_lock_groups
+            WHERE name = ?
+            LIMIT 1
+            """,
+            (name,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_role_lock_group(row)
+
+    def get_role_lock_group(self, lock_group_id: int) -> RoleLockGroup | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT lock_group_id, name, description, is_active, created_at, updated_at
+            FROM role_lock_groups
+            WHERE lock_group_id = ?
+            LIMIT 1
+            """,
+            (lock_group_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_role_lock_group(row)
+
+    def list_role_lock_groups(self, *, active_only: bool = True) -> list[RoleLockGroup]:
+        cur = self._conn.cursor()
+        if active_only:
+            cur.execute(
+                """
+                SELECT lock_group_id, name, description, is_active, created_at, updated_at
+                FROM role_lock_groups
+                WHERE is_active = 1
+                ORDER BY name
+                """
+            )
+        else:
+            cur.execute(
+                """
+                SELECT lock_group_id, name, description, is_active, created_at, updated_at
+                FROM role_lock_groups
+                ORDER BY name
+                """
+            )
+        return [self._row_to_role_lock_group(row) for row in cur.fetchall()]
+
+    def set_role_lock_group_active(self, lock_group_id: int, is_active: bool) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE role_lock_groups
+            SET is_active = ?, updated_at = ?
+            WHERE lock_group_id = ?
+            """,
+            (1 if is_active else 0, _utc_now(), lock_group_id),
+        )
+        self._conn.commit()
+
+    def add_team_role_to_lock_group(self, lock_group_id: int, team_role_id: int) -> None:
+        if self.get_role_lock_group(lock_group_id) is None:
+            raise ValueError(f"Lock group not found: lock_group_id={lock_group_id}")
+        self.get_team_role_by_id(team_role_id)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT OR IGNORE INTO role_lock_group_members (lock_group_id, team_role_id, created_at)
+            VALUES (?, ?, ?)
+            """,
+            (lock_group_id, team_role_id, _utc_now()),
+        )
+        self._conn.commit()
+
+    def remove_team_role_from_lock_group(self, lock_group_id: int, team_role_id: int) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM role_lock_group_members
+            WHERE lock_group_id = ? AND team_role_id = ?
+            """,
+            (lock_group_id, team_role_id),
+        )
+        self._conn.commit()
+
+    def list_lock_group_member_team_role_ids(self, lock_group_id: int) -> list[int]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT team_role_id
+            FROM role_lock_group_members
+            WHERE lock_group_id = ?
+            ORDER BY team_role_id
+            """,
+            (lock_group_id,),
+        )
+        return [int(row["team_role_id"]) for row in cur.fetchall()]
+
+    def list_lock_groups_for_team_role(self, team_role_id: int, *, active_only: bool = True) -> list[RoleLockGroup]:
+        cur = self._conn.cursor()
+        if active_only:
+            cur.execute(
+                """
+                SELECT g.lock_group_id, g.name, g.description, g.is_active, g.created_at, g.updated_at
+                FROM role_lock_groups g
+                JOIN role_lock_group_members m ON m.lock_group_id = g.lock_group_id
+                WHERE m.team_role_id = ? AND g.is_active = 1
+                ORDER BY g.name
+                """,
+                (team_role_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT g.lock_group_id, g.name, g.description, g.is_active, g.created_at, g.updated_at
+                FROM role_lock_groups g
+                JOIN role_lock_group_members m ON m.lock_group_id = g.lock_group_id
+                WHERE m.team_role_id = ?
+                ORDER BY g.name
+                """,
+                (team_role_id,),
+            )
+        return [self._row_to_role_lock_group(row) for row in cur.fetchall()]
+
+    def list_related_lock_member_team_role_ids(self, team_role_id: int) -> list[int]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT m2.team_role_id
+            FROM role_lock_group_members m1
+            JOIN role_lock_groups g ON g.lock_group_id = m1.lock_group_id
+            JOIN role_lock_group_members m2 ON m2.lock_group_id = m1.lock_group_id
+            WHERE m1.team_role_id = ? AND g.is_active = 1
+            ORDER BY m2.team_role_id
+            """,
+            (team_role_id,),
+        )
+        ids = {int(row["team_role_id"]) for row in cur.fetchall()}
+        ids.add(int(team_role_id))
+        return sorted(ids)
+
+    def cleanup_stale_busy_team_roles(self, *, now: str | None = None, free_transition_delay_sec: int = 0) -> int:
+        ts = now or _utc_now()
+        delay_sec = max(0, int(free_transition_delay_sec))
+        delay_until = _iso_plus_seconds(ts, delay_sec) if delay_sec > 0 else ts
+        cur = self._conn.cursor()
+        if delay_sec > 0:
+            cur.execute(
+                """
+                UPDATE team_role_runtime_status
+                SET
+                    status_version = status_version + 1,
+                    free_release_requested_at = COALESCE(free_release_requested_at, ?),
+                    free_release_delay_until = COALESCE(free_release_delay_until, ?),
+                    free_release_reason_pending = COALESCE(free_release_reason_pending, 'lease_expired_cleanup'),
+                    updated_at = ?
+                WHERE status = 'busy'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= ?
+                """,
+                (ts, delay_until, ts, ts),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE team_role_runtime_status
+                SET
+                    status = 'free',
+                    status_version = status_version + 1,
+                    busy_request_id = NULL,
+                    busy_owner_user_id = NULL,
+                    busy_origin = NULL,
+                    preview_text = NULL,
+                    preview_source = NULL,
+                    busy_since = NULL,
+                    lease_expires_at = NULL,
+                    free_release_requested_at = NULL,
+                    free_release_delay_until = NULL,
+                    free_release_reason_pending = NULL,
+                    last_release_reason = 'lease_expired_cleanup',
+                    updated_at = ?
+                WHERE status = 'busy'
+                  AND lease_expires_at IS NOT NULL
+                  AND lease_expires_at <= ?
+                """,
+                (ts, ts),
+            )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
+
+    def try_acquire_team_role_busy(
+        self,
+        team_role_id: int,
+        *,
+        busy_request_id: str,
+        busy_owner_user_id: int | None,
+        busy_origin: str | None,
+        preview_text: str | None,
+        preview_source: str | None,
+        busy_since: str,
+        lease_expires_at: str | None,
+        free_transition_delay_sec: int = 0,
+        now: str | None = None,
+    ) -> tuple[bool, TeamRoleRuntimeStatus | None, list[TeamRoleRuntimeStatus]]:
+        self.get_team_role_by_id(team_role_id)
+        ts = now or _utc_now()
+        delay_sec = max(0, int(free_transition_delay_sec))
+        delay_until = _iso_plus_seconds(ts, delay_sec) if delay_sec > 0 else ts
+        cur = self._conn.cursor()
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO team_role_runtime_status (
+                    team_role_id, status, status_version, updated_at
+                )
+                VALUES (?, 'free', 1, ?)
+                """,
+                (team_role_id, ts),
+            )
+            if delay_sec > 0:
+                cur.execute(
+                    """
+                    UPDATE team_role_runtime_status
+                    SET
+                        status_version = status_version + 1,
+                        free_release_requested_at = COALESCE(free_release_requested_at, ?),
+                        free_release_delay_until = COALESCE(free_release_delay_until, ?),
+                        free_release_reason_pending = COALESCE(free_release_reason_pending, 'lease_expired_cleanup'),
+                        updated_at = ?
+                    WHERE status = 'busy'
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at <= ?
+                    """,
+                    (ts, delay_until, ts, ts),
+                )
+            else:
+                cur.execute(
+                    """
+                    UPDATE team_role_runtime_status
+                    SET
+                        status = 'free',
+                        status_version = status_version + 1,
+                        busy_request_id = NULL,
+                        busy_owner_user_id = NULL,
+                        busy_origin = NULL,
+                        preview_text = NULL,
+                        preview_source = NULL,
+                        busy_since = NULL,
+                        lease_expires_at = NULL,
+                        free_release_requested_at = NULL,
+                        free_release_delay_until = NULL,
+                        free_release_reason_pending = NULL,
+                        last_release_reason = 'lease_expired_cleanup',
+                        updated_at = ?
+                    WHERE status = 'busy'
+                      AND lease_expires_at IS NOT NULL
+                      AND lease_expires_at <= ?
+                    """,
+                    (ts, ts),
+                )
+
+            cur.execute(
+                """
+                UPDATE team_role_runtime_status
+                SET
+                    status = 'free',
+                    status_version = status_version + 1,
+                    busy_request_id = NULL,
+                    busy_owner_user_id = NULL,
+                    busy_origin = NULL,
+                    preview_text = NULL,
+                    preview_source = NULL,
+                    busy_since = NULL,
+                    lease_expires_at = NULL,
+                    last_heartbeat_at = ?,
+                    last_release_reason = COALESCE(free_release_reason_pending, 'delayed_release'),
+                    free_release_requested_at = NULL,
+                    free_release_delay_until = NULL,
+                    free_release_reason_pending = NULL,
+                    updated_at = ?
+                WHERE status = 'busy'
+                  AND free_release_delay_until IS NOT NULL
+                  AND free_release_delay_until <= ?
+                """,
+                (ts, ts, ts),
+            )
+
+            related_ids = self.list_related_lock_member_team_role_ids(team_role_id)
+            placeholders = ",".join("?" for _ in related_ids)
+            cur.execute(
+                f"""
+                SELECT
+                    team_role_id, status, status_version, busy_request_id, busy_owner_user_id,
+                    busy_origin, preview_text, preview_source, busy_since, lease_expires_at,
+                    last_heartbeat_at, free_release_requested_at, free_release_delay_until, free_release_reason_pending,
+                    last_release_reason, updated_at
+                FROM team_role_runtime_status
+                WHERE team_role_id IN ({placeholders}) AND status = 'busy'
+                ORDER BY team_role_id
+                """,
+                tuple(related_ids),
+            )
+            blockers = [self._row_to_team_role_runtime_status(row) for row in cur.fetchall()]
+            external_blockers = [
+                item for item in blockers if not (item.team_role_id == team_role_id and item.busy_request_id == busy_request_id)
+            ]
+            if external_blockers:
+                self._conn.commit()
+                return False, None, external_blockers
+
+            cur.execute(
+                """
+                UPDATE team_role_runtime_status
+                SET
+                    status = 'busy',
+                    status_version = status_version + 1,
+                    busy_request_id = ?,
+                    busy_owner_user_id = ?,
+                    busy_origin = ?,
+                    preview_text = ?,
+                    preview_source = ?,
+                    busy_since = ?,
+                    lease_expires_at = ?,
+                    last_heartbeat_at = ?,
+                    free_release_requested_at = NULL,
+                    free_release_delay_until = NULL,
+                    free_release_reason_pending = NULL,
+                    updated_at = ?
+                WHERE team_role_id = ?
+                """,
+                (
+                    busy_request_id,
+                    busy_owner_user_id,
+                    busy_origin,
+                    preview_text,
+                    preview_source,
+                    busy_since,
+                    lease_expires_at,
+                    busy_since,
+                    ts,
+                    team_role_id,
+                ),
+            )
+            cur.execute(
+                """
+                SELECT
+                    team_role_id, status, status_version, busy_request_id, busy_owner_user_id,
+                    busy_origin, preview_text, preview_source, busy_since, lease_expires_at,
+                    last_heartbeat_at, free_release_requested_at, free_release_delay_until, free_release_reason_pending,
+                    last_release_reason, updated_at
+                FROM team_role_runtime_status
+                WHERE team_role_id = ?
+                LIMIT 1
+                """,
+                (team_role_id,),
+            )
+            row = cur.fetchone()
+            self._conn.commit()
+            if not row:
+                return False, None, []
+            return True, self._row_to_team_role_runtime_status(row), []
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def get_team_role_name(self, team_id: int, role_id: int) -> str:
         cur = self._conn.cursor()

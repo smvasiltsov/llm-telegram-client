@@ -4,12 +4,10 @@ import asyncio
 import logging
 from pathlib import Path
 
-from telegram import BotCommand, Update
-from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault
-
-from app.app_factory import build_application, build_services
+from app.app_factory import build_services
+from app.core.contracts.interface_io import CorePort, InboundEvent, OutboundAction
 from app.config import load_config, load_dotenv
-from app.services.group_reconcile import reconcile_active_groups
+from app.interfaces.runtime import InterfaceRuntimeConfig, InterfaceRuntimeRunner
 
 
 logging.basicConfig(
@@ -17,6 +15,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("bot")
+
+
+class _NoopCorePort(CorePort):
+    async def handle_event(self, event: InboundEvent) -> list[OutboundAction]:
+        return []
 
 
 async def main() -> None:
@@ -31,45 +34,35 @@ async def main() -> None:
         plugins_dir=Path(__file__).with_name("plugins"),
         base_cwd=Path.cwd(),
     )
-    application = build_application(config, runtime)
-    me = await application.bot.get_me()
-    runtime.bot_username = me.username or ""
-    logger.info(
-        "Team rollout config mode=%s dual_read=%s dual_write=%s",
-        runtime.team_rollout_mode,
-        runtime.team_dual_read_enabled,
-        runtime.team_dual_write_enabled,
+    interface_runner = InterfaceRuntimeRunner(
+        config=InterfaceRuntimeConfig(
+            active_interface=runtime.interface_active,
+            modules_dir=runtime.interface_modules_dir,
+            runtime_mode=runtime.interface_runtime_mode,
+        ),
+        runtime=runtime,
+        core_port=_NoopCorePort(),
+        adapter_config={
+            "telegram_bot_token": config.telegram_bot_token,
+            "owner_user_id": config.owner_user_id,
+        },
     )
-    if runtime.team_rollout_mode == "team" and not runtime.team_dual_read_enabled:
-        logger.warning("Team rollout mode is 'team' with dual_read disabled; fallback diagnostics are limited")
-    if runtime.tools_bash_enabled and not runtime.tools_bash_password:
-        logger.warning("BASH_DANGEROUS_PASSWORD is empty; privileged bash commands will be blocked")
     runtime.plugin_server.start()
 
     try:
-        await application.initialize()
-        await reconcile_active_groups(application.bot, runtime.storage)
-        owner_commands = [
-            BotCommand("groups", "Список групп и выбор"),
-            BotCommand("roles", "Список master-ролей"),
-            BotCommand("tools", "Список инструментов"),
-        ]
-        if runtime.tools_bash_enabled:
-            owner_commands.append(BotCommand("bash", "Выполнить bash команду"))
-        await application.bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=config.owner_user_id))
-        await application.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
-        await application.bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
-        await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
-        await application.start()
-        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        logger.info("Release bot started as @%s", runtime.bot_username)
+        logger.info(
+            "Starting interface runtime mode=%s active=%s modules_dir=%s",
+            runtime.interface_runtime_mode,
+            runtime.interface_active,
+            runtime.interface_modules_dir,
+        )
+        await interface_runner.start()
         await asyncio.Event().wait()
     finally:
         runtime.plugin_server.stop()
         for client in runtime.llm_clients.values():
             await client.aclose()
-        await application.stop()
-        await application.shutdown()
+        await interface_runner.stop()
 
 
 if __name__ == "__main__":

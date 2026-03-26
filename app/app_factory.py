@@ -2,32 +2,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Mapping
 
 import httpx
-from telegram import Update
-from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from app.auth import AuthService
 from app.config import AppConfig
-from app.handlers.callbacks import handle_callback as cb_handle_callback
-from app.handlers.commands import (
-    handle_bash as cmd_handle_bash,
-)
-from app.handlers.commands import (
-    handle_group_roles as cmd_handle_group_roles,
-    handle_groups as cmd_handle_groups,
-    handle_roles_master as cmd_handle_roles_master,
-    handle_role_reset_session as cmd_handle_role_reset_session,
-    handle_role_set_prompt as cmd_handle_role_set_prompt,
-    handle_tools as cmd_handle_tools,
-)
-from app.handlers.membership import (
-    handle_bot_membership as member_handle_bot_membership,
-    handle_group_seen as member_handle_group_seen,
-)
-from app.handlers.messages_group import handle_group_buffered as msg_handle_group_buffered
-from app.handlers.messages_private import handle_private_message as msg_handle_private_message
+from app.interfaces.telegram.adapter import build_telegram_application
 from app.llm_executor import LLMExecutor
 from app.llm_providers import load_provider_registry
 from app.llm_router import LLMRouter
@@ -42,51 +23,20 @@ from app.plugins import load_plugins
 from app.roles_registry import seed_roles
 from app.runtime import RuntimeContext
 from app.security import TokenCipher
+from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.session_resolver import SessionResolver
 from app.skills import SkillRegistry, SkillService
 from app.storage import Storage
 from app.tools import BashTool, ToolMCPAdapter, ToolRegistry, ToolService
 
-
-HandlerFn = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 logger = logging.getLogger("bot")
-
-
-def register_handlers(
-    application: Application,
-    *,
-    tools_bash_enabled: bool,
-    private_message_handler: HandlerFn,
-    group_buffered_handler: HandlerFn,
-) -> None:
-    application.add_handler(CommandHandler("groups", cmd_handle_groups, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CommandHandler("roles", cmd_handle_roles_master, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CommandHandler("tools", cmd_handle_tools, filters=filters.ChatType.PRIVATE))
-    if tools_bash_enabled:
-        application.add_handler(CommandHandler("bash", cmd_handle_bash, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CommandHandler("group_roles", cmd_handle_group_roles, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CommandHandler("role_set_prompt", cmd_handle_role_set_prompt, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CommandHandler("role_reset_session", cmd_handle_role_reset_session, filters=filters.ChatType.PRIVATE))
-    application.add_handler(CallbackQueryHandler(cb_handle_callback))
-    application.add_handler(ChatMemberHandler(member_handle_bot_membership, ChatMemberHandler.MY_CHAT_MEMBER))
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS, member_handle_group_seen), group=0)
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, private_message_handler), group=1)
-    application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), group_buffered_handler), group=1)
 
 
 def build_application(
     config: AppConfig,
     runtime: RuntimeContext,
-) -> Application:
-    application = ApplicationBuilder().token(config.telegram_bot_token).build()
-    application.bot_data.update(runtime.to_bot_data())
-    register_handlers(
-        application,
-        tools_bash_enabled=runtime.tools_bash_enabled,
-        private_message_handler=msg_handle_private_message,
-        group_buffered_handler=msg_handle_group_buffered,
-    )
-    return application
+) -> Any:
+    return build_telegram_application(config.telegram_bot_token, runtime)
 
 
 def build_services(
@@ -150,6 +100,10 @@ def build_runtime(
     llm_router = LLMRouter(provider_registry, llm_clients, storage, default_provider_id=default_provider_id)
     llm_executor = LLMExecutor(llm_router)
     session_resolver = SessionResolver(storage, llm_router)
+    role_runtime_status_service = RoleRuntimeStatusService(
+        storage,
+        free_transition_delay_sec=config.free_transition_delay_sec,
+    )
 
     pending_store = PendingStore(config.database_path)
     pending_user_fields = PendingUserFieldStore(config.database_path)
@@ -222,6 +176,7 @@ def build_runtime(
         llm_router=llm_router,
         llm_executor=llm_executor,
         session_resolver=session_resolver,
+        role_runtime_status_service=role_runtime_status_service,
         pending_store=pending_store,
         message_buffer=message_buffer,
         private_buffer=private_buffer,
@@ -257,5 +212,9 @@ def build_runtime(
         team_dual_read_enabled=config.team_dual_read_enabled,
         team_dual_write_enabled=config.team_dual_write_enabled,
         team_rollout_mode=config.team_rollout_mode,
+        interface_active=config.interface_active,
+        interface_modules_dir=config.interface_modules_dir,
+        interface_runtime_mode=config.interface_runtime_mode,
+        free_transition_delay_sec=config.free_transition_delay_sec,
         role_catalog=role_catalog,
     )

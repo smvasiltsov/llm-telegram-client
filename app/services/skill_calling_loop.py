@@ -104,6 +104,7 @@ class SkillCallingLoop:
         llm_answer_role_name: str | None = None,
         max_steps: int | None = None,
         send_step: Callable[[str, str, str | None], Awaitable[SkillStepSendResult]] | None = None,
+        on_skill_progress: Callable[[str], None] | None = None,
     ) -> SkillLoopResult:
         chat_id = team_id
         group_role = self._storage.get_team_role(team_id, role.role_id)
@@ -248,6 +249,9 @@ class SkillCallingLoop:
                     "error": execution.error_text,
                 }
             )
+            if on_skill_progress is not None:
+                summary = execution.error_text if execution.error_text else json.dumps(execution.output, ensure_ascii=False)
+                on_skill_progress(f"{execution.skill_id}: {summary}")
 
         return SkillLoopResult(
             status="max_steps",

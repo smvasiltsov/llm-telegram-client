@@ -15,16 +15,17 @@ doc:
 ---
 # 20.6 Runtime Flows
 
-## Flow A: Role-Based Group Request
-1. Owner posts a group message with role mention.
-2. Group handler resolves role and group-role configuration.
-3. Session resolver obtains or creates role session.
-4. Prompt builder composes final LLM input.
-5. Pre-processing stages execute.
-6. LLM execution runs (direct or skill loop).
-7. Post-processing stages execute.
-8. Formatting service renders output for Telegram.
-9. Response is delivered to group.
+## Flow A: Team-Scoped Role Request in Chat
+1. Interface adapter receives a message event.
+2. Runtime resolves channel -> `team_id` via `team_bindings`.
+3. Runtime resolves role identity and `team_role_id`.
+4. Catalog defaults are loaded from JSON and merged with team overrides.
+5. Session resolver obtains or creates team-role session.
+6. Prompt builder composes final LLM input.
+7. Pre-processing stages execute.
+8. LLM execution runs (direct or skill loop).
+9. Post-processing stages execute.
+10. Formatting service renders output and adapter sends response back to channel.
 
 ## Flow B: Provider Field Resolution
 1. Group or private action triggers model call.
@@ -42,19 +43,34 @@ doc:
 5. Skill result is passed back into next LLM step.
 6. Loop ends when model returns final plain-text answer.
 
-## Flow D: Role Configuration in Private UI
-1. User opens `/groups` in private chat.
-2. User selects group and role.
-3. Role options are updated (prompt, model, skills, processors).
-4. Changes are persisted in storage.
-5. Next group invocation uses updated role behavior.
+## Flow D: Master Role and Team Binding Configuration
+1. User opens `/roles` in private chat.
+2. Runtime refreshes `roles_catalog/*.json` on request.
+3. Valid roles are listed together with catalog errors (if any).
+4. User can bind master role to existing team.
+5. User opens `/groups` to manage only bound team roles and team overrides.
 
 ## Flow E: Session Reset
 1. User requests role session reset in private UI.
 2. Runtime removes or refreshes session record for target role scope.
 3. Subsequent role request starts with clean context.
 
+## Flow F: File Remove/Rename Cleanup (LTC-12)
+1. Catalog refresh detects missing role identity.
+2. Active team-role bindings for missing identity are deactivated.
+3. Removed/renamed role is not routed in runtime anymore.
+4. No automatic rebinding to renamed file identity is performed.
+
 ## Runtime Reliability Notes
 - Database-backed state enables deterministic recovery between restarts.
-- Explicit flow boundaries (group/private) reduce accidental cross-mode behavior.
+- Explicit team scoping reduces accidental cross-team behavior.
 - Structured logs for skill/tool runs support troubleshooting and audits.
+
+## Validation Commands
+```bash
+python3 -m unittest \
+  tests.test_ltc12_hot_reload_full_scenario \
+  tests.test_ltc12_manual_json_bind_runtime \
+  tests.test_storage_team_compat \
+  tests.test_pending_store_team_dual_read
+```

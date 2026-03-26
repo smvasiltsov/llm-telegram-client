@@ -34,7 +34,7 @@ Important columns:
 - `team_roles.team_role_id`: surrogate binding id for session/capability tables.
 
 ### Runtime Data
-- `user_role_sessions`: sessions scoped by `(telegram_user_id, team_id, role_id/team_role_id)`.
+- `user_role_sessions`: sessions scoped by `(telegram_user_id, team_id, team_role_id)`.
 - `conversation_messages`: persisted conversation messages.
 - `provider_user_data`: provider fields, including role-scoped values.
 
@@ -49,3 +49,29 @@ Important columns:
 - Team-level overrides are stored in DB.
 - Master role defaults (prompt/instruction/model) are loaded from JSON catalog and merged at runtime.
 - Catalog refresh deactivates stale team role bindings when file identity disappears (remove/rename).
+- Historical observability tables are not deeply normalized in current scope.
+
+## Validation Commands
+```bash
+python3 scripts/db_migration_smoke.py \
+  --db-path bot.sqlite3 \
+  --expect-table teams \
+  --expect-table team_bindings \
+  --expect-table team_roles \
+  --expect-column team_roles:team_role_id \
+  --expect-column user_role_sessions:team_role_id
+```
+
+```bash
+python3 -m unittest \
+  tests.test_storage_team_compat \
+  tests.test_ltc13_storage_team_role_api \
+  tests.test_team_migration_cleanup
+```
+
+## Known Issues
+- Non-blocking legacy regression in broader suite:
+  `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.
+
+## Out of Scope
+- Historical-log schema backfill (`tool_runs`, `skill_runs`, `conversation_messages`) beyond compatibility guarantees.

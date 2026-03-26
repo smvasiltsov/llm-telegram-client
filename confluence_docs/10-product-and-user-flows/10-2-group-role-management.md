@@ -20,6 +20,8 @@ Role behavior is split into two layers:
 - **master role** (file-based JSON in `roles_catalog`),
 - **team role binding** (team-specific enablement and overrides).
 
+Master-role identity is file-based and independent from team binding identity (`team_role_id`).
+
 ## Role Identity (LTC-12)
 - identity is file basename only (`<name>.json`),
 - valid basename regex: `^[a-z0-9_]+$`,
@@ -43,6 +45,8 @@ Within a team, users manage bound roles:
 - reset role session,
 - remove binding from team.
 
+Creating a brand-new role from team context is not the primary path; new master roles are created in `/roles`.
+
 ## Deletion/Rename Behavior
 If a role file is removed or renamed:
 - old team bindings for previous identity are deactivated automatically,
@@ -51,3 +55,16 @@ If a role file is removed or renamed:
 ## Session Behavior
 Role context remains isolated by user + team + role binding.
 Reset operation clears session state without deleting master role file.
+
+## Validation Commands
+```bash
+python3 -m unittest \
+  tests.test_ltc13_storage_team_role_api \
+  tests.test_ltc13_inheritance_override \
+  tests.test_storage_team_compat \
+  tests.test_pending_store_team_dual_read
+```
+
+## Known Issues
+- Non-blocking legacy regression in broader suite:
+  `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.

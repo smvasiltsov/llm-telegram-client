@@ -21,12 +21,17 @@ LTC follows a clear separation between transport handlers, reusable services, ca
 ## Main Areas
 
 ### Entry and Runtime Wiring
-- `bot.py`: startup and lifecycle entrypoint.
-- `app/app_factory.py`: application assembly and handler registration.
+- `bot.py`: startup and lifecycle entrypoint through interface runtime runner.
+- `app/app_factory.py`: runtime assembly and adapter dependency wiring.
 - `app/runtime.py`: shared `RuntimeContext` container.
+- `app/interfaces/runtime/*`: active interface registry/loader/runner.
 
 ### Transport Layer
-- `app/handlers/*`: Telegram-facing handlers for commands, callbacks, group/private messages, and membership events.
+- `app/interfaces/telegram/*`: Telegram adapter module.
+- `app/handlers/*`: Telegram transport handlers for commands, callbacks, group/private messages, and membership events.
+
+### Core Use Cases
+- `app/core/use_cases/*`: transport-agnostic orchestration for team/role operations.
 
 ### Service Layer
 - `app/services/*`: business logic independent from Telegram transport details.
@@ -45,6 +50,7 @@ Key examples:
 ### Persistence Layer
 - `app/storage.py`: schema management and data operations.
 - `app/models.py`: dataclasses representing domain records.
+- `roles_catalog/*.json`: master-role source of truth (LTC-12).
 
 ### Extension and Configuration Assets
 - `llm_providers/*.json`: provider definitions.
@@ -56,3 +62,19 @@ Key examples:
 - Runtime behavior is explicit through centralized context.
 - Extensions can evolve without rewriting transport core.
 - Storage and observability remain consistent across subsystems.
+
+## Validation Commands
+```bash
+python3 -m unittest \
+  tests.test_core_team_roles_use_cases \
+  tests.test_interface_runtime_registry \
+  tests.test_interface_runtime_loader \
+  tests.test_interface_runtime_runner
+```
+
+## Known Issues
+- Non-blocking legacy regression in broader suite:
+  `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.
+
+## Out of Scope
+- Multi-interface runtime mode (`runtime_mode=multi`).

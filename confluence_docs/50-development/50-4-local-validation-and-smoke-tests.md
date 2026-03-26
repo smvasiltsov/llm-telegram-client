@@ -29,6 +29,22 @@ Run tests:
 python3 -m unittest discover -s tests -v
 ```
 
+Targeted LTC checks:
+```bash
+python3 -m unittest \
+  tests.test_role_catalog \
+  tests.test_ltc12_role_catalog_service \
+  tests.test_ltc12_hot_reload_full_scenario \
+  tests.test_ltc13_storage_team_role_api \
+  tests.test_ltc13_inheritance_override \
+  tests.test_storage_team_compat \
+  tests.test_pending_store_team_dual_read \
+  tests.test_interface_runtime_registry \
+  tests.test_interface_runtime_loader \
+  tests.test_interface_runtime_runner \
+  tests.test_telegram_adapter_contract
+```
+
 ## Targeted Runtime Smoke Tests
 Perform minimal end-to-end checks after changes:
 - `/groups` navigation in private chat,
@@ -54,3 +70,14 @@ After tool updates:
 - list/exec via `scripts/mcp_tool_runner.py`,
 - verify owner-only access behavior,
 - verify command restrictions and output limits.
+
+## Interface SDK Smoke
+```bash
+python3 -m scripts.interface_sdk_smoke interfaces_sdk.template_adapter replace_me
+python3 -m interface_module_kit.validator.smoke_runner --scenario all
+```
+
+## Known Issues
+- Non-blocking legacy regression in broader suite:
+  `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.
+- Telegram adapter runtime requires `python-telegram-bot` package installed.

@@ -55,3 +55,19 @@ Team-level overrides remain higher priority and are merged on top.
 On catalog refresh, if active team binding role name is absent in the loaded catalog:
 - binding is deactivated,
 - auto-rebind to renamed file identity is not performed.
+
+## Validation Commands
+```bash
+python3 -m unittest \
+  tests.test_role_catalog \
+  tests.test_ltc12_role_catalog_service \
+  tests.test_ltc12_hot_reload_full_scenario \
+  tests.test_ltc12_manual_json_bind_runtime
+```
+
+## Known Issues
+- Non-blocking legacy regression in broader suite:
+  `tests.test_team_migration_additive.TeamMigrationAdditiveTests.test_storage_additive_team_migration_backfills_existing_group_data`.
+
+## Out of Scope
+- Hot-reload by filesystem watcher; current design is request-driven refresh.
