@@ -210,7 +210,7 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status.last_release_reason if status else None, "response_sent")
             self.assertTrue(any("done" in item for item in bot.sent))
 
-    async def test_run_chain_returns_busy_message_when_lock_group_blocked(self) -> None:
+    async def test_run_chain_waits_when_lock_group_blocked_and_then_executes(self) -> None:
         with TemporaryDirectory() as td:
             storage = Storage(Path(td) / "busy_block.sqlite3")
             status_service = RoleRuntimeStatusService(storage)
@@ -290,7 +290,7 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
                 provider_registry={},
                 provider_models=[_FakeModel()],
                 provider_model_map={"provider:model": _FakeModel()},
-                llm_executor=_FakeLLMExecutor(["must-not-be-used"]),
+                llm_executor=_FakeLLMExecutor(["done-b"]),
                 session_resolver=_FakeSessionResolver(),
                 prepost_processing_registry=PrePostProcessingRegistry(),
                 skills_service=SkillService(SkillRegistry()),
@@ -304,21 +304,27 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
             bot = _FakeBot()
             context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=bot)
 
-            result = await run_chain(
-                context=context,
-                team_id=group_b.team_id or 0,
-                chat_id=1,
-                user_id=42,
-                session_token="token",
-                roles=[role_b],
-                user_text="hello",
-                reply_text=None,
-                actor_username="user",
-                reply_to_message_id=10,
-                is_all=False,
-                apply_plugins=False,
-                save_pending_on_unauthorized=True,
-            )
+            async def _invoke():
+                return await run_chain(
+                    context=context,
+                    team_id=group_b.team_id or 0,
+                    chat_id=1,
+                    user_id=42,
+                    session_token="token",
+                    roles=[role_b],
+                    user_text="hello",
+                    reply_text=None,
+                    actor_username="user",
+                    reply_to_message_id=10,
+                    is_all=False,
+                    apply_plugins=False,
+                    save_pending_on_unauthorized=True,
+                )
+
+            task = asyncio.create_task(_invoke())
+            await asyncio.sleep(0.2)
+            status_service.release_busy(team_role_id=tr_a, release_reason="response_sent")
+            result = await task
 
             self.assertFalse(result.had_error)
             self.assertEqual(result.completed_roles, 1)
@@ -326,10 +332,10 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(status_b)
             self.assertEqual(status_b.status if status_b else None, "free")
             status_a = storage.get_team_role_runtime_status(tr_a)
-            self.assertEqual(status_a.status if status_a else None, "busy")
+            self.assertEqual(status_a.status if status_a else None, "free")
             joined = "\n".join(bot.sent)
-            self.assertIn("Роль сейчас занята", joined)
-            self.assertIn("Текущая задача: blocked by A", joined)
+            self.assertIn("done-b", joined)
+            self.assertNotIn("Роль сейчас занята", joined)
 
     async def test_run_chain_honors_free_transition_delay(self) -> None:
         with TemporaryDirectory() as td:

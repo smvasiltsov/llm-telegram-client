@@ -105,6 +105,8 @@ def build_runtime(
         storage,
         free_transition_delay_sec=config.free_transition_delay_sec,
     )
+    startup_cleaned = role_runtime_status_service.cleanup_stale()
+    logger.info("startup stale runtime-status cleanup cleaned=%s", startup_cleaned)
     role_dispatch_queue_service = RoleDispatchQueueService()
 
     pending_store = PendingStore(config.database_path)

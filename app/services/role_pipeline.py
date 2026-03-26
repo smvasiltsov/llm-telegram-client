@@ -416,6 +416,8 @@ async def execute_role_request(
     recipient: str,
     llm_answer_text: str | None = None,
     llm_answer_role_name: str | None = None,
+    wait_until_available: bool = False,
+    queue_request_id: str | None = None,
 ) -> RoleRequestResult:
     runtime = _runtime(context)
     storage: Storage = runtime.storage
@@ -472,29 +474,39 @@ async def execute_role_request(
     status_service.cleanup_stale()
     busy_request_id = uuid4().hex
     busy_acquired = False
-    acquire = status_service.acquire_busy(
-        team_role_id=int(team_role_id),
-        busy_request_id=busy_request_id,
-        busy_owner_user_id=user_id,
-        busy_origin="group",
-        preview_text=effective_user_text,
-        preview_source="user",
-    )
-    if not acquire.acquired:
-        blocker = acquire.blockers[0] if acquire.blockers else None
-        blocker_preview = (blocker.preview_text or "").strip() if blocker is not None else ""
-        busy_text = "Роль сейчас занята. Попробуй чуть позже."
-        if blocker_preview:
-            busy_text += f"\nТекущая задача: {blocker_preview}"
-        return RoleRequestResult(
-            response_text=busy_text,
-            group_role=group_role,
-            model_override=model_override,
-            recovery=None,
+    while True:
+        acquire = status_service.acquire_busy(
             team_role_id=int(team_role_id),
-            busy_request_id=None,
-            busy_acquired=False,
+            busy_request_id=busy_request_id,
+            busy_owner_user_id=user_id,
+            busy_origin="group",
+            preview_text=effective_user_text,
+            preview_source="user",
         )
+        if acquire.acquired:
+            break
+        if not wait_until_available:
+            blocker = acquire.blockers[0] if acquire.blockers else None
+            blocker_preview = (blocker.preview_text or "").strip() if blocker is not None else ""
+            busy_text = "Роль сейчас занята. Попробуй чуть позже."
+            if blocker_preview:
+                busy_text += f"\nТекущая задача: {blocker_preview}"
+            return RoleRequestResult(
+                response_text=busy_text,
+                group_role=group_role,
+                model_override=model_override,
+                recovery=None,
+                team_role_id=int(team_role_id),
+                busy_request_id=None,
+                busy_acquired=False,
+            )
+        logger.info(
+            "role_queue_wait team_role_id=%s request_id=%s reason=runtime_busy_blocker",
+            int(team_role_id),
+            queue_request_id or busy_request_id,
+        )
+        await asyncio.sleep(0.5)
+        status_service.cleanup_stale()
     busy_acquired = True
 
     if storage.list_role_skills_for_team_role(team_role_id, enabled_only=True):
@@ -1200,6 +1212,8 @@ async def run_chain(
                 trigger_type=trigger_type,
                 mentioned_roles=mentioned_roles,
                 recipient=role_public_name(role) if group_role.mode != "orchestrator" else "orchestrator",
+                wait_until_available=True,
+                queue_request_id=queue_request_id,
             )
             group_role = result.group_role
             model_override = result.model_override
