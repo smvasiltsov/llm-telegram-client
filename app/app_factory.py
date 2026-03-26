@@ -23,6 +23,7 @@ from app.plugins import load_plugins
 from app.roles_registry import seed_roles
 from app.runtime import RuntimeContext
 from app.security import TokenCipher
+from app.services.role_dispatch_queue import RoleDispatchQueueService
 from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.session_resolver import SessionResolver
 from app.skills import SkillRegistry, SkillService
@@ -104,6 +105,7 @@ def build_runtime(
         storage,
         free_transition_delay_sec=config.free_transition_delay_sec,
     )
+    role_dispatch_queue_service = RoleDispatchQueueService()
 
     pending_store = PendingStore(config.database_path)
     pending_user_fields = PendingUserFieldStore(config.database_path)
@@ -177,6 +179,7 @@ def build_runtime(
         llm_executor=llm_executor,
         session_resolver=session_resolver,
         role_runtime_status_service=role_runtime_status_service,
+        role_dispatch_queue_service=role_dispatch_queue_service,
         pending_store=pending_store,
         message_buffer=message_buffer,
         private_buffer=private_buffer,

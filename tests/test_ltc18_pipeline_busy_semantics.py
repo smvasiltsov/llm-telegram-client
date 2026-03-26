@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 import unittest
@@ -92,6 +93,34 @@ class _FakeLLMExecutor:
 
     def provider_id_for_model(self, model_override: str | None) -> str:
         return "provider"
+
+
+class _DelayedFakeLLMExecutor(_FakeLLMExecutor):
+    def __init__(self, responses: list[str], *, first_delay_sec: float) -> None:
+        super().__init__(responses)
+        self._first_delay_sec = first_delay_sec
+        self._calls = 0
+
+    async def send_with_retries(
+        self,
+        session_id: str,
+        session_token: str,
+        content: str,
+        role,
+        model_override: str | None = None,
+        retries: int = 2,
+    ) -> str:
+        self._calls += 1
+        if self._calls == 1:
+            await asyncio.sleep(self._first_delay_sec)
+        return await super().send_with_retries(
+            session_id=session_id,
+            session_token=session_token,
+            content=content,
+            role=role,
+            model_override=model_override,
+            retries=retries,
+        )
 
 
 class _FakeBot:
@@ -305,7 +334,7 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
     async def test_run_chain_honors_free_transition_delay(self) -> None:
         with TemporaryDirectory() as td:
             storage = Storage(Path(td) / "busy_delay.sqlite3")
-            status_service = RoleRuntimeStatusService(storage, free_transition_delay_sec=120)
+            status_service = RoleRuntimeStatusService(storage, free_transition_delay_sec=1)
             group = storage.upsert_group(-3001, "g")
             role = storage.upsert_role(
                 role_name="busy_delay_role",
@@ -393,28 +422,93 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
                 save_pending_on_unauthorized=True,
             )
             self.assertFalse(second.had_error)
-            joined = "\n".join(bot.sent)
-            self.assertIn("Роль сейчас занята", joined)
-
-            finalized = status_service.finalize_due_releases(now="2999-01-01T00:00:00+00:00")
-            self.assertEqual(finalized, 1)
-            third = await run_chain(
-                context=context,
-                team_id=group.team_id or 0,
-                chat_id=1,
-                user_id=42,
-                session_token="token",
-                roles=[role],
-                user_text="third",
-                reply_text=None,
-                actor_username="user",
-                reply_to_message_id=12,
-                is_all=False,
-                apply_plugins=False,
-                save_pending_on_unauthorized=True,
-            )
-            self.assertFalse(third.had_error)
             self.assertTrue(any("done-2" in item for item in bot.sent))
+
+    async def test_run_chain_queues_same_role_requests_fifo_with_wait_dispatch_logs(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "busy_queue.sqlite3")
+            status_service = RoleRuntimeStatusService(storage, free_transition_delay_sec=0)
+            group = storage.upsert_group(-4001, "g")
+            role = storage.upsert_role(
+                role_name="busy_queue_role",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            catalog_dir = Path(td) / "roles_catalog"
+            catalog_dir.mkdir(parents=True, exist_ok=True)
+            (catalog_dir / "busy_queue_role.json").write_text(
+                json.dumps(
+                    {
+                        "role_name": "busy_queue_role",
+                        "description": "d",
+                        "base_system_prompt": "sp",
+                        "extra_instruction": "ei",
+                        "llm_model": None,
+                        "is_active": True,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            role_catalog = RoleCatalog.load(catalog_dir)
+            storage.attach_role_catalog(role_catalog)
+
+            runtime = SimpleNamespace(
+                storage=storage,
+                provider_registry={},
+                provider_models=[_FakeModel()],
+                provider_model_map={"provider:model": _FakeModel()},
+                llm_executor=_DelayedFakeLLMExecutor(["done-1", "done-2"], first_delay_sec=0.35),
+                session_resolver=_FakeSessionResolver(),
+                prepost_processing_registry=PrePostProcessingRegistry(),
+                skills_service=SkillService(SkillRegistry()),
+                default_provider_id="provider",
+                pending_store=SimpleNamespace(save=lambda *a, **k: None),
+                role_runtime_status_service=status_service,
+                allow_raw_html=True,
+                formatting_mode="html",
+                role_catalog=role_catalog,
+            )
+            bot = _FakeBot()
+            context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=bot)
+
+            async def _invoke(user_text: str, reply_to_message_id: int):
+                return await run_chain(
+                    context=context,
+                    team_id=group.team_id or 0,
+                    chat_id=1,
+                    user_id=42,
+                    session_token="token",
+                    roles=[role],
+                    user_text=user_text,
+                    reply_text=None,
+                    actor_username="user",
+                    reply_to_message_id=reply_to_message_id,
+                    is_all=False,
+                    apply_plugins=False,
+                    save_pending_on_unauthorized=True,
+                )
+
+            with self.assertLogs("bot", level="INFO") as logs:
+                t1 = asyncio.create_task(_invoke("first", 10))
+                await asyncio.sleep(0.05)
+                t2 = asyncio.create_task(_invoke("second", 11))
+                r1, r2 = await asyncio.gather(t1, t2)
+
+            self.assertFalse(r1.had_error)
+            self.assertFalse(r2.had_error)
+            joined_sent = "\n".join(bot.sent)
+            self.assertIn("done-1", joined_sent)
+            self.assertIn("done-2", joined_sent)
+            self.assertNotIn("Роль сейчас занята", joined_sent)
+
+            joined_logs = "\n".join(logs.output)
+            self.assertIn("role_queue_wait", joined_logs)
+            self.assertIn("role_queue_dispatch", joined_logs)
 
 
 if __name__ == "__main__":

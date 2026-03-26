@@ -16,6 +16,7 @@ from app.plugins import PluginManager
 from app.prepost_processing.registry import PrePostProcessingRegistry
 from app.role_catalog import RoleCatalog
 from app.security import TokenCipher
+from app.services.role_dispatch_queue import RoleDispatchQueueService
 from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.session_resolver import SessionResolver
 from app.skills.registry import SkillRegistry
@@ -33,6 +34,7 @@ class RuntimeContext:
     llm_executor: LLMExecutor
     session_resolver: SessionResolver
     role_runtime_status_service: RoleRuntimeStatusService
+    role_dispatch_queue_service: RoleDispatchQueueService
     pending_store: PendingStore
     message_buffer: MessageBuffer
     private_buffer: MessageBuffer

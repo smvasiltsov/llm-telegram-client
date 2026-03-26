@@ -27,6 +27,7 @@ from app.services.orchestrator_response import parse_orchestrator_response
 from app.services.formatting import format_with_header, format_with_header_raw, render_llm_text, send_formatted_with_fallback
 from app.services.plugin_pipeline import build_plugin_reply_markup
 from app.services.prompt_builder import build_llm_payload_json, resolve_provider_model, role_requires_auth
+from app.services.role_dispatch_queue import RoleDispatchQueueService
 from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.services.skill_calling_loop import SkillCallingLoop, SkillStepSendResult
 from app.session_resolver import SessionResolver
@@ -149,6 +150,47 @@ def _runtime_status_service(context: ContextTypes.DEFAULT_TYPE) -> RoleRuntimeSt
     )
     setattr(runtime, "role_runtime_status_service", service)
     return service
+
+
+def _runtime_dispatch_queue_service(context: ContextTypes.DEFAULT_TYPE) -> RoleDispatchQueueService:
+    runtime = _runtime(context)
+    service = getattr(runtime, "role_dispatch_queue_service", None)
+    if isinstance(service, RoleDispatchQueueService):
+        return service
+    service = RoleDispatchQueueService()
+    setattr(runtime, "role_dispatch_queue_service", service)
+    return service
+
+
+async def _wait_until_team_role_is_free(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    team_role_id: int,
+    request_id: str,
+    poll_interval_sec: float = 0.5,
+) -> None:
+    status_service = _runtime_status_service(context)
+    wait_logged = False
+    while True:
+        status_service.cleanup_stale()
+        status = status_service.get_status(team_role_id=team_role_id)
+        if status.status == "free":
+            if wait_logged:
+                logger.info(
+                    "role_queue_dispatch team_role_id=%s request_id=%s",
+                    team_role_id,
+                    request_id,
+                )
+            return
+        if not wait_logged:
+            logger.info(
+                "role_queue_wait team_role_id=%s request_id=%s busy_status=%s",
+                team_role_id,
+                request_id,
+                status.status,
+            )
+            wait_logged = True
+        await asyncio.sleep(poll_interval_sec)
 
 
 def _release_busy_for_role(
@@ -1108,7 +1150,37 @@ async def run_chain(
     had_error = False
     completed_roles = 0
     for role in roles:
+        queue_request_id = uuid4().hex
+        queue_team_role_id = storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
+        slot_acquired = False
         try:
+            if queue_team_role_id is None:
+                raise ValueError(f"Team role not found for queue: team_id={team_id} role_id={role.role_id}")
+            queue_service = _runtime_dispatch_queue_service(context)
+            queue_grant = await queue_service.acquire_execution_slot(
+                team_role_id=int(queue_team_role_id),
+                request_id=queue_request_id,
+            )
+            slot_acquired = True
+            if queue_grant.queued:
+                logger.info(
+                    "role_queue_wait team_role_id=%s request_id=%s queue_position=%s reason=fifo_wait",
+                    int(queue_team_role_id),
+                    queue_request_id,
+                    queue_grant.queue_position,
+                )
+                logger.info(
+                    "role_queue_dispatch team_role_id=%s request_id=%s wait_ms=%s reason=fifo_slot_granted",
+                    int(queue_team_role_id),
+                    queue_request_id,
+                    queue_grant.wait_ms,
+                )
+            await _wait_until_team_role_is_free(
+                context=context,
+                team_role_id=int(queue_team_role_id),
+                request_id=queue_request_id,
+            )
+
             group_role = storage.get_team_role(team_id, role.role_id)
             if group_role.mode == "orchestrator":
                 trigger_type = trigger_type_orchestrator
@@ -1237,6 +1309,18 @@ async def run_chain(
             logger.exception("response delivery failed user_id=%s role=%s", user_id, role.role_name)
             had_error = True
             continue
+        finally:
+            if slot_acquired and queue_team_role_id is not None:
+                released = await _runtime_dispatch_queue_service(context).release_execution_slot(
+                    team_role_id=int(queue_team_role_id),
+                    request_id=queue_request_id,
+                )
+                if not released:
+                    logger.warning(
+                        "role_queue_release_miss team_role_id=%s request_id=%s",
+                        int(queue_team_role_id),
+                        queue_request_id,
+                    )
         chain_context = ChainContext.create(
             origin=chain_origin,
             reply_to_message_id=reply_to_message_id,
