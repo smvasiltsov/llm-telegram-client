@@ -392,3 +392,125 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(ctx.exception.provider_id, "skills")
             self.assertEqual(ctx.exception.field.key, "root_dir")
+
+    async def test_skills_to_llm_delay_applies_after_executed_skill_step(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1101, "g")
+            role = storage.upsert_role(
+                role_name="skill_role_delay",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            storage.upsert_role_skill(group.group_id, role.role_id, "echo.skill", enabled=True, config={})
+
+            registry = SkillRegistry()
+            registry.register(EchoSkill())
+            service = SkillService(registry)
+            executor = FakeLLMExecutor(
+                responses=[
+                    json.dumps(
+                        {
+                            "type": "skill_call",
+                            "skill_call": {"skill_id": "echo.skill", "arguments": {"text": "hello"}},
+                        }
+                    ),
+                    json.dumps({"type": "final_answer", "answer": {"text": "done"}}),
+                ]
+            )
+            loop = SkillCallingLoop(
+                storage=storage,
+                llm_executor=executor,
+                session_resolver=FakeSessionResolver(),
+                skills_service=service,
+                provider_models=[FakeModel(full_id="provider:model")],
+                provider_model_map={"provider:model": FakeModel(full_id="provider:model")},
+                provider_registry={},
+                skills_to_llm_delay_sec=2,
+            )
+
+            sleep_calls: list[float] = []
+
+            async def _fake_sleep(value: float) -> None:
+                sleep_calls.append(float(value))
+
+            loop._sleep_for_skills_to_llm_delay = _fake_sleep  # type: ignore[method-assign]
+            result = await loop.run(
+                team_id=group.team_id,
+                user_id=42,
+                role=role,
+                session_token="token",
+                user_text="say hello",
+                reply_text=None,
+                actor_username="user",
+                trigger_type="mention_role",
+                mentioned_roles=["skill_role_delay"],
+                recipient="skill_role_delay",
+            )
+
+            self.assertEqual(result.status, "final_answer")
+            self.assertEqual(sleep_calls, [2.0])
+
+    async def test_skills_to_llm_delay_not_applied_without_executed_skill(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1102, "g")
+            role = storage.upsert_role(
+                role_name="skill_role_no_delay",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+
+            registry = SkillRegistry()
+            service = SkillService(registry)
+            executor = FakeLLMExecutor(
+                responses=[
+                    json.dumps(
+                        {
+                            "type": "skill_call",
+                            "skill_call": {"skill_id": "missing.skill", "arguments": {"text": "loop"}},
+                        }
+                    ),
+                    json.dumps({"type": "final_answer", "answer": {"text": "done"}}),
+                ]
+            )
+            loop = SkillCallingLoop(
+                storage=storage,
+                llm_executor=executor,
+                session_resolver=FakeSessionResolver(),
+                skills_service=service,
+                provider_models=[FakeModel(full_id="provider:model")],
+                provider_model_map={"provider:model": FakeModel(full_id="provider:model")},
+                provider_registry={},
+                skills_to_llm_delay_sec=3,
+            )
+
+            sleep_calls: list[float] = []
+
+            async def _fake_sleep(value: float) -> None:
+                sleep_calls.append(float(value))
+
+            loop._sleep_for_skills_to_llm_delay = _fake_sleep  # type: ignore[method-assign]
+            result = await loop.run(
+                team_id=group.team_id,
+                user_id=42,
+                role=role,
+                session_token="token",
+                user_text="say hello",
+                reply_text=None,
+                actor_username="user",
+                trigger_type="mention_role",
+                mentioned_roles=["skill_role_no_delay"],
+                recipient="skill_role_no_delay",
+            )
+
+            self.assertEqual(result.status, "final_answer")
+            self.assertEqual(sleep_calls, [])

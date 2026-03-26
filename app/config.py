@@ -37,6 +37,7 @@ DEFAULT_INTERFACE_MODULES_DIR = "app.interfaces"
 DEFAULT_INTERFACE_RUNTIME_MODE = "single"
 ALLOWED_INTERFACE_RUNTIME_MODES = {"single"}
 DEFAULT_FREE_TRANSITION_DELAY_SEC = 0
+DEFAULT_SKILLS_TO_LLM_DELAY_SEC = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,7 @@ class AppConfig:
     interface_modules_dir: str
     interface_runtime_mode: str
     free_transition_delay_sec: int
+    skills_to_llm_delay_sec: int
 
 
 def load_dotenv(path: str | Path) -> dict[str, str]:
@@ -165,4 +167,5 @@ def load_config(path: str | Path) -> AppConfig:
         or DEFAULT_INTERFACE_MODULES_DIR,
         interface_runtime_mode=interface_runtime_mode,
         free_transition_delay_sec=max(0, int(runtime_status_raw.get("free_transition_delay_sec", DEFAULT_FREE_TRANSITION_DELAY_SEC))),
+        skills_to_llm_delay_sec=max(0, int(runtime_status_raw.get("skills_to_llm_delay_sec", DEFAULT_SKILLS_TO_LLM_DELAY_SEC))),
     )

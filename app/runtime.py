@@ -74,6 +74,7 @@ class RuntimeContext:
     interface_modules_dir: str
     interface_runtime_mode: str
     free_transition_delay_sec: int
+    skills_to_llm_delay_sec: int
     role_catalog: RoleCatalog
 
     def to_bot_data(self) -> dict[str, Any]:

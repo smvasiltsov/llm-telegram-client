@@ -221,5 +221,6 @@ def build_runtime(
         interface_modules_dir=config.interface_modules_dir,
         interface_runtime_mode=config.interface_runtime_mode,
         free_transition_delay_sec=config.free_transition_delay_sec,
+        skills_to_llm_delay_sec=config.skills_to_llm_delay_sec,
         role_catalog=role_catalog,
     )

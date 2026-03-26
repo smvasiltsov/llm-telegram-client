@@ -72,6 +72,7 @@ class SkillCallingLoop:
         skills_usage_prompt: str = "",
         default_max_steps: int = DEFAULT_MAX_SKILL_STEPS,
         followup_mode: str = "full",
+        skills_to_llm_delay_sec: int = 0,
     ) -> None:
         self._storage = storage
         self._llm_executor = llm_executor
@@ -86,6 +87,7 @@ class SkillCallingLoop:
         if normalized_followup_mode not in ALLOWED_FOLLOWUP_MODES:
             normalized_followup_mode = "full"
         self._followup_mode = normalized_followup_mode
+        self._skills_to_llm_delay_sec = max(0, int(skills_to_llm_delay_sec))
 
     async def run(
         self,
@@ -252,6 +254,12 @@ class SkillCallingLoop:
             if on_skill_progress is not None:
                 summary = execution.error_text if execution.error_text else json.dumps(execution.output, ensure_ascii=False)
                 on_skill_progress(f"{execution.skill_id}: {summary}")
+            if (
+                self._skills_to_llm_delay_sec > 0
+                and step_index + 1 < step_limit
+                and self._is_executed_skill_step(execution)
+            ):
+                await self._sleep_for_skills_to_llm_delay(float(self._skills_to_llm_delay_sec))
 
         return SkillLoopResult(
             status="max_steps",
@@ -593,3 +601,10 @@ class SkillCallingLoop:
             ensure_ascii=False,
             sort_keys=True,
         )
+
+    @staticmethod
+    def _is_executed_skill_step(execution: SkillExecutionRecord) -> bool:
+        return execution.status in {"ok", "error", "timeout", "exception", "invalid_result"}
+
+    async def _sleep_for_skills_to_llm_delay(self, seconds: float) -> None:
+        await asyncio.sleep(seconds)
