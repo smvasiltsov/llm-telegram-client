@@ -34,6 +34,38 @@ def _resolve_team_id_for_chat(storage: Storage, chat_id: int) -> int:
     return storage.upsert_telegram_team_binding(chat_id, None, is_active=True)
 
 
+def _set_provider_user_field_from_pending_state(storage: Storage, state: dict[str, object], value: str) -> None:
+    provider_id = str(state["provider_id"])
+    key = str(state["key"])
+    role_id = state.get("role_id")
+    if isinstance(role_id, int):
+        team_id = state.get("team_id")
+        if not isinstance(team_id, int):
+            raise ValueError("pending role-scoped field has no team_id")
+        team_role_id = storage.resolve_team_role_id(team_id, role_id, ensure_exists=True)
+        if team_role_id is None:
+            raise ValueError(f"team_role_id not found for team_id={team_id} role_id={role_id}")
+        storage.set_provider_user_value_by_team_role(provider_id, key, int(team_role_id), value)
+        return
+    storage.set_provider_user_value(provider_id, key, None, value)
+
+
+def _delete_provider_user_field_from_pending_state(storage: Storage, state: dict[str, object]) -> None:
+    provider_id = str(state["provider_id"])
+    key = str(state["key"])
+    role_id = state.get("role_id")
+    if isinstance(role_id, int):
+        team_id = state.get("team_id")
+        if not isinstance(team_id, int):
+            return
+        team_role_id = storage.resolve_team_role_id(team_id, role_id)
+        if team_role_id is None:
+            return
+        storage.delete_provider_user_value_by_team_role(provider_id, key, int(team_role_id))
+        return
+    storage.delete_provider_user_value(provider_id, key, None)
+
+
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -152,16 +184,37 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             if ";" in value:
                 value = value.split(";", 1)[0].strip()
         pending_fields.delete(user.id)
-        storage.set_provider_user_value(state["provider_id"], state["key"], state["role_id"], value)
+        try:
+            _set_provider_user_field_from_pending_state(storage, state, value)
+        except Exception:
+            logger.exception(
+                "failed to save pending user field user_id=%s provider=%s key=%s role_id=%s team_id=%s",
+                user.id,
+                state.get("provider_id"),
+                state.get("key"),
+                state.get("role_id"),
+                state.get("team_id"),
+            )
+            pending_fields.save(
+                telegram_user_id=user.id,
+                provider_id=str(state["provider_id"]),
+                key=str(state["key"]),
+                role_id=state["role_id"] if isinstance(state["role_id"], int) or state["role_id"] is None else None,
+                prompt=str(state.get("prompt") or "Введите значение ещё раз."),
+                chat_id=int(state.get("chat_id", user.id)),
+                team_id=int(state["team_id"]) if state.get("team_id") is not None else None,
+            )
+            await update.message.reply_text("Не удалось сохранить значение. Попробуй ещё раз.")
+            return
         await update.message.reply_text("Проверяю значение и пытаюсь ответить на сообщение из группы.")
         processed = await _process_pending_message_for_user(user.id, context)
         if processed:
             return
         if pending_fields.get(user.id):
-            storage.delete_provider_user_value(state["provider_id"], state["key"], state["role_id"])
+            _delete_provider_user_field_from_pending_state(storage, state)
             return
         pending_msg = _runtime(context).pending_store.peek(user.id)
-        storage.delete_provider_user_value(state["provider_id"], state["key"], state["role_id"])
+        _delete_provider_user_field_from_pending_state(storage, state)
         if not pending_msg:
             pending_fields.delete(user.id)
             await update.message.reply_text(

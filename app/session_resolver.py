@@ -101,6 +101,7 @@ class SessionResolver:
                 "team_id": str(team_id),
             },
             role_id=role.role_id,
+            team_role_id=int(team_role_id),
             model_override=model_override,
         )
         team = self._storage.get_team(team_id)
@@ -113,6 +114,7 @@ class SessionResolver:
                     session_token,
                     chat_name,
                     role_id=role.role_id,
+                    team_role_id=int(team_role_id),
                     model_override=model_override,
                 )
             except Exception:
@@ -130,6 +132,7 @@ class SessionResolver:
                     content=system_prompt,
                     model_override=model_override or team_role.model_override or role.llm_model,
                     role_id=role.role_id,
+                    team_role_id=int(team_role_id),
                 )
             except httpx.HTTPStatusError as exc:
                 status = exc.response.status_code if exc.response is not None else None

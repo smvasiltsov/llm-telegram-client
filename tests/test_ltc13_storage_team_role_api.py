@@ -78,6 +78,48 @@ class LTC13StorageTeamRoleApiTests(unittest.TestCase):
             self.assertTrue(rebound.is_active)
             self.assertTrue(rebound.enabled)
 
+    def test_provider_role_scoped_values_are_team_role_scoped_with_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "test.sqlite3"
+            storage = Storage(db_path)
+
+            g1 = storage.upsert_group(-1115, "g1")
+            g2 = storage.upsert_group(-1116, "g2")
+            role = storage.upsert_role(
+                role_name="dev_team_role_scope_api",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            tr1 = storage.ensure_team_role(g1.team_id or 0, role.role_id)
+            tr2 = storage.ensure_team_role(g2.team_id or 0, role.role_id)
+            self.assertIsNotNone(tr1.team_role_id)
+            self.assertIsNotNone(tr2.team_role_id)
+            tr1_id = int(tr1.team_role_id or 0)
+            tr2_id = int(tr2.team_role_id or 0)
+
+            storage.set_provider_user_value_by_team_role("provider", "working_dir", tr1_id, "/team1")
+            self.assertEqual(
+                storage.get_provider_user_value_by_team_role("provider", "working_dir", tr1_id),
+                "/team1",
+            )
+            self.assertIsNone(
+                storage.get_provider_user_value_by_team_role("provider", "working_dir", tr2_id),
+            )
+
+            storage.set_provider_user_value("provider", "working_dir", role.role_id, "/legacy")
+            self.assertEqual(
+                storage.get_provider_user_value_by_team_role_or_role(
+                    "provider",
+                    "working_dir",
+                    team_role_id=tr2_id,
+                    role_id=role.role_id,
+                ),
+                "/legacy",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

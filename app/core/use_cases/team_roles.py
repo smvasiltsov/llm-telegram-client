@@ -147,5 +147,5 @@ def reset_team_role_session(runtime: Any, storage: Storage, *, group_id: int, ro
     if provider:
         for field in provider.user_fields.values():
             if field.scope == "role":
-                storage.delete_provider_user_value(provider_id, field.key, role_id)
+                storage.delete_provider_user_value_by_team_role(provider_id, field.key, team_role_id)
     return state.public_name

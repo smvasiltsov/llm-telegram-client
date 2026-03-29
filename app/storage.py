@@ -83,6 +83,9 @@ class Storage:
     def has_provider_user_data_role_name(self) -> bool:
         return self._table_has_column("provider_user_data", "role_name")
 
+    def has_provider_user_data_team_role_table(self) -> bool:
+        return self._table_exists("provider_user_data_team_role")
+
     def has_legacy_roles_table(self) -> bool:
         return self._table_exists("roles")
 
@@ -214,6 +217,20 @@ class Storage:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (provider_id, key, role_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS provider_user_data_team_role (
+                provider_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                team_role_id INTEGER NOT NULL,
+                value TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider_id, key, team_role_id),
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
             )
             """
         )
@@ -376,6 +393,12 @@ class Storage:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_chain_step ON skill_runs(chain_id, step_index, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_created ON skill_runs(skill_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_status ON team_role_runtime_status(status)")
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_user_data_team_role_lookup
+            ON provider_user_data_team_role(provider_id, key, team_role_id, updated_at)
+            """
+        )
         self._create_index_if_column_exists(
             index_name="idx_team_role_runtime_status_lease",
             table="team_role_runtime_status",
@@ -405,8 +428,63 @@ class Storage:
         self._migrate_to_team_only_schema()
         self._migrate_team_role_surrogate_additive()
         self._migrate_role_name_bindings_additive()
+        self._migrate_provider_user_data_team_role_additive()
         self._migrate_role_runtime_status_additive()
         self._ensure_column("team_roles", "extra_instruction_override", "extra_instruction_override TEXT")
+        self._conn.commit()
+
+    def _migrate_provider_user_data_team_role_additive(self) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS provider_user_data_team_role (
+                provider_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                team_role_id INTEGER NOT NULL,
+                value TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider_id, key, team_role_id),
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_user_data_team_role_lookup
+            ON provider_user_data_team_role(provider_id, key, team_role_id, updated_at)
+            """
+        )
+        # Best-effort backfill from legacy role-scoped storage to team-role scoped storage.
+        # On conflict, keep the value with the most recent updated_at.
+        cur.execute(
+            """
+            INSERT INTO provider_user_data_team_role (
+                provider_id,
+                key,
+                team_role_id,
+                value,
+                created_at,
+                updated_at
+            )
+            SELECT
+                pud.provider_id,
+                pud.key,
+                tr.team_role_id,
+                pud.value,
+                pud.created_at,
+                pud.updated_at
+            FROM provider_user_data pud
+            JOIN team_roles tr ON tr.role_id = pud.role_id
+            WHERE pud.role_id IS NOT NULL
+              AND tr.team_role_id IS NOT NULL
+            ON CONFLICT(provider_id, key, team_role_id) DO UPDATE SET
+                value = excluded.value,
+                created_at = excluded.created_at,
+                updated_at = excluded.updated_at
+            WHERE excluded.updated_at > provider_user_data_team_role.updated_at
+            """
+        )
         self._conn.commit()
 
     def _migrate_role_runtime_status_additive(self) -> None:
@@ -1568,6 +1646,38 @@ class Storage:
         row = cur.fetchone()
         return str(row["value"]) if row else None
 
+    def get_provider_user_value_by_team_role(
+        self,
+        provider_id: str,
+        key: str,
+        team_role_id: int,
+    ) -> str | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT value
+            FROM provider_user_data_team_role
+            WHERE provider_id = ? AND key = ? AND team_role_id = ?
+            """,
+            (provider_id, key, int(team_role_id)),
+        )
+        row = cur.fetchone()
+        return str(row["value"]) if row else None
+
+    def get_provider_user_value_by_team_role_or_role(
+        self,
+        provider_id: str,
+        key: str,
+        *,
+        team_role_id: int | None,
+        role_id: int | None,
+    ) -> str | None:
+        if team_role_id is not None:
+            value = self.get_provider_user_value_by_team_role(provider_id, key, int(team_role_id))
+            if value is not None:
+                return value
+        return self.get_provider_user_value(provider_id, key, role_id)
+
     def set_provider_user_value(self, provider_id: str, key: str, role_id: int | None, value: str) -> None:
         now = _utc_now()
         cur = self._conn.cursor()
@@ -1591,6 +1701,38 @@ class Storage:
             WHERE provider_id = ? AND key = ? AND role_id IS ?
             """,
             (provider_id, key, role_id),
+        )
+        self._conn.commit()
+
+    def set_provider_user_value_by_team_role(
+        self,
+        provider_id: str,
+        key: str,
+        team_role_id: int,
+        value: str,
+    ) -> None:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO provider_user_data_team_role (provider_id, key, team_role_id, value, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider_id, key, team_role_id) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+            """,
+            (provider_id, key, int(team_role_id), value, now, now),
+        )
+        self._conn.commit()
+
+    def delete_provider_user_value_by_team_role(self, provider_id: str, key: str, team_role_id: int) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM provider_user_data_team_role
+            WHERE provider_id = ? AND key = ? AND team_role_id = ?
+            """,
+            (provider_id, key, int(team_role_id)),
         )
         self._conn.commit()
 
@@ -3409,6 +3551,38 @@ class Storage:
             (telegram_user_id,),
         )
         return [row["session_id"] for row in cur.fetchall()]
+
+    def find_team_role_id_by_session_id(self, session_id: str) -> int | None:
+        cur = self._conn.cursor()
+        if self.has_session_team_role_id():
+            cur.execute(
+                """
+                SELECT team_role_id
+                FROM user_role_sessions
+                WHERE session_id = ? AND team_role_id IS NOT NULL
+                ORDER BY last_used_at DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            )
+            row = cur.fetchone()
+            if row and row["team_role_id"] is not None:
+                return int(row["team_role_id"])
+        cur.execute(
+            """
+            SELECT team_id, role_id
+            FROM user_role_sessions
+            WHERE session_id = ?
+            ORDER BY last_used_at DESC
+            LIMIT 1
+            """,
+            (session_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        team_role_id = self.resolve_team_role_id(int(row["team_id"]), int(row["role_id"]))
+        return int(team_role_id) if team_role_id is not None else None
 
     def upsert_role_prepost_processing(
         self,

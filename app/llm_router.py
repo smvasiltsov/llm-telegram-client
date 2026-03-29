@@ -91,12 +91,13 @@ class LLMRouter:
         session_token: str,
         metadata: dict[str, str] | None = None,
         role_id: int | None = None,
+        team_role_id: int | None = None,
         model_override: str | None = None,
     ) -> str:
         provider_id, _ = self._split_model(model_override)
         self._ensure_capability(provider_id, "create_session")
         provider = self._get_provider(provider_id)
-        return await self._create_session_generic(provider, role_id)
+        return await self._create_session_generic(provider, role_id, team_role_id)
 
     async def rename_session(
         self,
@@ -104,12 +105,13 @@ class LLMRouter:
         session_token: str,
         name: str,
         role_id: int | None = None,
+        team_role_id: int | None = None,
         model_override: str | None = None,
     ) -> None:
         provider_id, _ = self._split_model(model_override)
         self._ensure_capability(provider_id, "rename_session")
         provider = self._get_provider(provider_id)
-        await self._rename_session_generic(provider, session_id, name, role_id)
+        await self._rename_session_generic(provider, session_id, name, role_id, team_role_id)
 
     async def send_message(
         self,
@@ -118,6 +120,7 @@ class LLMRouter:
         content: str,
         model_override: str | None = None,
         role_id: int | None = None,
+        team_role_id: int | None = None,
     ) -> str:
         provider_id, model_id = self._split_model(model_override)
         provider = self._get_provider(provider_id)
@@ -126,7 +129,20 @@ class LLMRouter:
         if not provider.capabilities.get("model_select", False):
             model_id = None
         client = self._get_client(provider_id)
-        response_text = await self._send_generic(provider, client, session_id, content, model_id, role_id)
+        effective_team_role_id = (
+            int(team_role_id)
+            if team_role_id is not None
+            else self._storage.find_team_role_id_by_session_id(session_id)
+        )
+        response_text = await self._send_generic(
+            provider,
+            client,
+            session_id,
+            content,
+            model_id,
+            role_id,
+            effective_team_role_id,
+        )
         self._storage.add_conversation_message(session_id, "user", content)
         self._storage.add_conversation_message(session_id, "assistant", response_text)
         return response_text
@@ -137,11 +153,12 @@ class LLMRouter:
         context: dict[str, Any],
         provider: ProviderConfig,
         role_id: int | None,
+        team_role_id: int | None,
     ) -> Any:
         if isinstance(value, str):
             if value.startswith("[[[") and value.endswith("]]]"):
                 key = value[3:-3].strip()
-                return self._resolve_user_field(provider, key, role_id)
+                return self._resolve_user_field(provider, key, role_id, team_role_id)
             if value.startswith("{{") and value.endswith("}}"):
                 key = value[2:-2].strip()
                 if key in context:
@@ -149,16 +166,16 @@ class LLMRouter:
             result = value
             if "[[[" in result:
                 for key in re.findall(r"\[\[\[(.+?)\]\]\]", result):
-                    replacement = self._resolve_user_field(provider, key.strip(), role_id)
+                    replacement = self._resolve_user_field(provider, key.strip(), role_id, team_role_id)
                     result = result.replace(f"[[[{key}]]]", replacement)
             for key, ctx_value in context.items():
                 if isinstance(ctx_value, (str, int, float)):
                     result = result.replace(f"{{{{{key}}}}}", str(ctx_value))
             return result
         if isinstance(value, list):
-            return [self._render_template(item, context, provider, role_id) for item in value]
+            return [self._render_template(item, context, provider, role_id, team_role_id) for item in value]
         if isinstance(value, dict):
-            return {k: self._render_template(v, context, provider, role_id) for k, v in value.items()}
+            return {k: self._render_template(v, context, provider, role_id, team_role_id) for k, v in value.items()}
         return value
 
     def _redact(self, value: Any) -> Any:
@@ -193,16 +210,34 @@ class LLMRouter:
                 return None
         return current
 
-    def _resolve_user_field(self, provider: ProviderConfig, key: str, role_id: int | None) -> str:
+    def _resolve_user_field(
+        self,
+        provider: ProviderConfig,
+        key: str,
+        role_id: int | None,
+        team_role_id: int | None,
+    ) -> str:
         field = provider.user_fields.get(key)
         if not field:
             raise ValueError(f"Unknown user field '{key}' for provider {provider.provider_id}")
-        scoped_role_id = None if field.scope == "provider" else role_id
-        if field.scope == "role" and scoped_role_id is None:
+        if field.scope == "provider":
+            scoped_role_id: int | None = None
+            value = self._storage.get_provider_user_value(provider.provider_id, key, scoped_role_id)
+            if value is None:
+                raise MissingUserField(provider.provider_id, field, scoped_role_id)
+            return value
+
+        scoped_role_id = role_id
+        if team_role_id is None and scoped_role_id is None:
             raise MissingUserField(provider.provider_id, field, role_id)
-        value = self._storage.get_provider_user_value(provider.provider_id, key, scoped_role_id)
+        value = self._storage.get_provider_user_value_by_team_role_or_role(
+            provider.provider_id,
+            key,
+            team_role_id=team_role_id,
+            role_id=scoped_role_id,
+        )
         if value is None:
-            raise MissingUserField(provider.provider_id, field, scoped_role_id)
+            raise MissingUserField(provider.provider_id, field, scoped_role_id if scoped_role_id is not None else role_id)
         return value
 
     def _safe_len(self, value: Any) -> int | None:
@@ -260,7 +295,7 @@ class LLMRouter:
         client = self._get_client(provider.provider_id)
         request_cfg = endpoint.get("request", {}) or {}
         headers_template = request_cfg.get("headers") or endpoint.get("headers")
-        headers = self._render_template(headers_template or {}, {}, provider, None)
+        headers = self._render_template(headers_template or {}, {}, provider, None, None)
         self._logger.info(
             "LLM generic list_sessions provider=%s method=%s path=%s headers=%s",
             provider.provider_id,
@@ -287,7 +322,12 @@ class LLMRouter:
                 result.append(str(value))
         return result
 
-    async def _create_session_generic(self, provider: ProviderConfig, role_id: int | None) -> str:
+    async def _create_session_generic(
+        self,
+        provider: ProviderConfig,
+        role_id: int | None,
+        team_role_id: int | None,
+    ) -> str:
         endpoint = provider.endpoints.get("create_session") or {}
         path = endpoint.get("path")
         if not path:
@@ -296,8 +336,8 @@ class LLMRouter:
         body_template = request_cfg.get("body_template") or endpoint.get("body")
         headers_template = request_cfg.get("headers") or endpoint.get("headers")
         client = self._get_client(provider.provider_id)
-        payload = self._render_template(body_template or {}, {}, provider, role_id)
-        headers = self._render_template(headers_template or {}, {}, provider, role_id)
+        payload = self._render_template(body_template or {}, {}, provider, role_id, team_role_id)
+        headers = self._render_template(headers_template or {}, {}, provider, role_id, team_role_id)
         self._logger.info(
             "LLM generic create_session provider=%s method=%s path=%s headers=%s payload=%s",
             provider.provider_id,
@@ -322,6 +362,7 @@ class LLMRouter:
         session_id: str,
         name: str,
         role_id: int | None,
+        team_role_id: int | None,
     ) -> None:
         endpoint = provider.endpoints.get("rename_session") or {}
         path = endpoint.get("path")
@@ -336,8 +377,15 @@ class LLMRouter:
             {"session_id": session_id, "name": name},
             provider,
             role_id,
+            team_role_id,
         )
-        headers = self._render_template(headers_template or {}, {"session_id": session_id, "name": name}, provider, role_id)
+        headers = self._render_template(
+            headers_template or {},
+            {"session_id": session_id, "name": name},
+            provider,
+            role_id,
+            team_role_id,
+        )
         self._logger.info(
             "LLM generic rename_session provider=%s method=%s path=%s headers=%s payload=%s",
             provider.provider_id,
@@ -362,6 +410,7 @@ class LLMRouter:
         content: str,
         model_id: str | None,
         role_id: int | None,
+        team_role_id: int | None,
     ) -> str:
         endpoint = provider.endpoints.get("send_message") or {}
         path = endpoint.get("path")
@@ -380,9 +429,9 @@ class LLMRouter:
         request_cfg = endpoint.get("request", {}) or {}
         body_template = request_cfg.get("body_template") or {}
         headers_template = request_cfg.get("headers") or endpoint.get("headers")
-        payload = self._render_template(body_template, context, provider, role_id)
+        payload = self._render_template(body_template, context, provider, role_id, team_role_id)
         method = endpoint.get("method", "POST")
-        headers = self._render_template(headers_template or {}, context, provider, role_id)
+        headers = self._render_template(headers_template or {}, context, provider, role_id, team_role_id)
         response_cfg = endpoint.get("response", {}) or {}
         request_start = time.monotonic()
         payload_chars = self._safe_len(payload)

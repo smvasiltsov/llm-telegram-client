@@ -1,7 +1,0 @@
-id: template.skill
-version: 0.1.0
-entrypoint: skill:create_skill
-enabled_by_default: false
-timeout_sec: 15
-permissions: []
-description: "Template skill for local development."

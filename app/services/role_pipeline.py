@@ -215,6 +215,28 @@ def _release_busy_for_role(
         )
 
 
+def _release_busy_for_role_immediate(
+    *,
+    context: ContextTypes.DEFAULT_TYPE,
+    team_id: int,
+    role_id: int,
+    release_reason: str,
+) -> None:
+    storage: Storage = _runtime(context).storage
+    team_role_id = storage.resolve_team_role_id(team_id, role_id)
+    if team_role_id is None:
+        return
+    try:
+        storage.mark_team_role_runtime_free(int(team_role_id), release_reason=release_reason)
+    except Exception:
+        logger.exception(
+            "busy immediate release failed team_id=%s role_id=%s reason=%s",
+            team_id,
+            role_id,
+            release_reason,
+        )
+
+
 def roles_require_auth(
     *,
     context: ContextTypes.DEFAULT_TYPE,
@@ -416,7 +438,7 @@ async def execute_role_request(
     recipient: str,
     llm_answer_text: str | None = None,
     llm_answer_role_name: str | None = None,
-    wait_until_available: bool = False,
+    wait_until_available: bool = True,
     queue_request_id: str | None = None,
 ) -> RoleRequestResult:
     runtime = _runtime(context)
@@ -486,19 +508,10 @@ async def execute_role_request(
         if acquire.acquired:
             break
         if not wait_until_available:
-            blocker = acquire.blockers[0] if acquire.blockers else None
-            blocker_preview = (blocker.preview_text or "").strip() if blocker is not None else ""
-            busy_text = "Роль сейчас занята. Попробуй чуть позже."
-            if blocker_preview:
-                busy_text += f"\nТекущая задача: {blocker_preview}"
-            return RoleRequestResult(
-                response_text=busy_text,
-                group_role=group_role,
-                model_override=model_override,
-                recovery=None,
-                team_role_id=int(team_role_id),
-                busy_request_id=None,
-                busy_acquired=False,
+            logger.warning(
+                "busy non-wait mode requested; forcing wait team_role_id=%s request_id=%s",
+                int(team_role_id),
+                queue_request_id or busy_request_id,
             )
         logger.info(
             "role_queue_wait team_role_id=%s request_id=%s reason=runtime_busy_blocker",
@@ -815,8 +828,38 @@ async def send_orchestrator_post_event(
     group_role = storage.get_team_role(team_id, orchestrator_role.role_id)
     if not group_role.enabled:
         return
+    queue_team_role_id = storage.resolve_team_role_id(team_id, orchestrator_role.role_id, ensure_exists=True)
+    if queue_team_role_id is None:
+        raise ValueError(f"Team role not found for queue: team_id={team_id} role_id={orchestrator_role.role_id}")
+    queue_request_id = uuid4().hex
+    queue_service = _runtime_dispatch_queue_service(context)
+    queue_grant = await queue_service.acquire_execution_slot(
+        team_role_id=int(queue_team_role_id),
+        request_id=queue_request_id,
+    )
+    slot_acquired = True
+    if queue_grant.queued:
+        logger.info(
+            "role_queue_wait team_role_id=%s request_id=%s queue_position=%s reason=fifo_wait",
+            int(queue_team_role_id),
+            queue_request_id,
+            queue_grant.queue_position,
+        )
+        logger.info(
+            "role_queue_dispatch team_role_id=%s request_id=%s wait_ms=%s reason=fifo_slot_granted",
+            int(queue_team_role_id),
+            queue_request_id,
+            queue_grant.wait_ms,
+        )
+
     result: RoleRequestResult | None = None
+    post_dispatch_response_text: str | None = None
     try:
+        await _wait_until_team_role_is_free(
+            context=context,
+            team_role_id=int(queue_team_role_id),
+            request_id=queue_request_id,
+        )
         result = await execute_role_request(
             context=context,
             team_id=team_id,
@@ -831,6 +874,8 @@ async def send_orchestrator_post_event(
             recipient="orchestrator",
             llm_answer_text=role_answer_text,
             llm_answer_role_name=answered_role_name,
+            wait_until_available=True,
+            queue_request_id=queue_request_id,
         )
         response_text = result.response_text
         if result.recovery is not None:
@@ -867,17 +912,25 @@ async def send_orchestrator_post_event(
                 release_reason="response_sent",
             )
         if chain_context is not None:
-            dispatcher = dispatch_mentions_fn or dispatch_mentions
-            await dispatcher(
-                context=context,
-                team_id=team_id,
-                chat_id=chat_id,
-                user_id=user_id,
-                session_token=session_token,
-                source_role=orchestrator_role,
-                source_response_text=response_text,
-                chain_context=chain_context,
-            )
+            post_dispatch_response_text = response_text
+    except MissingUserField as exc:
+        _release_busy_for_role_immediate(
+            context=context,
+            team_id=team_id,
+            role_id=orchestrator_role.role_id,
+            release_reason="missing_user_field",
+        )
+        await _handle_missing_user_field(
+            user_id=user_id,
+            chat_id=chat_id,
+            team_id=team_id,
+            message_id=reply_to_message_id,
+            role_name=role_public_name(orchestrator_role),
+            content=original_user_text,
+            reply_text=original_reply_text,
+            exc=exc,
+            context=context,
+        )
     except Exception:
         if result is not None and result.busy_acquired and result.team_role_id is not None:
             _runtime_status_service(context).release_busy(
@@ -896,6 +949,30 @@ async def send_orchestrator_post_event(
             chat_id,
             orchestrator_role.role_name,
             answered_role_name,
+        )
+    finally:
+        if slot_acquired:
+            released = await _runtime_dispatch_queue_service(context).release_execution_slot(
+                team_role_id=int(queue_team_role_id),
+                request_id=queue_request_id,
+            )
+            if not released:
+                logger.warning(
+                    "role_queue_release_miss team_role_id=%s request_id=%s",
+                    int(queue_team_role_id),
+                    queue_request_id,
+                )
+    if chain_context is not None and post_dispatch_response_text is not None:
+        dispatcher = dispatch_mentions_fn or dispatch_mentions
+        await dispatcher(
+            context=context,
+            team_id=team_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_token=session_token,
+            source_role=orchestrator_role,
+            source_response_text=post_dispatch_response_text,
+            chain_context=chain_context,
         )
 
 
@@ -1008,7 +1085,38 @@ async def dispatch_mentions(
                 role_public_name(target),
             )
             continue
+        queue_team_role_id = storage.resolve_team_role_id(team_id, target.role_id, ensure_exists=True)
+        if queue_team_role_id is None:
+            raise ValueError(f"Team role not found for queue: team_id={team_id} role_id={target.role_id}")
+        queue_request_id = uuid4().hex
+        queue_service = _runtime_dispatch_queue_service(context)
+        queue_grant = await queue_service.acquire_execution_slot(
+            team_role_id=int(queue_team_role_id),
+            request_id=queue_request_id,
+        )
+        slot_acquired = True
+        should_dispatch_followups = False
+        followup_response_text = ""
+        followup_next_context: ChainContext | None = None
+        if queue_grant.queued:
+            logger.info(
+                "role_queue_wait team_role_id=%s request_id=%s queue_position=%s reason=fifo_wait",
+                int(queue_team_role_id),
+                queue_request_id,
+                queue_grant.queue_position,
+            )
+            logger.info(
+                "role_queue_dispatch team_role_id=%s request_id=%s wait_ms=%s reason=fifo_slot_granted",
+                int(queue_team_role_id),
+                queue_request_id,
+                queue_grant.wait_ms,
+            )
         try:
+            await _wait_until_team_role_is_free(
+                context=context,
+                team_role_id=int(queue_team_role_id),
+                request_id=queue_request_id,
+            )
             logger.info(
                 "delegation sent chain_id=%s source_role=%s target_role=%s hop=%s",
                 chain_context.chain_id,
@@ -1028,6 +1136,8 @@ async def dispatch_mentions(
                 trigger_type="mention_role",
                 mentioned_roles=[role_public_name(target)],
                 recipient=role_public_name(target),
+                wait_until_available=True,
+                queue_request_id=queue_request_id,
             )
             response_text = result.response_text
             if result.group_role.mode == "orchestrator":
@@ -1049,40 +1159,15 @@ async def dispatch_mentions(
                     team_role_id=int(result.team_role_id),
                     release_reason="response_sent",
                 )
-            if orchestrator_role is not None:
-                next_context = chain_context.with_delegation(delegation_key).next_hop()
-                await send_orchestrator_post_event(
-                    context=context,
-                    team_id=team_id,
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    reply_to_message_id=chain_context.reply_to_message_id,
-                    actor_username=role_public_name(target),
-                    session_token=session_token,
-                    orchestrator_role=orchestrator_role,
-                    original_user_text=delegated_text,
-                    original_reply_text=None,
-                    answered_role_name=role_public_name(target),
-                    role_answer_text=response_text,
-                    chain_context=next_context,
-                    dispatch_mentions_fn=dispatch_mentions,
-                )
-            await dispatch_mentions(
-                context=context,
-                team_id=team_id,
-                chat_id=chat_id,
-                user_id=user_id,
-                session_token=session_token,
-                source_role=target,
-                source_response_text=response_text,
-                chain_context=chain_context.with_delegation(delegation_key).next_hop(),
-            )
+            should_dispatch_followups = True
+            followup_response_text = response_text
+            followup_next_context = chain_context.with_delegation(delegation_key).next_hop()
         except MissingUserField as exc:
-            _release_busy_for_role(
+            _release_busy_for_role_immediate(
                 context=context,
                 team_id=team_id,
                 role_id=target.role_id,
-                release_reason="llm_failed_no_retry",
+                release_reason="missing_user_field",
             )
             await _handle_missing_user_field(
                 user_id=user_id,
@@ -1119,6 +1204,46 @@ async def dispatch_mentions(
                 role_public_name(source_role),
                 role_public_name(target),
                 chain_context.hop,
+            )
+        finally:
+            if slot_acquired:
+                released = await _runtime_dispatch_queue_service(context).release_execution_slot(
+                    team_role_id=int(queue_team_role_id),
+                    request_id=queue_request_id,
+                )
+                if not released:
+                    logger.warning(
+                        "role_queue_release_miss team_role_id=%s request_id=%s",
+                        int(queue_team_role_id),
+                        queue_request_id,
+                    )
+        if should_dispatch_followups and followup_next_context is not None:
+            if orchestrator_role is not None:
+                await send_orchestrator_post_event(
+                    context=context,
+                    team_id=team_id,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    reply_to_message_id=chain_context.reply_to_message_id,
+                    actor_username=role_public_name(target),
+                    session_token=session_token,
+                    orchestrator_role=orchestrator_role,
+                    original_user_text=delegated_text,
+                    original_reply_text=None,
+                    answered_role_name=role_public_name(target),
+                    role_answer_text=followup_response_text,
+                    chain_context=followup_next_context,
+                    dispatch_mentions_fn=dispatch_mentions,
+                )
+            await dispatch_mentions(
+                context=context,
+                team_id=team_id,
+                chat_id=chat_id,
+                user_id=user_id,
+                session_token=session_token,
+                source_role=target,
+                source_response_text=followup_response_text,
+                chain_context=followup_next_context,
             )
 
 
@@ -1166,6 +1291,23 @@ async def run_chain(
         queue_request_id = uuid4().hex
         queue_team_role_id = storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
         slot_acquired = False
+
+        async def _release_slot_if_needed() -> None:
+            nonlocal slot_acquired
+            if not slot_acquired or queue_team_role_id is None:
+                return
+            released = await _runtime_dispatch_queue_service(context).release_execution_slot(
+                team_role_id=int(queue_team_role_id),
+                request_id=queue_request_id,
+            )
+            if not released:
+                logger.warning(
+                    "role_queue_release_miss team_role_id=%s request_id=%s",
+                    int(queue_team_role_id),
+                    queue_request_id,
+                )
+            slot_acquired = False
+
         try:
             if queue_team_role_id is None:
                 raise ValueError(f"Team role not found for queue: team_id={team_id} role_id={role.role_id}")
@@ -1248,12 +1390,13 @@ async def run_chain(
                 else:
                     logger.info("orchestrator response parse fallback role=%s", role.role_name)
         except MissingUserField as exc:
-            _release_busy_for_role(
+            _release_busy_for_role_immediate(
                 context=context,
                 team_id=team_id,
                 role_id=role.role_id,
-                release_reason="llm_failed_no_retry",
+                release_reason="missing_user_field",
             )
+            await _release_slot_if_needed()
             role_name = pending_role_name or ("__all__" if is_all else role_public_name(role))
             await _handle_missing_user_field(
                 user_id=user_id,
@@ -1287,6 +1430,7 @@ async def run_chain(
                         team_id=team_id,
                     )
                 storage.set_user_authorized(user_id, False)
+                await _release_slot_if_needed()
                 await _request_token_for_user(chat_id, user_id, context)
                 return ChainRunResult(completed_roles=completed_roles, had_error=True, stopped=True)
             logger.exception("LLM request failed user_id=%s role=%s", user_id, role.role_name)
@@ -1296,6 +1440,7 @@ async def run_chain(
                 reply_to_message_id=reply_to_message_id,
             )
             had_error = True
+            await _release_slot_if_needed()
             continue
 
         try:

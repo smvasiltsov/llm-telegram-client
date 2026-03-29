@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.core.use_cases.team_roles import (
+    bind_master_role_to_group,
     delete_team_role_binding,
     list_team_role_states,
     list_telegram_groups,
@@ -76,6 +77,54 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
 
             self.assertEqual(role_name, "reset_uc_role")
             self.assertIsNone(storage.get_user_role_session_by_team_role(77, team_role_id))
+
+    def test_bind_role_to_new_team_starts_without_team_scoped_role_field(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            g1 = storage.upsert_group(-1031, "g1")
+            g2 = storage.upsert_group(-1032, "g2")
+            team1 = int(g1.team_id or 0)
+            team2 = int(g2.team_id or 0)
+            role = storage.upsert_role(
+                role_name="bind_scope_role",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            tr1, _ = storage.bind_master_role_to_team(team1, role.role_id)
+            self.assertIsNotNone(tr1.team_role_id)
+            storage.set_provider_user_value_by_team_role("provider", "working_dir", int(tr1.team_role_id or 0), "/team1")
+
+            # Keep legacy value to validate temporary fallback behavior separately.
+            storage.set_provider_user_value("provider", "working_dir", role.role_id, "/legacy")
+
+            runtime = SimpleNamespace()
+            bound_role_name, created = bind_master_role_to_group(
+                runtime,
+                storage,
+                group_id=g2.group_id,
+                role_name=role.role_name,
+            )
+            self.assertEqual(bound_role_name, role.role_name)
+            self.assertTrue(created)
+
+            tr2 = storage.get_team_role(team2, role.role_id)
+            self.assertIsNotNone(tr2.team_role_id)
+            team_scoped = storage.get_provider_user_value_by_team_role(
+                "provider",
+                "working_dir",
+                int(tr2.team_role_id or 0),
+            )
+            self.assertIsNone(team_scoped)
+            fallback_value = storage.get_provider_user_value_by_team_role_or_role(
+                "provider",
+                "working_dir",
+                team_role_id=int(tr2.team_role_id or 0),
+                role_id=role.role_id,
+            )
+            self.assertEqual(fallback_value, "/legacy")
 
 
 if __name__ == "__main__":

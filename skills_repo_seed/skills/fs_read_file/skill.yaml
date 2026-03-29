@@ -1,3 +1,0 @@
-id: fs.read_file
-version: 0.1.0
-entrypoint: skill:create_skill

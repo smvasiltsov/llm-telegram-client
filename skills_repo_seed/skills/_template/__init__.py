@@ -1,1 +1,0 @@
-# Template skill package
