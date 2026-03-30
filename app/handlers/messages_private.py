@@ -26,6 +26,7 @@ from app.handlers.messages_common import (
 )
 
 logger = logging.getLogger("bot")
+_MAX_ROLE_SCOPED_REPLAY_PROMPT_RETRIES = 2
 
 
 def _resolve_team_id_for_chat(storage: Storage, chat_id: int) -> int:
@@ -65,6 +66,82 @@ def _delete_provider_user_field_from_pending_state(storage: Storage, state: dict
         storage.delete_provider_user_value_by_team_role(provider_id, key, int(team_role_id))
         return
     storage.delete_provider_user_value(provider_id, key, None)
+
+
+def _is_role_scoped_pending_field(state: dict[str, object]) -> bool:
+    return isinstance(state.get("role_id"), int)
+
+
+def _is_same_pending_field_state(left: dict[str, object], right: dict[str, object]) -> bool:
+    return (
+        str(left.get("provider_id", "")) == str(right.get("provider_id", ""))
+        and str(left.get("key", "")) == str(right.get("key", ""))
+        and left.get("role_id") == right.get("role_id")
+        and left.get("team_id") == right.get("team_id")
+    )
+
+
+def _pending_replay_counter_key(
+    user_id: int,
+    state: dict[str, object],
+    pending_msg: dict[str, object] | None,
+) -> tuple[object, ...]:
+    if pending_msg is None:
+        return (
+            user_id,
+            state.get("provider_id"),
+            state.get("key"),
+            state.get("role_id"),
+            state.get("team_id"),
+            None,
+            None,
+            None,
+        )
+    return (
+        user_id,
+        state.get("provider_id"),
+        state.get("key"),
+        state.get("role_id"),
+        state.get("team_id"),
+        pending_msg.get("chat_id"),
+        pending_msg.get("message_id"),
+        pending_msg.get("role_name"),
+    )
+
+
+def _pending_replay_counters(context: ContextTypes.DEFAULT_TYPE) -> dict[tuple[object, ...], int]:
+    runtime = _runtime(context)
+    counters = getattr(runtime, "pending_replay_attempts", None)
+    if isinstance(counters, dict):
+        return counters
+    counters = {}
+    setattr(runtime, "pending_replay_attempts", counters)
+    return counters
+
+
+def _clear_pending_replay_counters(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+    counters = _pending_replay_counters(context)
+    keys_to_drop = [key for key in counters if key and key[0] == user_id]
+    for key in keys_to_drop:
+        counters.pop(key, None)
+
+
+def _increment_pending_replay_counter(
+    context: ContextTypes.DEFAULT_TYPE,
+    user_id: int,
+    state: dict[str, object],
+    pending_msg: dict[str, object] | None,
+) -> int:
+    counters = _pending_replay_counters(context)
+    key = _pending_replay_counter_key(user_id, state, pending_msg)
+    current = int(counters.get(key, 0))
+    updated = current + 1
+    counters[key] = updated
+    return updated
+
+
+def _is_root_dir_pending_field(state: dict[str, object]) -> bool:
+    return str(state.get("key", "")).strip().lower() == "root_dir"
 
 
 def _validate_pending_field_value(state: dict[str, object], value: str) -> str | None:
@@ -223,17 +300,70 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             )
             await update.message.reply_text("Не удалось сохранить значение. Попробуй ещё раз.")
             return
+        if _is_root_dir_pending_field(state):
+            logger.info(
+                "root_dir_saved user_id=%s team_id=%s role_id=%s",
+                user.id,
+                state.get("team_id"),
+                state.get("role_id"),
+            )
         await update.message.reply_text("Проверяю значение и пытаюсь ответить на сообщение из группы.")
         processed = await _process_pending_message_for_user(user.id, context)
         if processed:
+            _clear_pending_replay_counters(context, user.id)
             return
-        if pending_fields.get(user.id):
-            _delete_provider_user_field_from_pending_state(storage, state)
+        replay_pending_state = pending_fields.get(user.id)
+        if replay_pending_state:
+            if _is_role_scoped_pending_field(state) and _is_same_pending_field_state(replay_pending_state, state):
+                replay_pending_msg = _runtime(context).pending_store.peek_record(user.id)
+                attempts = _increment_pending_replay_counter(context, user.id, state, replay_pending_msg)
+                if _is_root_dir_pending_field(state):
+                    logger.warning(
+                        "root_dir_replay_failed user_id=%s team_id=%s role_id=%s attempt=%s",
+                        user.id,
+                        state.get("team_id"),
+                        state.get("role_id"),
+                        attempts,
+                    )
+                if attempts <= _MAX_ROLE_SCOPED_REPLAY_PROMPT_RETRIES:
+                    scope = "provider" if state.get("role_id") is None else "role"
+                    await _request_user_field_for_user(
+                        int(state.get("chat_id", user.id)),
+                        user.id,
+                        ProviderUserField(
+                            key=str(state["key"]),
+                            prompt=str(state.get("prompt") or "Введите значение ещё раз."),
+                            scope=scope,
+                        ),
+                        context,
+                    )
+                    return
+                if _is_root_dir_pending_field(state):
+                    logger.warning(
+                        "root_dir_prompt_repeated_suppressed user_id=%s team_id=%s role_id=%s attempts=%s",
+                        user.id,
+                        state.get("team_id"),
+                        state.get("role_id"),
+                        attempts,
+                    )
+                _runtime(context).pending_store.pop_record(user.id)
+                pending_fields.delete(user.id)
+                _clear_pending_replay_counters(context, user.id)
+                await update.message.reply_text(
+                    "Не удалось автоматически продолжить после нескольких попыток. "
+                    "Отправь запрос в группу ещё раз."
+                )
+                return
+            if not _is_role_scoped_pending_field(state):
+                _delete_provider_user_field_from_pending_state(storage, state)
+            _clear_pending_replay_counters(context, user.id)
             return
         pending_msg = _runtime(context).pending_store.peek(user.id)
-        _delete_provider_user_field_from_pending_state(storage, state)
+        if not _is_role_scoped_pending_field(state):
+            _delete_provider_user_field_from_pending_state(storage, state)
         if not pending_msg:
             pending_fields.delete(user.id)
+            _clear_pending_replay_counters(context, user.id)
             await update.message.reply_text(
                 "Нет ожидающего сообщения из группы. Отправь запрос в группу ещё раз."
             )
@@ -259,6 +389,7 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             ),
             context,
         )
+        _clear_pending_replay_counters(context, user.id)
         return
     if user.id in pending_prompts and (not pending_msg or (auth and auth.is_authorized)):
         private_buffer: MessageBuffer = _runtime(context).private_buffer
@@ -632,6 +763,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     pending: PendingStore = _runtime(context).pending_store
     pending_msg = pending.peek_record(user_id)
     if not pending_msg:
+        _clear_pending_replay_counters(context, user_id)
         logger.info("pending message not found user_id=%s", user_id)
         return False
     original_pending_msg = pending_msg
@@ -645,6 +777,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     pending_team_id = pending_msg.get("team_id")
     if pending_team_id is None:
         pending.pop_record(user_id)
+        _clear_pending_replay_counters(context, user_id)
         logger.warning("pending message dropped (missing team_id) user_id=%s chat_id=%s", user_id, chat_id)
         return False
     team_id = int(pending_team_id)
@@ -657,6 +790,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
             # Backward compatibility: pending rows may contain internal role_name.
             role = next((r for r in roles if r.role_name == role_name), None)
         if not role:
+            _clear_pending_replay_counters(context, user_id)
             logger.info("pending role not found user_id=%s role_name=%s", user_id, role_name)
             return False
         target_roles = [role]
@@ -693,6 +827,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
     )
 
     if not chain_result.had_error:
+        _clear_pending_replay_counters(context, user_id)
         current_pending_msg = pending.peek_record(user_id)
         if current_pending_msg == original_pending_msg:
             pending.pop_record(user_id)
