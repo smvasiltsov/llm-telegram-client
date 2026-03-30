@@ -13,7 +13,7 @@ from app.llm_providers import ProviderUserField, model_label
 from app.message_buffer import MessageBuffer
 from app.pending_store import PendingStore
 from app.pending_user_fields import PendingUserFieldStore
-from app.role_catalog_service import master_role_exists, refresh_role_catalog
+from app.role_catalog_service import master_role_exists, refresh_role_catalog, update_master_role_json
 from app.services.role_pipeline import roles_require_auth, run_chain
 from app.services.tool_exec import execute_bash_command
 from app.security import TokenCipher
@@ -317,6 +317,59 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             if state["step"] == "model_select":
                 await update.message.reply_text("Выбери модель кнопкой ниже.")
                 return
+        if state.get("mode") == "master_update":
+            role_id = int(state["role_id"])
+            role = storage.get_role_by_id(role_id)
+            if state["step"] == "master_prompt":
+                value = text
+                if not value:
+                    await update.message.reply_text("Системный промпт не может быть пустым.")
+                    return
+                if len(value) > 16000:
+                    await update.message.reply_text("Системный промпт слишком длинный. Максимум: 16000 символов.")
+                    return
+                update_master_role_json(
+                    runtime=_runtime(context),
+                    storage=storage,
+                    role_name=role.role_name,
+                    base_system_prompt=value,
+                )
+                logger.info(
+                    "master_role_updated user_id=%s role=%s changed_fields=%s operation=%s source=%s",
+                    user.id,
+                    role.role_name,
+                    "base_system_prompt",
+                    "set",
+                    "private",
+                )
+                pending_roles.pop(user.id, None)
+                await update.message.reply_text(f"Master system prompt для @{role.role_name} обновлён.")
+                return
+            if state["step"] == "master_suffix":
+                value = text
+                if not value:
+                    await update.message.reply_text("Инструкция к сообщениям не может быть пустой.")
+                    return
+                if len(value) > 8000:
+                    await update.message.reply_text("Инструкция слишком длинная. Максимум: 8000 символов.")
+                    return
+                update_master_role_json(
+                    runtime=_runtime(context),
+                    storage=storage,
+                    role_name=role.role_name,
+                    extra_instruction=value,
+                )
+                logger.info(
+                    "master_role_updated user_id=%s role=%s changed_fields=%s operation=%s source=%s",
+                    user.id,
+                    role.role_name,
+                    "extra_instruction",
+                    "set",
+                    "private",
+                )
+                pending_roles.pop(user.id, None)
+                await update.message.reply_text(f"Master instruction для @{role.role_name} обновлена.")
+                return
         if state["step"] == "name":
             role_name = text.lstrip("@").strip()
             if not re.match(r"^[A-Za-z0-9_]+$", role_name):
@@ -460,6 +513,64 @@ async def _process_pending_private_text(
 
     if user_id in pending_roles and (not pending_msg or (auth and auth.is_authorized)):
         state = pending_roles[user_id]
+        if state.get("mode") == "master_update":
+            role_id = int(state["role_id"])
+            role = storage.get_role_by_id(role_id)
+            value = text.strip()
+            if state["step"] == "master_prompt":
+                if not value:
+                    await context.bot.send_message(chat_id=chat_id, text="Системный промпт не может быть пустым.")
+                    return True
+                if len(value) > 16000:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Системный промпт слишком длинный. Максимум: 16000 символов.",
+                    )
+                    return True
+                update_master_role_json(
+                    runtime=_runtime(context),
+                    storage=storage,
+                    role_name=role.role_name,
+                    base_system_prompt=value,
+                )
+                logger.info(
+                    "master_role_updated user_id=%s role=%s changed_fields=%s operation=%s source=%s",
+                    user_id,
+                    role.role_name,
+                    "base_system_prompt",
+                    "set",
+                    "private",
+                )
+                pending_roles.pop(user_id, None)
+                await context.bot.send_message(chat_id=chat_id, text=f"Master system prompt для @{role.role_name} обновлён.")
+                return True
+            if state["step"] == "master_suffix":
+                if not value:
+                    await context.bot.send_message(chat_id=chat_id, text="Инструкция к сообщениям не может быть пустой.")
+                    return True
+                if len(value) > 8000:
+                    await context.bot.send_message(
+                        chat_id=chat_id,
+                        text="Инструкция слишком длинная. Максимум: 8000 символов.",
+                    )
+                    return True
+                update_master_role_json(
+                    runtime=_runtime(context),
+                    storage=storage,
+                    role_name=role.role_name,
+                    extra_instruction=value,
+                )
+                logger.info(
+                    "master_role_updated user_id=%s role=%s changed_fields=%s operation=%s source=%s",
+                    user_id,
+                    role.role_name,
+                    "extra_instruction",
+                    "set",
+                    "private",
+                )
+                pending_roles.pop(user_id, None)
+                await context.bot.send_message(chat_id=chat_id, text=f"Master instruction для @{role.role_name} обновлена.")
+                return True
         if state["step"] == "suffix":
             suffix = text.strip()
             if not suffix:

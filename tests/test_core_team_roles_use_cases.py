@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from app.llm_providers import ProviderConfig, ProviderUserField
 from app.core.use_cases.team_roles import (
     bind_master_role_to_group,
     delete_team_role_binding,
@@ -51,7 +52,8 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
             updated, _ = set_team_role_mode(storage, group_id=group.group_id, role_id=role.role_id, mode="orchestrator")
             self.assertEqual(updated.mode, "orchestrator")
 
-            deleted_name = delete_team_role_binding(storage, group_id=group.group_id, role_id=role.role_id, user_id=55)
+            runtime = SimpleNamespace(provider_registry={})
+            deleted_name = delete_team_role_binding(runtime, storage, group_id=group.group_id, role_id=role.role_id, user_id=55)
             self.assertEqual(deleted_name, "core_uc_role")
             self.assertFalse(storage.get_team_role(team_id, role.role_id).is_active)
 
@@ -77,6 +79,72 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
 
             self.assertEqual(role_name, "reset_uc_role")
             self.assertIsNone(storage.get_user_role_session_by_team_role(77, team_role_id))
+
+    def test_reset_team_role_session_blocks_legacy_fallback_for_current_team_role(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1022, "g")
+            team_id = int(group.team_id or 0)
+            role = storage.upsert_role(
+                role_name="reset_uc_role_fallback",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model="provider:model",
+                is_active=True,
+            )
+            team_role, _ = storage.bind_master_role_to_team(team_id, role.role_id)
+            team_role_id = int(team_role.team_role_id or 0)
+            storage.save_user_role_session_by_team_role(telegram_user_id=77, team_role_id=team_role_id, session_id="s1")
+            storage.set_provider_user_value("provider", "working_dir", role.role_id, "/legacy")
+            storage.set_provider_user_value("provider", "root_dir", role.role_id, "/legacy-root")
+
+            provider = ProviderConfig(
+                provider_id="provider",
+                label="Provider",
+                base_url="http://example.invalid",
+                tls_ca_cert_path=None,
+                adapter="generic",
+                capabilities={},
+                auth_mode="none",
+                endpoints={},
+                models=[],
+                history_enabled=False,
+                history_limit=None,
+                user_fields={
+                    "working_dir": ProviderUserField(
+                        key="working_dir",
+                        prompt="wd",
+                        scope="role",
+                    ),
+                    "root_dir": ProviderUserField(
+                        key="root_dir",
+                        prompt="rd",
+                        scope="role",
+                    ),
+                },
+            )
+            runtime = SimpleNamespace(default_provider_id="provider", provider_registry={"provider": provider})
+            role_name = reset_team_role_session(runtime, storage, group_id=group.group_id, role_id=role.role_id, user_id=77)
+
+            self.assertEqual(role_name, "reset_uc_role_fallback")
+            self.assertIsNone(storage.get_user_role_session_by_team_role(77, team_role_id))
+            self.assertIsNone(
+                storage.get_provider_user_value_by_team_role_or_role(
+                    "provider",
+                    "working_dir",
+                    team_role_id=team_role_id,
+                    role_id=role.role_id,
+                )
+            )
+            self.assertIsNone(
+                storage.get_provider_user_value_by_team_role_or_role(
+                    "provider",
+                    "root_dir",
+                    team_role_id=team_role_id,
+                    role_id=role.role_id,
+                )
+            )
 
     def test_bind_role_to_new_team_starts_without_team_scoped_role_field(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -125,6 +193,77 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
                 role_id=role.role_id,
             )
             self.assertEqual(fallback_value, "/legacy")
+
+    def test_remove_and_readd_role_in_same_group_clears_role_scoped_fields_and_blocks_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1041, "g")
+            team_id = int(group.team_id or 0)
+            role = storage.upsert_role(
+                role_name="remove_readd_scope_role",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model="provider:model",
+                is_active=True,
+            )
+            team_role, _ = storage.bind_master_role_to_team(team_id, role.role_id)
+            old_team_role_id = int(team_role.team_role_id or 0)
+            storage.set_provider_user_value_by_team_role("provider", "working_dir", old_team_role_id, "/team")
+            storage.set_provider_user_value("provider", "working_dir", role.role_id, "/legacy-working")
+            storage.set_provider_user_value("provider", "root_dir", role.role_id, "/legacy-root")
+
+            provider = ProviderConfig(
+                provider_id="provider",
+                label="Provider",
+                base_url="http://example.invalid",
+                tls_ca_cert_path=None,
+                adapter="generic",
+                capabilities={},
+                auth_mode="none",
+                endpoints={},
+                models=[],
+                history_enabled=False,
+                history_limit=None,
+                user_fields={
+                    "working_dir": ProviderUserField(key="working_dir", prompt="wd", scope="role"),
+                    "root_dir": ProviderUserField(key="root_dir", prompt="rd", scope="role"),
+                },
+            )
+            runtime = SimpleNamespace(default_provider_id="provider", provider_registry={"provider": provider})
+
+            deleted_name = delete_team_role_binding(
+                runtime,
+                storage,
+                group_id=group.group_id,
+                role_id=role.role_id,
+                user_id=55,
+            )
+            self.assertEqual(deleted_name, "remove_readd_scope_role")
+
+            rebound_name, created = bind_master_role_to_group(runtime, storage, group_id=group.group_id, role_name=role.role_name)
+            self.assertEqual(rebound_name, role.role_name)
+            self.assertTrue(created)
+
+            rebound = storage.get_team_role(team_id, role.role_id)
+            rebound_team_role_id = int(rebound.team_role_id or 0)
+            self.assertIsNone(storage.get_provider_user_value_by_team_role("provider", "working_dir", rebound_team_role_id))
+            self.assertIsNone(
+                storage.get_provider_user_value_by_team_role_or_role(
+                    "provider",
+                    "working_dir",
+                    team_role_id=rebound_team_role_id,
+                    role_id=role.role_id,
+                )
+            )
+            self.assertIsNone(
+                storage.get_provider_user_value_by_team_role_or_role(
+                    "provider",
+                    "root_dir",
+                    team_role_id=rebound_team_role_id,
+                    role_id=role.role_id,
+                )
+            )
 
 
 if __name__ == "__main__":

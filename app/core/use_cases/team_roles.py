@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.role_catalog_service import ensure_role_identity_by_name
-from app.services.prompt_builder import provider_id_from_model
 from app.storage import Storage
 
 
@@ -125,12 +124,29 @@ def clear_team_role_reply_prefix(storage: Storage, *, group_id: int, role_id: in
     storage.set_team_role_user_reply_prefix(resolve_team_id(storage, group_id), role_id, None)
 
 
-def delete_team_role_binding(storage: Storage, *, group_id: int, role_id: int, user_id: int) -> str:
+def _iter_role_scoped_provider_fields(runtime: Any) -> set[tuple[str, str]]:
+    items: set[tuple[str, str]] = set()
+    provider_registry = getattr(runtime, "provider_registry", {}) or {}
+    for provider_id, provider in provider_registry.items():
+        user_fields = getattr(provider, "user_fields", {}) or {}
+        for key, field in user_fields.items():
+            if getattr(field, "scope", None) == "role":
+                items.add((str(provider_id), str(key)))
+    return items
+
+
+def delete_team_role_binding(runtime: Any, storage: Storage, *, group_id: int, role_id: int, user_id: int) -> str:
     state = get_team_role_state(storage, group_id, role_id)
-    storage.deactivate_team_role(state.team_id, role_id)
     team_role_id = storage.resolve_team_role_id(state.team_id, role_id)
     if team_role_id is not None:
+        # Remove team-scoped values for removed binding and prevent legacy fallback for this binding.
+        storage.delete_all_provider_user_values_by_team_role(team_role_id)
+        legacy_keys = set(storage.list_provider_user_legacy_keys_for_role(role_id))
+        legacy_keys.update(_iter_role_scoped_provider_fields(runtime))
+        for provider_id, key in legacy_keys:
+            storage.block_provider_user_legacy_fallback(provider_id, key, team_role_id)
         storage.delete_user_role_session_by_team_role(user_id, team_role_id)
+    storage.deactivate_team_role(state.team_id, role_id)
     return state.public_name
 
 
@@ -138,14 +154,9 @@ def reset_team_role_session(runtime: Any, storage: Storage, *, group_id: int, ro
     state = get_team_role_state(storage, group_id, role_id)
     team_role_id = resolve_team_role_id(storage, group_id, role_id, ensure_exists=True)
     storage.delete_user_role_session_by_team_role(user_id, team_role_id)
-
-    role = storage.get_role_by_id(role_id)
-    team_role = storage.get_team_role(state.team_id, role_id)
-    model_override = team_role.model_override or role.llm_model
-    provider_id = provider_id_from_model(model_override, runtime.default_provider_id, runtime.provider_registry)
-    provider = runtime.provider_registry.get(provider_id)
-    if provider:
-        for field in provider.user_fields.values():
-            if field.scope == "role":
-                storage.delete_provider_user_value_by_team_role(provider_id, field.key, team_role_id)
+    storage.delete_all_provider_user_values_by_team_role(team_role_id)
+    legacy_keys = set(storage.list_provider_user_legacy_keys_for_role(role_id))
+    legacy_keys.update(_iter_role_scoped_provider_fields(runtime))
+    for provider_id, key in legacy_keys:
+        storage.block_provider_user_legacy_fallback(provider_id, key, team_role_id)
     return state.public_name

@@ -42,6 +42,58 @@ def create_master_role_json(
     return role.role_id
 
 
+def update_master_role_json(
+    *,
+    runtime: "RuntimeContext",
+    storage: Storage,
+    role_name: str,
+    base_system_prompt: str | None = None,
+    extra_instruction: str | None = None,
+    llm_model: str | None | object = ...,
+) -> None:
+    root = runtime.role_catalog.root_dir
+    role_path = root / f"{role_name}.json"
+    catalog_role = runtime.role_catalog.get(role_name)
+    if catalog_role is None:
+        db_role = storage.get_role_by_name(role_name)
+        current_description = db_role.description
+        current_prompt = db_role.base_system_prompt
+        current_instruction = db_role.extra_instruction
+        current_model = db_role.llm_model
+        current_is_active = db_role.is_active
+    else:
+        current_description = catalog_role.description
+        current_prompt = catalog_role.base_system_prompt
+        current_instruction = catalog_role.extra_instruction
+        current_model = catalog_role.llm_model
+        current_is_active = catalog_role.is_active
+    payload = {
+        "schema_version": 1,
+        "role_name": role_name,
+        "description": current_description,
+        "base_system_prompt": current_prompt,
+        "extra_instruction": current_instruction,
+        "llm_model": current_model,
+        "is_active": bool(current_is_active),
+    }
+    if base_system_prompt is not None:
+        payload["base_system_prompt"] = base_system_prompt
+    if extra_instruction is not None:
+        payload["extra_instruction"] = extra_instruction
+    if llm_model is not ...:
+        payload["llm_model"] = llm_model
+    role_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    _reload_runtime_catalog(runtime, storage)
+    storage.upsert_role(
+        role_name=role_name,
+        description=str(payload["description"] or ""),
+        base_system_prompt=str(payload["base_system_prompt"] or ""),
+        extra_instruction=str(payload["extra_instruction"] or ""),
+        llm_model=payload["llm_model"],
+        is_active=bool(payload["is_active"]),
+    )
+
+
 def ensure_role_identity_by_name(*, runtime: "RuntimeContext", storage: Storage, role_name: str):
     try:
         return storage.get_role_by_name(role_name)

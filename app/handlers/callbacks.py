@@ -29,6 +29,7 @@ from app.role_catalog_service import (
     ensure_role_identity_by_name,
     list_active_master_role_names,
     refresh_role_catalog,
+    update_master_role_json,
 )
 from app.runtime import RuntimeContext
 from app.services.prompt_builder import resolve_provider_model
@@ -36,6 +37,31 @@ from app.storage import Storage
 from app.utils import split_message
 
 logger = logging.getLogger("bot")
+
+
+async def _is_owner_callback(query: CallbackQuery, runtime: RuntimeContext) -> bool:
+    if query.from_user.id != runtime.owner_user_id:
+        await query.answer()
+        return False
+    return True
+
+
+def _log_master_role_updated(
+    *,
+    user_id: int,
+    role_name: str,
+    changed_fields: list[str],
+    operation: str,
+    source: str,
+) -> None:
+    logger.info(
+        "master_role_updated user_id=%s role=%s changed_fields=%s operation=%s source=%s",
+        user_id,
+        role_name,
+        ",".join(changed_fields),
+        operation,
+        source,
+    )
 
 
 def _team_id(storage: Storage, group_id: int) -> int:
@@ -325,6 +351,7 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
         [InlineKeyboardButton(text="Инструкция к сообщениям", callback_data=f"act:set_suffix:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Инструкция для реплаев", callback_data=f"act:set_reply_prefix:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="LLM-модель", callback_data=f"act:set_model:{group_id}:{role_id}")],
+        [InlineKeyboardButton(text="Master defaults", callback_data=f"act:master_defaults:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="🔒 Lock Groups", callback_data=f"act:lock_groups:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Переименовать роль", callback_data=f"act:rename_role:{group_id}:{role_id}")],
         [InlineKeyboardButton(text="Сбросить сессию", callback_data=f"act:reset_session:{group_id}:{role_id}")],
@@ -332,6 +359,43 @@ def _role_actions_keyboard(group_id: int, role_id: int, *, enabled: bool, mode: 
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"grp:{group_id}")],
     ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def _master_defaults_keyboard(group_id: int, role_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton(text="✏️ Системный промпт", callback_data=f"act:master_set_prompt:{group_id}:{role_id}")],
+            [InlineKeyboardButton(text="🧹 Очистить промпт", callback_data=f"act:master_clear_prompt:{group_id}:{role_id}")],
+            [InlineKeyboardButton(text="✏️ Инструкция к сообщениям", callback_data=f"act:master_set_suffix:{group_id}:{role_id}")],
+            [InlineKeyboardButton(text="🧹 Очистить инструкцию", callback_data=f"act:master_clear_suffix:{group_id}:{role_id}")],
+            [InlineKeyboardButton(text="🤖 LLM-модель", callback_data=f"act:master_set_model:{group_id}:{role_id}")],
+            [InlineKeyboardButton(text="🧹 Сбросить модель", callback_data=f"act:master_clear_model:{group_id}:{role_id}")],
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")],
+        ]
+    )
+
+
+def _master_defaults_text(runtime: RuntimeContext, role_id: int) -> str:
+    role = runtime.storage.get_role_by_id(role_id)
+    if role is None:
+        return "Master-role не найдена."
+    model_value = role.llm_model
+    if not model_value:
+        model_label_text = "(не задана)"
+    elif model_value in runtime.provider_model_map:
+        model_obj = runtime.provider_model_map.get(model_value)
+        provider = runtime.provider_registry.get(model_obj.provider_id) if model_obj else None
+        model_label_text = model_label(model_obj, provider) if model_obj else model_value
+    else:
+        model_label_text = f"{model_value} (недоступна)"
+    lines = [
+        f"Master defaults для @{role.role_name}",
+        "",
+        f"Системный промпт: {_preview_text(role.base_system_prompt, max_len=180)}",
+        f"Инструкция к сообщениям: {_preview_text(role.extra_instruction, max_len=180)}",
+        f"LLM-модель по умолчанию: {model_label_text}",
+    ]
+    return "\n".join(lines)
 
 
 def _role_skills_keyboard(runtime: RuntimeContext, storage: Storage, group_id: int, role_id: int) -> InlineKeyboardMarkup:
@@ -718,6 +782,146 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         )
         await query.answer()
         return True
+    if action == "master_defaults":
+        await query.edit_message_text(
+            _master_defaults_text(runtime, role_id),
+            reply_markup=_master_defaults_keyboard(group_id, role_id),
+        )
+        await query.answer()
+        return True
+    if action == "master_set_prompt":
+        pending_roles = runtime.pending_role_ops
+        pending_roles[query.from_user.id] = {
+            "mode": "master_update",
+            "step": "master_prompt",
+            "role_id": role_id,
+            "target_group_id": group_id,
+        }
+        await query.edit_message_text(
+            "Отправь новый system prompt для master-role в личном сообщении.\nЛимит: 16000 символов.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"act:master_defaults:{group_id}:{role_id}")]]
+            ),
+        )
+        await query.answer()
+        return True
+    if action == "master_set_suffix":
+        pending_roles = runtime.pending_role_ops
+        pending_roles[query.from_user.id] = {
+            "mode": "master_update",
+            "step": "master_suffix",
+            "role_id": role_id,
+            "target_group_id": group_id,
+        }
+        await query.edit_message_text(
+            "Отправь новую instruction для master-role в личном сообщении.\nЛимит: 8000 символов.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"act:master_defaults:{group_id}:{role_id}")]]
+            ),
+        )
+        await query.answer()
+        return True
+    if action == "master_set_model":
+        provider_models = runtime.provider_models
+        provider_model_map = runtime.provider_model_map
+        provider_registry = runtime.provider_registry
+        role_for_master = storage.get_role_by_id(role_id)
+        current_model = role_for_master.llm_model
+        if not current_model:
+            current_label = "(не задана)"
+        elif current_model in provider_model_map:
+            current_obj = provider_model_map.get(current_model)
+            current_provider = provider_registry.get(current_obj.provider_id) if current_obj else None
+            current_label = model_label(current_obj, current_provider) if current_obj else current_model
+        else:
+            current_label = f"{current_model} (недоступна)"
+        if not provider_models:
+            await query.edit_message_text(
+                "Список моделей не настроен в llm_providers.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"act:master_defaults:{group_id}:{role_id}")]]
+                ),
+            )
+            await query.answer()
+            return True
+        buttons = []
+        for model in provider_models:
+            provider = provider_registry.get(model.provider_id)
+            label = model_label(model, provider)
+            buttons.append(
+                [InlineKeyboardButton(text=label, callback_data=f"msetmodel:{group_id}:{role_id}:{model.full_id}")]
+            )
+        buttons.append([InlineKeyboardButton(text="Сбросить (None)", callback_data=f"msetmodel:{group_id}:{role_id}:__none__")])
+        buttons.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"act:master_defaults:{group_id}:{role_id}")])
+        await query.edit_message_text(
+            f"Текущая master-модель: {current_label}\n\nВыбери новую модель:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+        await query.answer()
+        return True
+    if action == "master_clear_prompt":
+        role_for_master = storage.get_role_by_id(role_id)
+        update_master_role_json(
+            runtime=runtime,
+            storage=storage,
+            role_name=role_for_master.role_name,
+            base_system_prompt="",
+        )
+        _log_master_role_updated(
+            user_id=query.from_user.id,
+            role_name=role_for_master.role_name,
+            changed_fields=["base_system_prompt"],
+            operation="clear",
+            source="callback",
+        )
+        await query.edit_message_text(
+            _master_defaults_text(runtime, role_id),
+            reply_markup=_master_defaults_keyboard(group_id, role_id),
+        )
+        await query.answer("Master system prompt очищен")
+        return True
+    if action == "master_clear_suffix":
+        role_for_master = storage.get_role_by_id(role_id)
+        update_master_role_json(
+            runtime=runtime,
+            storage=storage,
+            role_name=role_for_master.role_name,
+            extra_instruction="",
+        )
+        _log_master_role_updated(
+            user_id=query.from_user.id,
+            role_name=role_for_master.role_name,
+            changed_fields=["extra_instruction"],
+            operation="clear",
+            source="callback",
+        )
+        await query.edit_message_text(
+            _master_defaults_text(runtime, role_id),
+            reply_markup=_master_defaults_keyboard(group_id, role_id),
+        )
+        await query.answer("Master instruction очищена")
+        return True
+    if action == "master_clear_model":
+        role_for_master = storage.get_role_by_id(role_id)
+        update_master_role_json(
+            runtime=runtime,
+            storage=storage,
+            role_name=role_for_master.role_name,
+            llm_model=None,
+        )
+        _log_master_role_updated(
+            user_id=query.from_user.id,
+            role_name=role_for_master.role_name,
+            changed_fields=["llm_model"],
+            operation="clear",
+            source="callback",
+        )
+        await query.edit_message_text(
+            _master_defaults_text(runtime, role_id),
+            reply_markup=_master_defaults_keyboard(group_id, role_id),
+        )
+        await query.answer("Master модель сброшена")
+        return True
     if action == "prepost_processing":
         await query.edit_message_text(
             f"Pre/Post Processing для роли @{_role_public_name(storage, group_id, role_id)}:",
@@ -890,7 +1094,7 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "delete_role":
-        role_name = delete_team_role_binding(storage, group_id=group_id, role_id=role_id, user_id=query.from_user.id)
+        role_name = delete_team_role_binding(runtime, storage, group_id=group_id, role_id=role_id, user_id=query.from_user.id)
         await query.edit_message_text(
             f"Роль @{role_name} удалена из группы {group_id}.",
         )
@@ -972,6 +1176,47 @@ async def _handle_skill_toggle(
 
 
 async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, runtime: RuntimeContext) -> bool:
+    if data.startswith("msetmodel:"):
+        _, group_id_str, role_id_str, model_name = data.split(":", 3)
+        group_id = int(group_id_str)
+        role_id = int(role_id_str)
+        if model_name != "__none__" and model_name not in runtime.provider_model_map:
+            await query.edit_message_text(
+                "Модель не найдена в llm_providers.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"act:master_defaults:{group_id}:{role_id}")]]
+                ),
+            )
+            await query.answer()
+            return True
+        role = storage.get_role_by_id(role_id)
+        new_model = None if model_name == "__none__" else model_name
+        update_master_role_json(
+            runtime=runtime,
+            storage=storage,
+            role_name=role.role_name,
+            llm_model=new_model,
+        )
+        _log_master_role_updated(
+            user_id=query.from_user.id,
+            role_name=role.role_name,
+            changed_fields=["llm_model"],
+            operation="set",
+            source="callback",
+        )
+        label = "(не задана)"
+        if new_model:
+            model_obj = runtime.provider_model_map.get(new_model)
+            provider = runtime.provider_registry.get(model_obj.provider_id) if model_obj else None
+            label = model_label(model_obj, provider) if model_obj else new_model
+        await query.edit_message_text(
+            f"Master-модель для @{role.role_name} обновлена: {label}",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"act:master_defaults:{group_id}:{role_id}")]]
+            ),
+        )
+        await query.answer()
+        return True
     if not data.startswith("setmodel:"):
         return False
     _, group_id_str, role_id_str, model_name = data.split(":", 3)
@@ -1011,8 +1256,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if query.from_user.id != runtime.owner_user_id:
-        await query.answer()
+    if not await _is_owner_callback(query, runtime):
         return
 
     storage: Storage = runtime.storage

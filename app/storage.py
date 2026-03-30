@@ -86,6 +86,9 @@ class Storage:
     def has_provider_user_data_team_role_table(self) -> bool:
         return self._table_exists("provider_user_data_team_role")
 
+    def has_provider_user_data_team_role_legacy_blocks_table(self) -> bool:
+        return self._table_exists("provider_user_data_team_role_legacy_blocks")
+
     def has_legacy_roles_table(self) -> bool:
         return self._table_exists("roles")
 
@@ -229,6 +232,18 @@ class Storage:
                 value TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
+                PRIMARY KEY (provider_id, key, team_role_id),
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS provider_user_data_team_role_legacy_blocks (
+                provider_id TEXT NOT NULL,
+                key TEXT NOT NULL,
+                team_role_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
                 PRIMARY KEY (provider_id, key, team_role_id),
                 FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
             )
@@ -397,6 +412,12 @@ class Storage:
             """
             CREATE INDEX IF NOT EXISTS idx_provider_user_data_team_role_lookup
             ON provider_user_data_team_role(provider_id, key, team_role_id, updated_at)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_provider_user_data_team_role_legacy_blocks_lookup
+            ON provider_user_data_team_role_legacy_blocks(provider_id, key, team_role_id)
             """
         )
         self._create_index_if_column_exists(
@@ -1676,7 +1697,61 @@ class Storage:
             value = self.get_provider_user_value_by_team_role(provider_id, key, int(team_role_id))
             if value is not None:
                 return value
+            if self.is_provider_user_legacy_fallback_blocked(provider_id, key, int(team_role_id)):
+                return None
         return self.get_provider_user_value(provider_id, key, role_id)
+
+    def is_provider_user_legacy_fallback_blocked(
+        self,
+        provider_id: str,
+        key: str,
+        team_role_id: int,
+    ) -> bool:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT 1
+            FROM provider_user_data_team_role_legacy_blocks
+            WHERE provider_id = ? AND key = ? AND team_role_id = ?
+            LIMIT 1
+            """,
+            (provider_id, key, int(team_role_id)),
+        )
+        return cur.fetchone() is not None
+
+    def block_provider_user_legacy_fallback(
+        self,
+        provider_id: str,
+        key: str,
+        team_role_id: int,
+    ) -> None:
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO provider_user_data_team_role_legacy_blocks (provider_id, key, team_role_id, created_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(provider_id, key, team_role_id) DO NOTHING
+            """,
+            (provider_id, key, int(team_role_id), now),
+        )
+        self._conn.commit()
+
+    def unblock_provider_user_legacy_fallback(
+        self,
+        provider_id: str,
+        key: str,
+        team_role_id: int,
+    ) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM provider_user_data_team_role_legacy_blocks
+            WHERE provider_id = ? AND key = ? AND team_role_id = ?
+            """,
+            (provider_id, key, int(team_role_id)),
+        )
+        self._conn.commit()
 
     def set_provider_user_value(self, provider_id: str, key: str, role_id: int | None, value: str) -> None:
         now = _utc_now()
@@ -1735,6 +1810,29 @@ class Storage:
             (provider_id, key, int(team_role_id)),
         )
         self._conn.commit()
+
+    def delete_all_provider_user_values_by_team_role(self, team_role_id: int) -> None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            DELETE FROM provider_user_data_team_role
+            WHERE team_role_id = ?
+            """,
+            (int(team_role_id),),
+        )
+        self._conn.commit()
+
+    def list_provider_user_legacy_keys_for_role(self, role_id: int) -> list[tuple[str, str]]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT provider_id, key
+            FROM provider_user_data
+            WHERE role_id = ?
+            """,
+            (int(role_id),),
+        )
+        return [(str(row["provider_id"]), str(row["key"])) for row in cur.fetchall()]
 
     def set_group_active(self, group_id: int, is_active: bool) -> None:
         self.set_telegram_team_binding_active(group_id, is_active)
