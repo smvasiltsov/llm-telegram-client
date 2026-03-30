@@ -393,6 +393,67 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.exception.provider_id, "skills")
             self.assertEqual(ctx.exception.field.key, "root_dir")
 
+    async def test_loop_uses_team_scoped_skills_root_dir_without_reasking(self) -> None:
+        with TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "alpha.txt").write_text("hello", encoding="utf-8")
+            storage = Storage(root / "test.sqlite3")
+            group = storage.upsert_group(-1005, "g")
+            role = storage.upsert_role(
+                role_name="fs_role_team_scope_root",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model="provider:model",
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            storage.upsert_role_skill(group.group_id, role.role_id, "fs.list_dir", enabled=True, config={})
+            team_role_id = storage.resolve_team_role_id(int(group.team_id or 0), role.role_id, ensure_exists=True)
+            self.assertIsNotNone(team_role_id)
+            storage.set_provider_user_value_by_team_role("skills", "root_dir", int(team_role_id or 0), str(root))
+
+            registry = SkillRegistry()
+            registry.register(FSListDirSkill())
+            service = SkillService(registry)
+            executor = FakeLLMExecutor(
+                responses=[
+                    json.dumps(
+                        {
+                            "type": "skill_call",
+                            "skill_call": {"skill_id": "fs.list_dir", "arguments": {"path": "."}},
+                        }
+                    ),
+                    json.dumps({"type": "final_answer", "answer": {"text": "done"}}),
+                ]
+            )
+            loop = SkillCallingLoop(
+                storage=storage,
+                llm_executor=executor,
+                session_resolver=FakeSessionResolver(),
+                skills_service=service,
+                provider_models=[FakeModel(full_id="provider:model")],
+                provider_model_map={"provider:model": FakeModel(full_id="provider:model")},
+                provider_registry={},
+            )
+
+            result = await loop.run(
+                team_id=int(group.team_id or 0),
+                user_id=42,
+                role=role,
+                session_token="token",
+                user_text="list files",
+                reply_text=None,
+                actor_username="user",
+                trigger_type="mention_role",
+                mentioned_roles=["fs_role_team_scope_root"],
+                recipient="fs_role_team_scope_root",
+            )
+
+            self.assertEqual(result.status, "final_answer")
+            self.assertEqual(result.executed_skills[0].status, "ok")
+            self.assertEqual(result.executed_skills[0].skill_id, "fs.list_dir")
+
     async def test_skills_to_llm_delay_applies_after_executed_skill_step(self) -> None:
         with TemporaryDirectory() as td:
             storage = Storage(Path(td) / "test.sqlite3")

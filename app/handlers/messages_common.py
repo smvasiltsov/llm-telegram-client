@@ -91,6 +91,14 @@ async def _handle_missing_user_field(
         reply_text=reply_text,
     )
     pending_fields: PendingUserFieldStore = _runtime(context).pending_user_fields
+    existing_pending_field = pending_fields.get(user_id)
+    same_field_pending = bool(
+        existing_pending_field
+        and str(existing_pending_field.get("provider_id", "")) == exc.provider_id
+        and str(existing_pending_field.get("key", "")) == exc.field.key
+        and existing_pending_field.get("role_id") == exc.role_id
+        and existing_pending_field.get("team_id") == team_id
+    )
     pending_fields.save(
         telegram_user_id=user_id,
         provider_id=exc.provider_id,
@@ -101,6 +109,14 @@ async def _handle_missing_user_field(
         team_id=team_id,
     )
     logger.info("pending user field saved user_id=%s provider=%s key=%s", user_id, exc.provider_id, exc.field.key)
+    if same_field_pending:
+        logger.info(
+            "pending user field prompt suppressed (already requested) user_id=%s provider=%s key=%s",
+            user_id,
+            exc.provider_id,
+            exc.field.key,
+        )
+        return
     await _request_user_field_for_user(chat_id, user_id, exc.field, context)
 
 

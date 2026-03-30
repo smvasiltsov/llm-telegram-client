@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -64,6 +65,18 @@ def _delete_provider_user_field_from_pending_state(storage: Storage, state: dict
         storage.delete_provider_user_value_by_team_role(provider_id, key, int(team_role_id))
         return
     storage.delete_provider_user_value(provider_id, key, None)
+
+
+def _validate_pending_field_value(state: dict[str, object], value: str) -> str | None:
+    key = str(state.get("key", "")).strip().lower()
+    if key != "root_dir":
+        return None
+    root_path = Path(value).expanduser()
+    if not root_path.exists():
+        return f"Путь не существует: {root_path}"
+    if not root_path.is_dir():
+        return f"Путь не является директорией: {root_path}"
+    return None
 
 
 async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -183,6 +196,10 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 value = value.split("=", 1)[1].strip()
             if ";" in value:
                 value = value.split(";", 1)[0].strip()
+        validation_error = _validate_pending_field_value(state, value)
+        if validation_error:
+            await update.message.reply_text(f"{validation_error}\nВведи корректный путь ещё раз.")
+            return
         pending_fields.delete(user.id)
         try:
             _set_provider_user_field_from_pending_state(storage, state, value)

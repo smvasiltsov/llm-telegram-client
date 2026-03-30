@@ -305,6 +305,7 @@ class SkillCallingLoop:
                 )
                 continue
             config = self._resolve_skill_config(
+                team_id=team_id,
                 role=role,
                 model_override=model_override,
                 skill_id=role_skill.skill_id,
@@ -326,6 +327,7 @@ class SkillCallingLoop:
     def _resolve_skill_config(
         self,
         *,
+        team_id: int,
         role: Role,
         model_override: str | None,
         skill_id: str,
@@ -343,9 +345,19 @@ class SkillCallingLoop:
             resolved["root_dir"] = provider_root
             return resolved
 
-        shared_root = str(
-            self._storage.get_provider_user_value(SKILLS_PROVIDER_ID, SKILLS_ROOT_DIR_KEY, role.role_id) or ""
-        ).strip()
+        team_role_id = self._storage.resolve_team_role_id(team_id, role.role_id)
+        shared_root = (
+            str(
+                self._storage.get_provider_user_value_by_team_role(
+                    SKILLS_PROVIDER_ID,
+                    SKILLS_ROOT_DIR_KEY,
+                    int(team_role_id),
+                )
+                or ""
+            ).strip()
+            if team_role_id is not None
+            else ""
+        )
         if shared_root:
             resolved["root_dir"] = shared_root
             return resolved
