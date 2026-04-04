@@ -36,6 +36,8 @@ from app.services.tool_exec import execute_bash_command
 from app.security import TokenCipher
 from app.storage import Storage
 from app.handlers.messages_common import (
+    _ensure_runtime_correlation_id,
+    _ensure_update_correlation_id,
     _request_token_for_user,
     _request_user_field_for_user,
     _runtime,
@@ -230,12 +232,13 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
         return
     if update.effective_chat and update.effective_chat.type != "private":
         return
+    correlation_id = _ensure_update_correlation_id(update, context)
     storage: Storage = _resolve_storage(context)
     refresh_role_catalog(runtime=_runtime(context), storage=storage)
     user = update.effective_user
     if not user:
         return
-    logger.info("private msg user_id=%s text=%r", user.id, update.message.text)
+    logger.info("private msg correlation_id=%s user_id=%s text=%r", correlation_id, user.id, update.message.text)
     storage.upsert_user(user.id, user.username)
     pending_bash_auth: dict[int, dict[str, Any]] = _resolve_pending_bash_auth(context)
     pending_bash = pending_bash_auth.get(user.id)
@@ -833,6 +836,7 @@ async def _process_pending_private_text(
 
 
 async def _process_pending_message_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    correlation_id = _ensure_runtime_correlation_id()
     pending: PendingStore = _resolve_pending_store(context)
     pending_msg = pending.peek_record(user_id)
     if not pending_msg:
@@ -899,6 +903,7 @@ async def _process_pending_message_for_user(user_id: int, context: ContextTypes.
         chain_origin="pending",
         operation=RuntimeOperation.PENDING_REPLAY,
         request_id=f"pending-{user_id}-{message_id}",
+        correlation_id=correlation_id,
     )
 
     if runtime_result.is_ok and runtime_result.value and runtime_result.value.completed:

@@ -45,6 +45,7 @@ from app.runtime import RuntimeContext
 from app.services.prompt_builder import resolve_provider_model
 from app.storage import Storage
 from app.utils import split_message
+from app.handlers.messages_common import _ensure_update_correlation_id
 
 logger = logging.getLogger("bot")
 
@@ -1358,6 +1359,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if not query or not query.from_user:
         return
+    correlation_id = _ensure_update_correlation_id(update, context)
+    logger.info("callback received correlation_id=%s user_id=%s", correlation_id, query.from_user.id)
 
     runtime: RuntimeContext = context.application.bot_data["runtime"]
     if not await _is_owner_callback(query, runtime):

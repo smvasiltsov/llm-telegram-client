@@ -3,7 +3,8 @@ from __future__ import annotations
 from uuid import uuid4
 from typing import Any, Callable, Awaitable
 
-from app.application.contracts import ErrorCode, Result
+from app.application.contracts import ErrorCode, NoopMetricsPort, Result, build_operation_labels
+from app.application.observability import ensure_correlation_id
 from app.application.contracts.runtime_ops import (
     RuntimeOperation,
     RuntimeOperationResult,
@@ -38,6 +39,24 @@ RUNTIME_OPERATION_TRANSITION_TABLE: tuple[dict[str, str], ...] = (
         "on_error": f"{RuntimeState.BUSY.value}->{RuntimeState.PENDING.value}",
     },
 )
+
+
+def _resolve_metrics_port(context: Any):
+    app = getattr(context, "application", None)
+    bot_data = getattr(app, "bot_data", None)
+    if isinstance(bot_data, dict):
+        direct = bot_data.get("metrics_port")
+        if hasattr(direct, "increment") and hasattr(direct, "observe_ms") and hasattr(direct, "operation_timer"):
+            return direct
+        runtime = bot_data.get("runtime")
+        runtime_metrics = getattr(runtime, "metrics_port", None)
+        if (
+            hasattr(runtime_metrics, "increment")
+            and hasattr(runtime_metrics, "observe_ms")
+            and hasattr(runtime_metrics, "operation_timer")
+        ):
+            return runtime_metrics
+    return NoopMetricsPort()
 
 
 def _build_runtime_transitions(
@@ -113,6 +132,7 @@ async def execute_run_chain_operation(
     chain_origin: str = "group",
     operation: str | RuntimeOperation = RuntimeOperation.RUN_CHAIN,
     request_id: str | None = None,
+    correlation_id: str | None = None,
     run_chain_fn: Callable[..., Awaitable[Any]] | None = None,
 ) -> Result[RuntimeOperationResult]:
     # Lazy import keeps use-case tests independent from Telegram runtime deps.
@@ -121,6 +141,18 @@ async def execute_run_chain_operation(
 
     op_name = operation.value if isinstance(operation, RuntimeOperation) else str(operation)
     req_id = request_id or uuid4().hex
+    corr_id = ensure_correlation_id(correlation_id)
+    metrics = _resolve_metrics_port(context)
+    timer = metrics.operation_timer(op_name, transport="telegram")
+    metrics.increment(
+        "runtime_operation_total",
+        labels=build_operation_labels(operation=op_name, transport="telegram", result="started"),
+    )
+    if op_name == RuntimeOperation.PENDING_REPLAY.value:
+        metrics.increment(
+            "runtime_pending_replay_total",
+            labels=build_operation_labels(operation=op_name, transport="telegram", result="started"),
+        )
     try:
         chain_result = await run_chain_fn(
             context=context,
@@ -140,10 +172,11 @@ async def execute_run_chain_operation(
             allow_orchestrator_post_event=allow_orchestrator_post_event,
             trigger_type_orchestrator=trigger_type_orchestrator,
             chain_origin=chain_origin,  # type: ignore[arg-type]
+            correlation_id=corr_id,
         )
     except Exception as exc:
         code = ErrorCode.RUNTIME_REPLAY_FAILED if op_name == RuntimeOperation.PENDING_REPLAY.value else ErrorCode.INTERNAL_UNEXPECTED
-        return Result.fail_from_exception(
+        failure = Result.fail_from_exception(
             exc,
             fallback_code=code,
             fallback_message="Runtime operation failed",
@@ -152,12 +185,46 @@ async def execute_run_chain_operation(
                 "operation": op_name,
                 "cause": "exception",
                 "request_id": req_id,
+                "correlation_id": corr_id,
             },
         )
+        error_code = failure.error.code if failure.error else None
+        metrics.increment(
+            "runtime_operation_total",
+            labels=build_operation_labels(
+                operation=op_name,
+                transport="telegram",
+                result="failed",
+                error_code=error_code,
+            ),
+        )
+        if op_name == RuntimeOperation.PENDING_REPLAY.value:
+            metrics.increment(
+                "runtime_pending_replay_total",
+                labels=build_operation_labels(
+                    operation=op_name,
+                    transport="telegram",
+                    result="failed",
+                    error_code=error_code,
+                ),
+            )
+        timer.observe(result="failed", error_code=error_code)
+        return failure
 
     completed = not chain_result.had_error
     pending_saved = bool(save_pending_on_unauthorized and chain_result.had_error)
     replay_scheduled = bool(op_name == RuntimeOperation.PENDING_REPLAY.value and chain_result.had_error)
+    result_label = "success" if completed else "failed"
+    metrics.increment(
+        "runtime_operation_total",
+        labels=build_operation_labels(operation=op_name, transport="telegram", result=result_label),
+    )
+    if op_name == RuntimeOperation.PENDING_REPLAY.value:
+        metrics.increment(
+            "runtime_pending_replay_total",
+            labels=build_operation_labels(operation=op_name, transport="telegram", result=result_label),
+        )
+    timer.observe(result=result_label)
     return Result.ok(
         RuntimeOperationResult(
             operation=op_name,

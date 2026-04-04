@@ -23,6 +23,8 @@ from app.pending_store import PendingStore
 from app.services.role_pipeline import roles_require_auth
 from app.storage import Storage
 from app.handlers.messages_common import (
+    _ensure_runtime_correlation_id,
+    _ensure_update_correlation_id,
     _request_token_for_user,
     _runtime,
 )
@@ -60,8 +62,10 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
     chat = update.effective_chat
     if chat.type == "private":
         return
+    correlation_id = _ensure_update_correlation_id(update, context)
     logger.info(
-        "group msg chat_id=%s title=%r user_id=%s username=%r text=%r",
+        "group msg correlation_id=%s chat_id=%s title=%r user_id=%s username=%r text=%r",
+        correlation_id,
         chat.id,
         chat.title,
         update.effective_user.id,
@@ -134,6 +138,7 @@ async def handle_group_buffered(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:
+    correlation_id = _ensure_runtime_correlation_id()
     buffer: MessageBuffer = _runtime(context).message_buffer
     items = await buffer.wait_and_collect(chat_id, user_id)
     if not items:
@@ -142,7 +147,8 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
     combined_text = "\n".join(item.content for item in items)
     reply_text = next((item.reply_text for item in items if item.reply_text), None)
     logger.info(
-        "flush chat_id=%s user_id=%s items=%s reply_text=%s combined_len=%s",
+        "flush correlation_id=%s chat_id=%s user_id=%s items=%s reply_text=%s combined_len=%s",
+        correlation_id,
         chat_id,
         user_id,
         len(items),
@@ -224,4 +230,5 @@ async def _flush_buffered(chat_id: int, user_id: int, context: ContextTypes.DEFA
         pending_role_name=plan.role_name_for_pending or ("__all__" if plan.route.is_all else plan.route.roles[0].public_name()),
         allow_orchestrator_post_event=True,
         chain_origin="group",
+        correlation_id=correlation_id,
     )

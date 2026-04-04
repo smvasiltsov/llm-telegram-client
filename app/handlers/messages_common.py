@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 from telegram.ext import ContextTypes
 
+from app.application.observability import ensure_correlation_id, get_correlation_id
 from app.llm_router import MissingUserField
 from app.models import Role
 from app.llm_providers import ProviderUserField
@@ -25,6 +27,32 @@ class SessionRecoveryResult:
 
 def _runtime(context: ContextTypes.DEFAULT_TYPE) -> RuntimeContext:
     return context.application.bot_data["runtime"]
+
+
+def _resolve_external_correlation_id(update: Any, context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    if update is not None:
+        value = getattr(update, "correlation_id", None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    value = getattr(context, "correlation_id", None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    bot_data = getattr(getattr(context, "application", None), "bot_data", None)
+    if isinstance(bot_data, dict):
+        for key in ("correlation_id", "x_correlation_id"):
+            candidate = bot_data.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
+
+
+def _ensure_update_correlation_id(update: Any, context: ContextTypes.DEFAULT_TYPE) -> str:
+    external = _resolve_external_correlation_id(update, context)
+    return ensure_correlation_id(external)
+
+
+def _ensure_runtime_correlation_id() -> str:
+    return ensure_correlation_id(get_correlation_id())
 
 
 async def _request_token_for_user(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE) -> None:

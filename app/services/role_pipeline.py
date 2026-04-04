@@ -11,6 +11,9 @@ from uuid import uuid4
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
+from app.application.contracts import NoopMetricsPort, build_operation_labels
+from app.application.contracts.runtime_ops import RuntimeOperation
+from app.application.observability import ensure_correlation_id
 from app.handlers.messages_common import (
     SessionRecoveryResult,
     _handle_missing_user_field,
@@ -163,6 +166,14 @@ def _runtime_dispatch_queue_service(context: ContextTypes.DEFAULT_TYPE) -> RoleD
     return service
 
 
+def _runtime_metrics_port(context: ContextTypes.DEFAULT_TYPE):
+    runtime = _runtime(context)
+    metrics = getattr(runtime, "metrics_port", None)
+    if hasattr(metrics, "increment") and hasattr(metrics, "observe_ms") and hasattr(metrics, "operation_timer"):
+        return metrics
+    return NoopMetricsPort()
+
+
 def _resolve_team_role_id_for_dispatch(
     *,
     context: ContextTypes.DEFAULT_TYPE,
@@ -214,7 +225,9 @@ async def _queue_execution_scope(
     context: ContextTypes.DEFAULT_TYPE,
     team_role_id: int,
     request_id: str,
+    operation: str = RuntimeOperation.RUN_CHAIN.value,
 ) -> AsyncIterator[QueueGrant]:
+    metrics = _runtime_metrics_port(context)
     queue_service = _runtime_dispatch_queue_service(context)
     queue_grant = await queue_service.acquire_execution_slot(
         team_role_id=int(team_role_id),
@@ -232,6 +245,15 @@ async def _queue_execution_scope(
             int(team_role_id),
             request_id,
             queue_grant.wait_ms,
+        )
+        metrics.observe_ms(
+            "runtime_queue_wait_ms",
+            value_ms=float(queue_grant.wait_ms),
+            labels=build_operation_labels(
+                operation=operation,
+                transport="telegram",
+                result="queued",
+            ),
         )
     try:
         await _wait_until_team_role_is_free(
@@ -501,7 +523,11 @@ async def execute_role_request(
     llm_answer_role_name: str | None = None,
     wait_until_available: bool = True,
     queue_request_id: str | None = None,
+    correlation_id: str | None = None,
+    operation: str = RuntimeOperation.RUN_CHAIN.value,
 ) -> RoleRequestResult:
+    corr_id = ensure_correlation_id(correlation_id)
+    metrics = _runtime_metrics_port(context)
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     provider_registry = runtime.provider_registry
@@ -526,7 +552,8 @@ async def execute_role_request(
         provider_registry=provider_registry,
     )
     logger.info(
-        "execute role request role=%s mode=%s model_override=%s",
+        "execute role request correlation_id=%s role=%s mode=%s model_override=%s",
+        corr_id,
         role.role_name,
         group_role.mode,
         model_override,
@@ -582,6 +609,15 @@ async def execute_role_request(
             "role_queue_wait team_role_id=%s request_id=%s reason=runtime_busy_blocker",
             int(team_role_id),
             queue_request_id or busy_request_id,
+        )
+        metrics.increment(
+            "runtime_busy_conflict_total",
+            labels=build_operation_labels(
+                operation=operation,
+                transport="telegram",
+                result="conflict",
+                error_code="runtime.busy_conflict",
+            ),
         )
         await asyncio.sleep(0.5)
         status_service.cleanup_stale()
@@ -888,7 +924,9 @@ async def send_orchestrator_post_event(
     role_answer_text: str,
     chain_context: ChainContext | None = None,
     dispatch_mentions_fn: Callable[..., Awaitable[None]] | None = None,
+    correlation_id: str | None = None,
 ) -> None:
+    corr_id = ensure_correlation_id(correlation_id)
     storage: Storage = _runtime(context).storage
     group_role = storage.get_team_role(team_id, orchestrator_role.role_id)
     if not group_role.enabled:
@@ -907,6 +945,7 @@ async def send_orchestrator_post_event(
             context=context,
             team_role_id=int(queue_team_role_id),
             request_id=queue_request_id,
+            operation=RuntimeOperation.ORCHESTRATOR_POST_EVENT.value,
         ):
             result = await execute_role_request(
                 context=context,
@@ -924,6 +963,8 @@ async def send_orchestrator_post_event(
                 llm_answer_role_name=answered_role_name,
                 wait_until_available=True,
                 queue_request_id=queue_request_id,
+                correlation_id=corr_id,
+                operation=RuntimeOperation.ORCHESTRATOR_POST_EVENT.value,
             )
             response_text = result.response_text
             if result.recovery is not None:
@@ -1009,6 +1050,7 @@ async def send_orchestrator_post_event(
             source_role=orchestrator_role,
             source_response_text=post_dispatch_response_text,
             chain_context=chain_context,
+            correlation_id=corr_id,
         )
 
 
@@ -1048,7 +1090,9 @@ async def dispatch_mentions(
     source_role: Role,
     source_response_text: str,
     chain_context: ChainContext,
+    correlation_id: str | None = None,
 ) -> None:
+    corr_id = ensure_correlation_id(correlation_id)
     if not chain_context.can_continue():
         logger.info(
             "delegation skip: hop limit reached chain_id=%s source_role=%s hop=%s",
@@ -1135,6 +1179,7 @@ async def dispatch_mentions(
                 context=context,
                 team_role_id=int(queue_team_role_id),
                 request_id=queue_request_id,
+                operation=RuntimeOperation.DISPATCH_MENTIONS.value,
             ):
                 logger.info(
                     "delegation sent chain_id=%s source_role=%s target_role=%s hop=%s",
@@ -1157,6 +1202,8 @@ async def dispatch_mentions(
                     recipient=role_public_name(target),
                     wait_until_available=True,
                     queue_request_id=queue_request_id,
+                    correlation_id=corr_id,
+                    operation=RuntimeOperation.DISPATCH_MENTIONS.value,
                 )
                 response_text = result.response_text
                 if result.group_role.mode == "orchestrator":
@@ -1241,6 +1288,7 @@ async def dispatch_mentions(
                     role_answer_text=followup_response_text,
                     chain_context=followup_next_context,
                     dispatch_mentions_fn=dispatch_mentions,
+                    correlation_id=corr_id,
                 )
             await dispatch_mentions(
                 context=context,
@@ -1251,6 +1299,7 @@ async def dispatch_mentions(
                 source_role=target,
                 source_response_text=followup_response_text,
                 chain_context=followup_next_context,
+                correlation_id=corr_id,
             )
 
 
@@ -1273,7 +1322,9 @@ async def run_chain(
     allow_orchestrator_post_event: bool = True,
     trigger_type_orchestrator: str = "orchestrator_all_messages",
     chain_origin: ChainOrigin = "group",
+    correlation_id: str | None = None,
 ) -> ChainRunResult:
+    corr_id = ensure_correlation_id(correlation_id)
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     refresh_role_catalog(runtime=runtime, storage=storage)
@@ -1307,6 +1358,7 @@ async def run_chain(
                 context=context,
                 team_role_id=int(queue_team_role_id),
                 request_id=queue_request_id,
+                operation=RuntimeOperation.RUN_CHAIN.value,
             ):
                 group_role = storage.get_team_role(team_id, role.role_id)
                 if group_role.mode == "orchestrator":
@@ -1329,6 +1381,8 @@ async def run_chain(
                     recipient=role_public_name(role) if group_role.mode != "orchestrator" else "orchestrator",
                     wait_until_available=True,
                     queue_request_id=queue_request_id,
+                    correlation_id=corr_id,
+                    operation=RuntimeOperation.RUN_CHAIN.value,
                 )
                 group_role = result.group_role
                 model_override = result.model_override
@@ -1462,6 +1516,7 @@ async def run_chain(
                 role_answer_text=response_text,
                 chain_context=chain_context,
                 dispatch_mentions_fn=dispatch_mentions,
+                correlation_id=corr_id,
             )
         if chat_id < 0:
             await dispatch_mentions(
@@ -1473,6 +1528,7 @@ async def run_chain(
                 source_role=role,
                 source_response_text=response_text,
                 chain_context=chain_context,
+                correlation_id=corr_id,
             )
         completed_roles += 1
     return ChainRunResult(completed_roles=completed_roles, had_error=had_error, stopped=False)
