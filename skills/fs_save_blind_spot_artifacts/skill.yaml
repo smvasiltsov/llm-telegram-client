@@ -1,0 +1,7 @@
+id: fs_save_blind_spot_artifacts
+version: 0.1.0
+entrypoint: skill:create_skill
+enabled_by_default: false
+timeout_sec: 20
+permissions: []
+description: "Persist BlindSpotDetector payload as deterministic working-memory markdown artifacts."

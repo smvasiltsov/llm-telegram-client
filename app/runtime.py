@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 
@@ -24,6 +24,10 @@ from app.skills.service import SkillService
 from app.storage import Storage
 from app.tools import ToolMCPAdapter, ToolService
 
+if TYPE_CHECKING:
+    from app.application.authz import AuthzService
+    from app.application.dependencies import RuntimeDependencyProvider
+
 
 @dataclass
 class RuntimeContext:
@@ -39,6 +43,7 @@ class RuntimeContext:
     message_buffer: MessageBuffer
     private_buffer: MessageBuffer
     auth_service: AuthService
+    authz_service: "AuthzService"
     owner_user_id: int
     require_bot_mention: bool
     orchestrator_max_chain_auto_steps: int
@@ -76,6 +81,10 @@ class RuntimeContext:
     free_transition_delay_sec: int
     skills_to_llm_delay_sec: int
     role_catalog: RoleCatalog
+    dependency_provider: "RuntimeDependencyProvider | None" = None
 
     def to_bot_data(self) -> dict[str, Any]:
-        return {"runtime": self}
+        data: dict[str, Any] = {"runtime": self}
+        if self.dependency_provider is not None:
+            data["runtime_dependencies"] = self.dependency_provider
+        return data

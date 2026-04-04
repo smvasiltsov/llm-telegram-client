@@ -3,6 +3,8 @@ from __future__ import annotations
 import secrets
 import sqlite3
 import json
+import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +37,10 @@ class SessionResolution:
     session: UserRoleSession | None
 
 
+class StorageTransactionRequiredError(RuntimeError):
+    """Raised when a domain write is executed outside an explicit Storage.transaction()."""
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -45,10 +51,66 @@ def _iso_plus_seconds(ts: str, seconds: int) -> str:
 
 class Storage:
     def __init__(self, db_path: str | Path) -> None:
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        # Autocommit mode: write statements persist immediately unless wrapped by explicit BEGIN/COMMIT.
+        # This is required for UoW-only transaction control and to avoid implicit sqlite transactions.
+        self._conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._role_catalog: RoleCatalog | None = None
+        self._tx_depth = 0
+        self._tx_counter = 0
+        self._logger = logging.getLogger("bot")
+        self._enforce_write_uow = False
         self._init_schema()
+
+    def enable_write_uow_guard(self) -> None:
+        """Enable strict runtime guard for domain write paths."""
+        self._enforce_write_uow = True
+
+    def _require_write_transaction(self, operation: str) -> None:
+        """Guard for domain write operations that must run under explicit UoW."""
+        if not self._enforce_write_uow:
+            return
+        if self._tx_depth > 0:
+            return
+        self._logger.error("write_outside_transaction operation=%s", operation)
+        raise StorageTransactionRequiredError(f"Write requires Storage.transaction(): {operation}")
+
+    @contextmanager
+    def transaction(self, *, immediate: bool = False):
+        """Explicit UoW boundary with nested SAVEPOINT support."""
+        self._tx_counter += 1
+        tx_id = f"tx_{self._tx_counter}"
+        outermost = self._tx_depth == 0
+        savepoint_name = f"sp_{self._tx_counter}"
+        cur = self._conn.cursor()
+        if outermost:
+            begin_stmt = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+            cur.execute(begin_stmt)
+            self._logger.info("tx_begin tx_id=%s depth=%s mode=%s", tx_id, self._tx_depth + 1, "immediate" if immediate else "deferred")
+        else:
+            cur.execute(f"SAVEPOINT {savepoint_name}")
+            self._logger.info("tx_begin tx_id=%s depth=%s mode=savepoint", tx_id, self._tx_depth + 1)
+        self._tx_depth += 1
+        try:
+            yield self
+        except Exception:
+            self._tx_depth -= 1
+            if outermost:
+                self._conn.rollback()
+                self._logger.warning("tx_rollback tx_id=%s depth=%s", tx_id, self._tx_depth)
+            else:
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                self._logger.warning("tx_rollback tx_id=%s depth=%s mode=savepoint", tx_id, self._tx_depth)
+            raise
+        else:
+            self._tx_depth -= 1
+            if outermost:
+                self._conn.commit()
+                self._logger.info("tx_commit tx_id=%s depth=%s", tx_id, self._tx_depth)
+            else:
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+                self._logger.info("tx_commit tx_id=%s depth=%s mode=savepoint", tx_id, self._tx_depth)
 
     def attach_role_catalog(self, role_catalog: "RoleCatalog") -> None:
         self._role_catalog = role_catalog
@@ -1102,6 +1164,7 @@ class Storage:
         self._conn.commit()
 
     def save_plugin_text(self, plugin_id: str, text: str) -> str:
+        self._require_write_transaction('save_plugin_text')
         now = _utc_now()
         cur = self._conn.cursor()
         for _ in range(5):
@@ -1114,7 +1177,6 @@ class Storage:
                     """,
                     (text_id, plugin_id, text, now),
                 )
-                self._conn.commit()
                 return text_id
             except sqlite3.IntegrityError:
                 continue
@@ -1156,6 +1218,7 @@ class Storage:
         duration_ms: int | None = None,
         error_text: str | None = None,
     ) -> None:
+        self._require_write_transaction('log_tool_run')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1192,7 +1255,6 @@ class Storage:
                 now,
             ),
         )
-        self._conn.commit()
 
     def log_skill_run(
         self,
@@ -1211,6 +1273,7 @@ class Storage:
         error_text: str | None = None,
         output: dict | None = None,
     ) -> SkillRun:
+        self._require_write_transaction('log_skill_run')
         now = _utc_now()
         arguments_json = json.dumps(arguments, ensure_ascii=False) if arguments is not None else None
         config_json = json.dumps(config, ensure_ascii=False) if config is not None else None
@@ -1252,7 +1315,6 @@ class Storage:
                 now,
             ),
         )
-        self._conn.commit()
         row_id = int(cur.lastrowid)
         skill_run = self.get_skill_run(row_id)
         if skill_run is None:
@@ -1260,6 +1322,7 @@ class Storage:
         return skill_run
 
     def upsert_user(self, telegram_user_id: int, username: str | None) -> None:
+        self._require_write_transaction('upsert_user')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1271,7 +1334,6 @@ class Storage:
             """,
             (telegram_user_id, username, now),
         )
-        self._conn.commit()
 
     def upsert_group(self, group_id: int, title: str | None) -> Group:
         self.upsert_telegram_team_binding(group_id, title, is_active=True)
@@ -1343,6 +1405,7 @@ class Storage:
         ]
 
     def upsert_team(self, *, name: str | None, public_id: str | None = None, is_active: bool = True, ext_json: str | None = None) -> Team:
+        self._require_write_transaction('upsert_team')
         cur = self._conn.cursor()
         now = _utc_now()
         effective_public_id = (public_id or f"team-{secrets.token_hex(8)}").strip()
@@ -1360,7 +1423,6 @@ class Storage:
             """,
             (effective_public_id, name, 1 if is_active else 0, ext_json, now, now),
         )
-        self._conn.commit()
         cur.execute("SELECT team_id FROM teams WHERE public_id = ?", (effective_public_id,))
         row = cur.fetchone()
         if not row:
@@ -1376,6 +1438,7 @@ class Storage:
         external_title: str | None,
         is_active: bool = True,
     ) -> TeamBinding:
+        self._require_write_transaction('upsert_team_binding')
         cur = self._conn.cursor()
         now = _utc_now()
         iface = str(interface_type).strip().lower()
@@ -1394,7 +1457,6 @@ class Storage:
             """,
             (team_id, iface, ext_id, external_title, 1 if is_active else 0, now, now),
         )
-        self._conn.commit()
         return self.get_team_binding(interface_type=iface, external_id=ext_id)
 
     def list_team_bindings(self, *, interface_type: str, active_only: bool = True) -> list[TeamBinding]:
@@ -1522,6 +1584,7 @@ class Storage:
         return team.team_id
 
     def set_telegram_team_binding_active(self, chat_id: int, is_active: bool) -> None:
+        self._require_write_transaction('set_telegram_team_binding_active')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1532,7 +1595,6 @@ class Storage:
             """,
             (1 if is_active else 0, now, str(chat_id)),
         )
-        self._conn.commit()
 
     def get_skill_run(self, run_id: int) -> SkillRun | None:
         cur = self._conn.cursor()
@@ -1615,6 +1677,7 @@ class Storage:
         return result
 
     def add_conversation_message(self, session_id: str, role: str, content: str) -> None:
+        self._require_write_transaction('add_conversation_message')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1624,7 +1687,6 @@ class Storage:
             """,
             (session_id, role, content, now),
         )
-        self._conn.commit()
 
     def list_conversation_messages(self, session_id: str, limit: int | None = None) -> list[tuple[str, str]]:
         cur = self._conn.cursor()
@@ -1725,6 +1787,7 @@ class Storage:
         key: str,
         team_role_id: int,
     ) -> None:
+        self._require_write_transaction('block_provider_user_legacy_fallback')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1735,7 +1798,6 @@ class Storage:
             """,
             (provider_id, key, int(team_role_id), now),
         )
-        self._conn.commit()
 
     def unblock_provider_user_legacy_fallback(
         self,
@@ -1743,6 +1805,7 @@ class Storage:
         key: str,
         team_role_id: int,
     ) -> None:
+        self._require_write_transaction('unblock_provider_user_legacy_fallback')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -1751,9 +1814,9 @@ class Storage:
             """,
             (provider_id, key, int(team_role_id)),
         )
-        self._conn.commit()
 
     def set_provider_user_value(self, provider_id: str, key: str, role_id: int | None, value: str) -> None:
+        self._require_write_transaction('set_provider_user_value')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1766,9 +1829,9 @@ class Storage:
             """,
             (provider_id, key, role_id, value, now, now),
         )
-        self._conn.commit()
 
     def delete_provider_user_value(self, provider_id: str, key: str, role_id: int | None) -> None:
+        self._require_write_transaction('delete_provider_user_value')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -1777,7 +1840,6 @@ class Storage:
             """,
             (provider_id, key, role_id),
         )
-        self._conn.commit()
 
     def set_provider_user_value_by_team_role(
         self,
@@ -1786,6 +1848,7 @@ class Storage:
         team_role_id: int,
         value: str,
     ) -> None:
+        self._require_write_transaction('set_provider_user_value_by_team_role')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1798,9 +1861,9 @@ class Storage:
             """,
             (provider_id, key, int(team_role_id), value, now, now),
         )
-        self._conn.commit()
 
     def delete_provider_user_value_by_team_role(self, provider_id: str, key: str, team_role_id: int) -> None:
+        self._require_write_transaction('delete_provider_user_value_by_team_role')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -1809,9 +1872,9 @@ class Storage:
             """,
             (provider_id, key, int(team_role_id)),
         )
-        self._conn.commit()
 
     def delete_all_provider_user_values_by_team_role(self, team_role_id: int) -> None:
+        self._require_write_transaction('delete_all_provider_user_values_by_team_role')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -1820,7 +1883,6 @@ class Storage:
             """,
             (int(team_role_id),),
         )
-        self._conn.commit()
 
     def list_provider_user_legacy_keys_for_role(self, role_id: int) -> list[tuple[str, str]]:
         cur = self._conn.cursor()
@@ -1838,12 +1900,12 @@ class Storage:
         self.set_telegram_team_binding_active(group_id, is_active)
 
     def set_user_authorized(self, telegram_user_id: int, is_authorized: bool) -> None:
+        self._require_write_transaction('set_user_authorized')
         cur = self._conn.cursor()
         cur.execute(
             "UPDATE users SET is_authorized = ? WHERE telegram_user_id = ?",
             (1 if is_authorized else 0, telegram_user_id),
         )
-        self._conn.commit()
 
     def get_user(self, telegram_user_id: int) -> User | None:
         cur = self._conn.cursor()
@@ -1862,6 +1924,7 @@ class Storage:
         )
 
     def upsert_auth_token(self, telegram_user_id: int, encrypted_token: str) -> None:
+        self._require_write_transaction('upsert_auth_token')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -1875,7 +1938,6 @@ class Storage:
             """,
             (telegram_user_id, encrypted_token, now, now),
         )
-        self._conn.commit()
 
     def get_auth_token(self, telegram_user_id: int) -> AuthToken | None:
         cur = self._conn.cursor()
@@ -1899,10 +1961,10 @@ class Storage:
         )
 
     def reset_authorizations(self) -> None:
+        self._require_write_transaction('reset_authorizations')
         cur = self._conn.cursor()
         cur.execute("UPDATE users SET is_authorized = 0")
         cur.execute("UPDATE auth_tokens SET is_authorized = 0")
-        self._conn.commit()
 
     def upsert_role(
         self,
@@ -1913,6 +1975,7 @@ class Storage:
         llm_model: str | None,
         is_active: bool,
     ) -> Role:
+        self._require_write_transaction('upsert_role')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -1927,7 +1990,6 @@ class Storage:
             """,
             (role_name, description, base_system_prompt, extra_instruction, llm_model, 1 if is_active else 0),
         )
-        self._conn.commit()
         return self.get_role_by_name(role_name)
 
     def role_exists(self, role_name: str) -> bool:
@@ -2139,6 +2201,7 @@ class Storage:
         return int(row["team_id"]), int(row["role_id"])
 
     def ensure_team_role(self, team_id: int, role_id: int) -> TeamRole:
+        self._require_write_transaction('ensure_team_role')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -2163,10 +2226,10 @@ class Storage:
             """,
             (team_id, role_id, role_id),
         )
-        self._conn.commit()
         return self.get_team_role(team_id, role_id)
 
     def bind_master_role_to_team(self, team_id: int, role_id: int) -> tuple[TeamRole, bool]:
+        self._require_write_transaction('bind_master_role_to_team')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -2190,7 +2253,6 @@ class Storage:
                 """,
                 (team_id, role_id),
             )
-            self._conn.commit()
             return self.get_team_role(team_id, role_id), True
         return self.get_team_role(team_id, role_id), False
 
@@ -2391,6 +2453,7 @@ class Storage:
         ]
 
     def ensure_team_role_runtime_status(self, team_role_id: int) -> TeamRoleRuntimeStatus:
+        self._require_write_transaction('ensure_team_role_runtime_status')
         self.get_team_role_by_id(team_role_id)
         now = _utc_now()
         cur = self._conn.cursor()
@@ -2403,7 +2466,6 @@ class Storage:
             """,
             (team_role_id, now),
         )
-        self._conn.commit()
         status = self.get_team_role_runtime_status(team_role_id)
         if status is None:
             raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
@@ -2471,6 +2533,7 @@ class Storage:
         preview_source: str | None,
         now: str | None = None,
     ) -> None:
+        self._require_write_transaction('update_team_role_runtime_preview')
         self.ensure_team_role_runtime_status(team_role_id)
         cur = self._conn.cursor()
         cur.execute(
@@ -2481,7 +2544,6 @@ class Storage:
             """,
             (preview_text, preview_source, now or _utc_now(), team_role_id),
         )
-        self._conn.commit()
 
     def mark_team_role_runtime_busy(
         self,
@@ -2496,6 +2558,7 @@ class Storage:
         lease_expires_at: str | None,
         now: str | None = None,
     ) -> TeamRoleRuntimeStatus:
+        self._require_write_transaction('mark_team_role_runtime_busy')
         self.ensure_team_role_runtime_status(team_role_id)
         ts = now or _utc_now()
         cur = self._conn.cursor()
@@ -2532,7 +2595,6 @@ class Storage:
                 team_role_id,
             ),
         )
-        self._conn.commit()
         status = self.get_team_role_runtime_status(team_role_id)
         if status is None:
             raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
@@ -2545,6 +2607,7 @@ class Storage:
         release_reason: str | None,
         now: str | None = None,
     ) -> TeamRoleRuntimeStatus:
+        self._require_write_transaction('mark_team_role_runtime_free')
         self.ensure_team_role_runtime_status(team_role_id)
         cur = self._conn.cursor()
         cur.execute(
@@ -2570,7 +2633,6 @@ class Storage:
             """,
             (now or _utc_now(), release_reason, now or _utc_now(), team_role_id),
         )
-        self._conn.commit()
         status = self.get_team_role_runtime_status(team_role_id)
         if status is None:
             raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
@@ -2584,6 +2646,7 @@ class Storage:
         requested_at: str,
         delay_until: str,
     ) -> TeamRoleRuntimeStatus:
+        self._require_write_transaction('mark_team_role_runtime_release_requested')
         self.ensure_team_role_runtime_status(team_role_id)
         cur = self._conn.cursor()
         cur.execute(
@@ -2600,13 +2663,13 @@ class Storage:
             """,
             (requested_at, delay_until, release_reason, requested_at, team_role_id),
         )
-        self._conn.commit()
         status = self.get_team_role_runtime_status(team_role_id)
         if status is None:
             raise ValueError(f"Runtime status not found: team_role_id={team_role_id}")
         return status
 
     def finalize_due_team_role_runtime_releases(self, *, now: str | None = None, limit: int = 100) -> int:
+        self._require_write_transaction('finalize_due_team_role_runtime_releases')
         ts = now or _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -2640,7 +2703,6 @@ class Storage:
             """,
             (ts, ts, ts, limit),
         )
-        self._conn.commit()
         return int(cur.rowcount or 0)
 
     def list_due_team_role_runtime_releases(
@@ -2676,6 +2738,7 @@ class Storage:
         lease_expires_at: str | None,
         now: str | None = None,
     ) -> None:
+        self._require_write_transaction('heartbeat_team_role_runtime_status')
         self.ensure_team_role_runtime_status(team_role_id)
         cur = self._conn.cursor()
         cur.execute(
@@ -2689,9 +2752,9 @@ class Storage:
             """,
             (now or _utc_now(), lease_expires_at, now or _utc_now(), team_role_id),
         )
-        self._conn.commit()
 
     def create_role_lock_group(self, name: str, description: str | None = None, *, is_active: bool = True) -> RoleLockGroup:
+        self._require_write_transaction('create_role_lock_group')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
@@ -2705,7 +2768,6 @@ class Storage:
             """,
             (name, description, 1 if is_active else 0, now, now),
         )
-        self._conn.commit()
         group = self.get_role_lock_group_by_name(name)
         if group is None:
             raise ValueError(f"Lock group not found after upsert: name={name}")
@@ -2765,6 +2827,7 @@ class Storage:
         return [self._row_to_role_lock_group(row) for row in cur.fetchall()]
 
     def set_role_lock_group_active(self, lock_group_id: int, is_active: bool) -> None:
+        self._require_write_transaction('set_role_lock_group_active')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -2774,9 +2837,9 @@ class Storage:
             """,
             (1 if is_active else 0, _utc_now(), lock_group_id),
         )
-        self._conn.commit()
 
     def add_team_role_to_lock_group(self, lock_group_id: int, team_role_id: int) -> None:
+        self._require_write_transaction('add_team_role_to_lock_group')
         if self.get_role_lock_group(lock_group_id) is None:
             raise ValueError(f"Lock group not found: lock_group_id={lock_group_id}")
         self.get_team_role_by_id(team_role_id)
@@ -2788,9 +2851,9 @@ class Storage:
             """,
             (lock_group_id, team_role_id, _utc_now()),
         )
-        self._conn.commit()
 
     def remove_team_role_from_lock_group(self, lock_group_id: int, team_role_id: int) -> None:
+        self._require_write_transaction('remove_team_role_from_lock_group')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -2799,7 +2862,6 @@ class Storage:
             """,
             (lock_group_id, team_role_id),
         )
-        self._conn.commit()
 
     def list_lock_group_member_team_role_ids(self, lock_group_id: int) -> list[int]:
         cur = self._conn.cursor()
@@ -2858,6 +2920,7 @@ class Storage:
         return sorted(ids)
 
     def cleanup_stale_busy_team_roles(self, *, now: str | None = None, free_transition_delay_sec: int = 0) -> int:
+        self._require_write_transaction('cleanup_stale_busy_team_roles')
         ts = now or _utc_now()
         delay_sec = max(0, int(free_transition_delay_sec))
         delay_until = _iso_plus_seconds(ts, delay_sec) if delay_sec > 0 else ts
@@ -2903,7 +2966,6 @@ class Storage:
                 """,
                 (ts, ts),
             )
-        self._conn.commit()
         return int(cur.rowcount or 0)
 
     def try_acquire_team_role_busy(
@@ -3159,6 +3221,7 @@ class Storage:
         return cur.fetchone() is not None
 
     def set_team_role_prompt(self, team_id: int, role_id: int, system_prompt_override: str | None) -> None:
+        self._require_write_transaction('set_team_role_prompt')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3168,9 +3231,9 @@ class Storage:
             """,
             (system_prompt_override, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_display_name(self, team_id: int, role_id: int, display_name: str | None) -> None:
+        self._require_write_transaction('set_team_role_display_name')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3180,9 +3243,9 @@ class Storage:
             """,
             (display_name, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_model(self, team_id: int, role_id: int, model_override: str | None) -> None:
+        self._require_write_transaction('set_team_role_model')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3192,9 +3255,9 @@ class Storage:
             """,
             (model_override, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_extra_instruction(self, team_id: int, role_id: int, extra_instruction_override: str | None) -> None:
+        self._require_write_transaction('set_team_role_extra_instruction')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3204,9 +3267,9 @@ class Storage:
             """,
             (extra_instruction_override, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_user_prompt_suffix(self, team_id: int, role_id: int, user_prompt_suffix: str | None) -> None:
+        self._require_write_transaction('set_team_role_user_prompt_suffix')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3216,9 +3279,9 @@ class Storage:
             """,
             (user_prompt_suffix, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_user_reply_prefix(self, team_id: int, role_id: int, user_reply_prefix: str | None) -> None:
+        self._require_write_transaction('set_team_role_user_reply_prefix')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3228,9 +3291,9 @@ class Storage:
             """,
             (user_reply_prefix, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_enabled(self, team_id: int, role_id: int, enabled: bool) -> None:
+        self._require_write_transaction('set_team_role_enabled')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3240,9 +3303,9 @@ class Storage:
             """,
             (1 if enabled else 0, team_id, role_id),
         )
-        self._conn.commit()
 
     def set_team_role_mode(self, team_id: int, role_id: int, mode: str) -> None:
+        self._require_write_transaction('set_team_role_mode')
         mode_value = str(mode).strip().lower()
         if mode_value not in {"normal", "orchestrator"}:
             raise ValueError(f"Unsupported team role mode: {mode!r}")
@@ -3264,9 +3327,9 @@ class Storage:
             """,
             (mode_value, mode_value, team_id, role_id),
         )
-        self._conn.commit()
 
     def deactivate_team_role(self, team_id: int, role_id: int) -> None:
+        self._require_write_transaction('deactivate_team_role')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3276,7 +3339,6 @@ class Storage:
             """,
             (team_id, role_id),
         )
-        self._conn.commit()
 
     def list_active_team_role_names(self) -> list[str]:
         cur = self._conn.cursor()
@@ -3292,6 +3354,7 @@ class Storage:
         return [str(row["role_name"]) for row in rows]
 
     def deactivate_team_roles_by_role_name(self, role_name: str) -> int:
+        self._require_write_transaction('deactivate_team_roles_by_role_name')
         cur = self._conn.cursor()
         cur.execute(
             """
@@ -3301,7 +3364,6 @@ class Storage:
             """,
             (role_name,),
         )
-        self._conn.commit()
         return int(cur.rowcount or 0)
 
     def ensure_group_role(self, group_id: int, role_id: int) -> GroupRole:
@@ -3346,6 +3408,7 @@ class Storage:
         return self.team_role_name_exists(team_id, role_name, exclude_role_id=exclude_role_id)
 
     def update_role_name(self, role_id: int, role_name: str) -> None:
+        self._require_write_transaction('update_role_name')
         cur = self._conn.cursor()
         cur.execute(
             "UPDATE roles SET role_name = ? WHERE role_id = ?",
@@ -3361,7 +3424,6 @@ class Storage:
                 "UPDATE provider_user_data SET role_name = ? WHERE role_id = ?",
                 (role_name, role_id),
             )
-        self._conn.commit()
 
     def delete_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
@@ -3415,6 +3477,7 @@ class Storage:
         self.deactivate_team_role(team_id, role_id)
 
     def delete_role_if_unused(self, role_id: int) -> bool:
+        self._require_write_transaction('delete_role_if_unused')
         cur = self._conn.cursor()
         cur.execute(
             "SELECT 1 FROM team_roles WHERE role_id = ? AND is_active = 1 LIMIT 1",
@@ -3423,7 +3486,6 @@ class Storage:
         if cur.fetchone():
             return False
         cur.execute("DELETE FROM roles WHERE role_id = ?", (role_id,))
-        self._conn.commit()
         return True
 
     def get_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> UserRoleSession | None:
@@ -3503,6 +3565,7 @@ class Storage:
         self.save_user_role_session_by_team(telegram_user_id, team_id, role_id, session_id)
 
     def save_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int, session_id: str) -> None:
+        self._require_write_transaction('save_user_role_session_by_team')
         team_role_id = self.resolve_team_role_id(team_id, role_id, ensure_exists=True)
         if team_role_id is not None:
             self.save_user_role_session_by_team_role(telegram_user_id, team_role_id, session_id)
@@ -3519,9 +3582,9 @@ class Storage:
             """,
             (telegram_user_id, team_id, role_id, session_id, now, now),
         )
-        self._conn.commit()
 
     def save_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int, session_id: str) -> None:
+        self._require_write_transaction('save_user_role_session_by_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             raise ValueError(f"Team role not found: team_role_id={team_role_id}")
@@ -3553,9 +3616,9 @@ class Storage:
                 """,
                 (telegram_user_id, team_id, role_id, session_id, now, now),
             )
-        self._conn.commit()
 
     def delete_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int) -> None:
+        self._require_write_transaction('delete_user_role_session_by_team')
         team_role_id = self.resolve_team_role_id(team_id, role_id)
         if self.has_session_team_role_id() and team_role_id is not None:
             self.delete_user_role_session_by_team_role(telegram_user_id, team_role_id)
@@ -3568,9 +3631,9 @@ class Storage:
             """,
             (telegram_user_id, team_id, role_id),
         )
-        self._conn.commit()
 
     def delete_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int) -> None:
+        self._require_write_transaction('delete_user_role_session_by_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -3592,13 +3655,13 @@ class Storage:
                 """,
                 (telegram_user_id, team_id, role_id),
             )
-        self._conn.commit()
 
     def touch_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.touch_user_role_session_by_team(telegram_user_id, team_id, role_id)
 
     def touch_user_role_session_by_team(self, telegram_user_id: int, team_id: int, role_id: int) -> None:
+        self._require_write_transaction('touch_user_role_session_by_team')
         team_role_id = self.resolve_team_role_id(team_id, role_id)
         if self.has_session_team_role_id() and team_role_id is not None:
             self.touch_user_role_session_by_team_role(telegram_user_id, team_role_id)
@@ -3613,9 +3676,9 @@ class Storage:
             """,
             (now, telegram_user_id, team_id, role_id),
         )
-        self._conn.commit()
 
     def touch_user_role_session_by_team_role(self, telegram_user_id: int, team_role_id: int) -> None:
+        self._require_write_transaction('touch_user_role_session_by_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -3640,7 +3703,6 @@ class Storage:
                 """,
                 (now, telegram_user_id, team_id, role_id),
             )
-        self._conn.commit()
 
     def list_user_sessions(self, telegram_user_id: int) -> list[str]:
         cur = self._conn.cursor()
@@ -3836,6 +3898,7 @@ class Storage:
         enabled: bool = True,
         config: dict | None = None,
     ) -> RolePrePostProcessing:
+        self._require_write_transaction('upsert_role_prepost_processing_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             raise ValueError(f"Team role not found: team_role_id={team_role_id}")
@@ -3870,7 +3933,6 @@ class Storage:
                 """,
                 (team_id, role_id, prepost_processing_id, 1 if enabled else 0, config_json, now, now),
             )
-        self._conn.commit()
         got = self.get_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
         if got is None:
             raise RuntimeError("Failed to upsert team role pre/post processing")
@@ -3938,6 +4000,7 @@ class Storage:
         prepost_processing_id: str,
         enabled: bool,
     ) -> None:
+        self._require_write_transaction('set_role_prepost_processing_enabled_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -3962,7 +4025,6 @@ class Storage:
                 """,
                 (1 if enabled else 0, now, team_id, role_id, prepost_processing_id),
             )
-        self._conn.commit()
 
     def set_role_prepost_processing_config_for_team(
         self,
@@ -3982,6 +4044,7 @@ class Storage:
         prepost_processing_id: str,
         config: dict | None,
     ) -> None:
+        self._require_write_transaction('set_role_prepost_processing_config_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -4007,7 +4070,6 @@ class Storage:
                 """,
                 (config_json, now, team_id, role_id, prepost_processing_id),
             )
-        self._conn.commit()
 
     def delete_role_prepost_processing_for_team(self, team_id: int, role_id: int, prepost_processing_id: str) -> None:
         team_role_id = self.resolve_team_role_id(team_id, role_id)
@@ -4016,6 +4078,7 @@ class Storage:
         self.delete_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
 
     def delete_role_prepost_processing_for_team_role(self, team_role_id: int, prepost_processing_id: str) -> None:
+        self._require_write_transaction('delete_role_prepost_processing_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -4037,7 +4100,6 @@ class Storage:
                 """,
                 (team_id, role_id, prepost_processing_id),
             )
-        self._conn.commit()
 
     def set_role_prepost_processing_enabled(self, group_id: int, role_id: int, prepost_processing_id: str, enabled: bool) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
@@ -4197,6 +4259,7 @@ class Storage:
         enabled: bool = True,
         config: dict | None = None,
     ) -> RoleSkill:
+        self._require_write_transaction('upsert_role_skill_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             raise ValueError(f"Team role not found: team_role_id={team_role_id}")
@@ -4231,7 +4294,6 @@ class Storage:
                 """,
                 (team_id, role_id, skill_id, 1 if enabled else 0, config_json, now, now),
             )
-        self._conn.commit()
         got = self.get_role_skill_for_team_role(team_role_id, skill_id)
         if got is None:
             raise RuntimeError("Failed to upsert team role skill")
@@ -4288,6 +4350,7 @@ class Storage:
         self.set_role_skill_enabled_for_team_role(team_role_id, skill_id, enabled)
 
     def set_role_skill_enabled_for_team_role(self, team_role_id: int, skill_id: str, enabled: bool) -> None:
+        self._require_write_transaction('set_role_skill_enabled_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -4312,7 +4375,6 @@ class Storage:
                 """,
                 (1 if enabled else 0, now, team_id, role_id, skill_id),
             )
-        self._conn.commit()
 
     def set_role_skill_config_for_team(self, team_id: int, role_id: int, skill_id: str, config: dict | None) -> None:
         team_role_id = self.resolve_team_role_id(team_id, role_id)
@@ -4321,6 +4383,7 @@ class Storage:
         self.set_role_skill_config_for_team_role(team_role_id, skill_id, config)
 
     def set_role_skill_config_for_team_role(self, team_role_id: int, skill_id: str, config: dict | None) -> None:
+        self._require_write_transaction('set_role_skill_config_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -4346,7 +4409,6 @@ class Storage:
                 """,
                 (config_json, now, team_id, role_id, skill_id),
             )
-        self._conn.commit()
 
     def delete_role_skill_for_team(self, team_id: int, role_id: int, skill_id: str) -> None:
         team_role_id = self.resolve_team_role_id(team_id, role_id)
@@ -4355,6 +4417,7 @@ class Storage:
         self.delete_role_skill_for_team_role(team_role_id, skill_id)
 
     def delete_role_skill_for_team_role(self, team_role_id: int, skill_id: str) -> None:
+        self._require_write_transaction('delete_role_skill_for_team_role')
         identity = self.resolve_team_role_identity(team_role_id)
         if identity is None:
             return
@@ -4376,7 +4439,6 @@ class Storage:
                 """,
                 (team_id, role_id, skill_id),
             )
-        self._conn.commit()
 
     def clone_team_role_processing_bindings(self, source_team_role_id: int, target_team_role_id: int) -> None:
         source_identity = self.resolve_team_role_identity(source_team_role_id)

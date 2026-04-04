@@ -1,0 +1,179 @@
+from __future__ import annotations
+
+from uuid import uuid4
+from typing import Any, Callable, Awaitable
+
+from app.application.contracts import ErrorCode, Result
+from app.application.contracts.runtime_ops import (
+    RuntimeOperation,
+    RuntimeOperationResult,
+    RuntimeState,
+    RuntimeTransition,
+)
+
+
+RUNTIME_OPERATION_TRANSITION_TABLE: tuple[dict[str, str], ...] = (
+    {
+        "operation": RuntimeOperation.RUN_CHAIN.value,
+        "trigger": "group",
+        "path": f"{RuntimeState.QUEUED.value}->{RuntimeState.BUSY.value}->{RuntimeState.FREE.value}",
+        "on_error": f"{RuntimeState.BUSY.value}->{RuntimeState.PENDING.value}",
+    },
+    {
+        "operation": RuntimeOperation.DISPATCH_MENTIONS.value,
+        "trigger": "group",
+        "path": f"{RuntimeState.QUEUED.value}->{RuntimeState.BUSY.value}->{RuntimeState.FREE.value}",
+        "on_error": f"{RuntimeState.BUSY.value}->{RuntimeState.PENDING.value}",
+    },
+    {
+        "operation": RuntimeOperation.ORCHESTRATOR_POST_EVENT.value,
+        "trigger": "group",
+        "path": f"{RuntimeState.QUEUED.value}->{RuntimeState.BUSY.value}->{RuntimeState.FREE.value}",
+        "on_error": f"{RuntimeState.BUSY.value}->{RuntimeState.PENDING.value}",
+    },
+    {
+        "operation": RuntimeOperation.PENDING_REPLAY.value,
+        "trigger": "pending",
+        "path": f"{RuntimeState.QUEUED.value}->{RuntimeState.BUSY.value}->{RuntimeState.FREE.value}",
+        "on_error": f"{RuntimeState.BUSY.value}->{RuntimeState.PENDING.value}",
+    },
+)
+
+
+def _build_runtime_transitions(
+    *,
+    operation: str,
+    trigger: str,
+    request_id: str,
+    completed: bool,
+    pending_saved: bool,
+    replay_scheduled: bool,
+) -> tuple[RuntimeTransition, ...]:
+    transitions: list[RuntimeTransition] = [
+        RuntimeTransition(
+            operation=operation,
+            trigger=trigger,
+            from_state=RuntimeState.QUEUED.value,
+            to_state=RuntimeState.BUSY.value,
+            team_role_id=None,
+            request_id=request_id,
+            reason="slot_granted",
+        )
+    ]
+    if completed:
+        transitions.append(
+            RuntimeTransition(
+                operation=operation,
+                trigger=trigger,
+                from_state=RuntimeState.BUSY.value,
+                to_state=RuntimeState.FREE.value,
+                team_role_id=None,
+                request_id=request_id,
+                reason="response_sent",
+            )
+        )
+        return tuple(transitions)
+    reason = "delivery_failed"
+    if replay_scheduled:
+        reason = "replay_failed"
+    elif pending_saved:
+        reason = "unauthorized_pending_saved"
+    transitions.append(
+        RuntimeTransition(
+            operation=operation,
+            trigger=trigger,
+            from_state=RuntimeState.BUSY.value,
+            to_state=RuntimeState.PENDING.value,
+            team_role_id=None,
+            request_id=request_id,
+            reason=reason,
+        )
+    )
+    return tuple(transitions)
+
+
+async def execute_run_chain_operation(
+    *,
+    context,
+    team_id: int,
+    chat_id: int,
+    user_id: int,
+    session_token: str,
+    roles: list,
+    user_text: str,
+    reply_text: str | None,
+    actor_username: str | None,
+    reply_to_message_id: int,
+    is_all: bool,
+    apply_plugins: bool,
+    save_pending_on_unauthorized: bool,
+    pending_role_name: str | None = None,
+    allow_orchestrator_post_event: bool = True,
+    trigger_type_orchestrator: str = "orchestrator_all_messages",
+    chain_origin: str = "group",
+    operation: str | RuntimeOperation = RuntimeOperation.RUN_CHAIN,
+    request_id: str | None = None,
+    run_chain_fn: Callable[..., Awaitable[Any]] | None = None,
+) -> Result[RuntimeOperationResult]:
+    # Lazy import keeps use-case tests independent from Telegram runtime deps.
+    if run_chain_fn is None:
+        from app.services.role_pipeline import run_chain as run_chain_fn
+
+    op_name = operation.value if isinstance(operation, RuntimeOperation) else str(operation)
+    req_id = request_id or uuid4().hex
+    try:
+        chain_result = await run_chain_fn(
+            context=context,
+            team_id=team_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_token=session_token,
+            roles=roles,
+            user_text=user_text,
+            reply_text=reply_text,
+            actor_username=actor_username,
+            reply_to_message_id=reply_to_message_id,
+            is_all=is_all,
+            apply_plugins=apply_plugins,
+            save_pending_on_unauthorized=save_pending_on_unauthorized,
+            pending_role_name=pending_role_name,
+            allow_orchestrator_post_event=allow_orchestrator_post_event,
+            trigger_type_orchestrator=trigger_type_orchestrator,
+            chain_origin=chain_origin,  # type: ignore[arg-type]
+        )
+    except Exception as exc:
+        code = ErrorCode.RUNTIME_REPLAY_FAILED if op_name == RuntimeOperation.PENDING_REPLAY.value else ErrorCode.INTERNAL_UNEXPECTED
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=code,
+            fallback_message="Runtime operation failed",
+            fallback_details={
+                "entity": "runtime_operation",
+                "operation": op_name,
+                "cause": "exception",
+                "request_id": req_id,
+            },
+        )
+
+    completed = not chain_result.had_error
+    pending_saved = bool(save_pending_on_unauthorized and chain_result.had_error)
+    replay_scheduled = bool(op_name == RuntimeOperation.PENDING_REPLAY.value and chain_result.had_error)
+    return Result.ok(
+        RuntimeOperationResult(
+            operation=op_name,
+            request_id=req_id,
+            completed=completed,
+            queued=bool(chain_result.completed_roles > 0),
+            busy_acquired=bool(chain_result.completed_roles > 0),
+            pending_saved=pending_saved,
+            replay_scheduled=replay_scheduled,
+            transitions=_build_runtime_transitions(
+                operation=op_name,
+                trigger=chain_origin,
+                request_id=req_id,
+                completed=completed,
+                pending_saved=pending_saved,
+                replay_scheduled=replay_scheduled,
+            ),
+        )
+    )

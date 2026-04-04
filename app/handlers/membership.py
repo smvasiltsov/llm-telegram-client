@@ -23,10 +23,12 @@ async def handle_bot_membership(update: Update, context: ContextTypes.DEFAULT_TY
     old_status = update.my_chat_member.old_chat_member.status
     storage: Storage = runtime.storage
     if new_status in ("member", "administrator") and old_status in ("left", "kicked"):
-        team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
-        seed_team_roles(storage, team_id)
+        with storage.transaction(immediate=True):
+            team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
+            seed_team_roles(storage, team_id)
     elif new_status in ("left", "kicked"):
-        storage.set_telegram_team_binding_active(chat.id, False)
+        with storage.transaction(immediate=True):
+            storage.set_telegram_team_binding_active(chat.id, False)
 
 
 async def handle_group_seen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -38,5 +40,6 @@ async def handle_group_seen(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
     logger.info("group seen chat_id=%s title=%r", chat.id, chat.title)
     storage: Storage = runtime.storage
-    team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
-    seed_team_roles(storage, team_id)
+    with storage.transaction(immediate=True):
+        team_id = storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
+        seed_team_roles(storage, team_id)

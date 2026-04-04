@@ -112,13 +112,13 @@ class LTC18RuntimeStatusServiceTests(unittest.TestCase):
                 busy_origin="group",
                 preview_text="stale task",
                 preview_source="user",
-                busy_since="2026-03-26T10:00:00+00:00",
-                lease_expires_at="2026-03-26T10:00:30+00:00",
-                now="2026-03-26T10:00:00+00:00",
+                busy_since="2999-03-26T10:00:00+00:00",
+                lease_expires_at="2999-03-26T10:00:30+00:00",
+                now="2999-03-26T10:00:00+00:00",
             )
 
             changed = storage.cleanup_stale_busy_team_roles(
-                now="2026-03-26T10:00:31+00:00",
+                now="2999-03-26T10:00:31+00:00",
                 free_transition_delay_sec=20,
             )
             self.assertEqual(changed, 1)
@@ -126,7 +126,7 @@ class LTC18RuntimeStatusServiceTests(unittest.TestCase):
             self.assertEqual(pending.status, "busy")
             self.assertEqual(pending.free_release_reason_pending, "lease_expired_cleanup")
 
-            finalized = service.finalize_due_releases(now="2026-03-26T10:00:51+00:00")
+            finalized = service.finalize_due_releases(now="2999-03-26T10:00:51+00:00")
             self.assertEqual(finalized, 1)
             released = service.get_status(team_role_id=tr)
             self.assertEqual(released.status, "free")

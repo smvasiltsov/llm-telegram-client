@@ -6,6 +6,18 @@ from uuid import uuid4
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from app.application.dependencies import (
+    resolve_pending_replay_dependencies,
+    resolve_runtime_orchestration_dependencies,
+    resolve_storage_uow_dependencies,
+)
+from app.application.authz import (
+    action_for_callback_admin,
+    actor_from_callback,
+    resource_ctx_from_callback,
+)
+from app.application.contracts import log_structured_error, to_telegram_message
+from app.application.use_cases.callback_role_actions import RoleActionRequest, execute_role_action
 from app.core.use_cases import (
     bind_master_role_to_group,
     clear_team_role_prompt,
@@ -19,8 +31,6 @@ from app.core.use_cases import (
     reset_team_role_session,
     resolve_team_id,
     resolve_team_role_id,
-    set_team_role_enabled,
-    set_team_role_mode,
     set_team_role_model,
 )
 from app.llm_providers import model_label
@@ -39,8 +49,80 @@ from app.utils import split_message
 logger = logging.getLogger("bot")
 
 
+def _bot_data(context: ContextTypes.DEFAULT_TYPE) -> dict[str, object]:
+    application = getattr(context, "application", None)
+    data = getattr(application, "bot_data", None)
+    if isinstance(data, dict):
+        return data
+    return {}
+
+
+def _resolve_storage(context: ContextTypes.DEFAULT_TYPE, runtime: RuntimeContext) -> Storage:
+    storage_result = resolve_storage_uow_dependencies(_bot_data(context))
+    if storage_result.is_ok and storage_result.value is not None:
+        return storage_result.value.storage
+    return runtime.storage
+
+
+def _resolve_pending_maps(
+    context: ContextTypes.DEFAULT_TYPE,
+    runtime: RuntimeContext,
+) -> tuple[dict[int, tuple[int, int]], dict[int, dict[str, object]]]:
+    pending_result = resolve_pending_replay_dependencies(_bot_data(context))
+    if pending_result.is_ok and pending_result.value is not None:
+        return pending_result.value.pending_prompts, pending_result.value.pending_role_ops
+    pending_prompts = getattr(runtime, "pending_prompts", {})
+    pending_role_ops = getattr(runtime, "pending_role_ops", {})
+    if not isinstance(pending_prompts, dict):
+        pending_prompts = {}
+    if not isinstance(pending_role_ops, dict):
+        pending_role_ops = {}
+    return pending_prompts, pending_role_ops
+
+
+def _resolve_provider_data(
+    context: ContextTypes.DEFAULT_TYPE,
+    runtime: RuntimeContext,
+) -> tuple[list[object], dict[str, object], dict[str, object]]:
+    runtime_result = resolve_runtime_orchestration_dependencies(_bot_data(context))
+    if runtime_result.is_ok and runtime_result.value is not None:
+        return (
+            runtime_result.value.provider_models,
+            runtime_result.value.provider_model_map,
+            runtime_result.value.provider_registry,
+        )
+    provider_models = getattr(runtime, "provider_models", [])
+    provider_model_map = getattr(runtime, "provider_model_map", {})
+    provider_registry = getattr(runtime, "provider_registry", {})
+    if not isinstance(provider_models, list):
+        provider_models = []
+    if not isinstance(provider_model_map, dict):
+        provider_model_map = {}
+    if not isinstance(provider_registry, dict):
+        provider_registry = {}
+    return provider_models, provider_model_map, provider_registry
+
+
 async def _is_owner_callback(query: CallbackQuery, runtime: RuntimeContext) -> bool:
-    if query.from_user.id != runtime.owner_user_id:
+    actor = actor_from_callback(query)
+    if actor is None:
+        await query.answer()
+        return False
+    authz_service = getattr(runtime, "authz_service", None)
+    if authz_service is None:
+        if int(actor.user_id) != int(getattr(runtime, "owner_user_id", -1)):
+            await query.answer()
+            return False
+        return True
+    result = authz_service.authorize(
+        action=action_for_callback_admin(),
+        actor=actor,
+        resource_ctx=resource_ctx_from_callback(query),
+    )
+    if result.is_error:
+        await query.answer()
+        return False
+    if not (result.value and result.value.allowed):
         await query.answer()
         return False
     return True
@@ -69,7 +151,14 @@ def _team_id(storage: Storage, group_id: int) -> int:
 
 
 def _team_role_id(storage: Storage, group_id: int, role_id: int, *, ensure_exists: bool = False) -> int:
-    return resolve_team_role_id(storage, group_id, role_id, ensure_exists=ensure_exists)
+    if ensure_exists:
+        with storage.transaction(immediate=True):
+            team_role_id = resolve_team_role_id(storage, group_id, role_id, ensure_exists=True)
+    else:
+        team_role_id = resolve_team_role_id(storage, group_id, role_id, ensure_exists=False)
+    if team_role_id is None:
+        raise ValueError(f"Team role not found: group_id={group_id} role_id={role_id}")
+    return int(team_role_id)
 
 
 def _list_telegram_groups(storage: Storage):
@@ -643,18 +732,29 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
     team_id = resolve_team_id(storage, group_id)
     role = storage.get_role_by_id(role_id)
     group_role = storage.get_team_role(team_id, role_id)
+    pending_prompts, pending_roles = _resolve_pending_maps(context, runtime)
+    provider_models, provider_model_map, provider_registry = _resolve_provider_data(context, runtime)
     if action == "toggle_enabled":
-        try:
-            updated = set_team_role_enabled(storage, group_id=group_id, role_id=role_id, enabled=not group_role.enabled)
-        except ValueError as exc:
+        result = execute_role_action(
+            storage,
+            RoleActionRequest(action="toggle_enabled", group_id=group_id, role_id=role_id),
+        )
+        if result.is_error or result.value is None:
+            log_structured_error(
+                logger,
+                event="callback_toggle_enabled_failed",
+                error=result.error,
+                extra={"group_id": group_id, "role_id": role_id, "user_id": query.from_user.id},
+            )
             await query.edit_message_text(
-                f"Не удалось изменить статус роли: {exc}",
+                to_telegram_message(result.error, "Не удалось изменить статус роли."),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
                 ),
             )
             await query.answer()
             return True
+        updated = result.value.state
         logger.info(
             "group_role toggle_enabled group_id=%s role_id=%s role=%s enabled=%s mode=%s actor_user_id=%s",
             group_id,
@@ -680,22 +780,27 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "set_mode_orchestrator":
-        try:
-            updated, previous_orchestrator_role_id = set_team_role_mode(
-                storage,
-                group_id=group_id,
-                role_id=role_id,
-                mode="orchestrator",
+        result = execute_role_action(
+            storage,
+            RoleActionRequest(action="set_mode_orchestrator", group_id=group_id, role_id=role_id),
+        )
+        if result.is_error or result.value is None:
+            log_structured_error(
+                logger,
+                event="callback_set_mode_orchestrator_failed",
+                error=result.error,
+                extra={"group_id": group_id, "role_id": role_id, "user_id": query.from_user.id},
             )
-        except ValueError as exc:
             await query.edit_message_text(
-                f"Не удалось изменить режим роли: {exc}",
+                to_telegram_message(result.error, "Не удалось изменить режим роли."),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
                 ),
             )
             await query.answer()
             return True
+        updated = result.value.state
+        previous_orchestrator_role_id = result.value.previous_orchestrator_role_id
         logger.info(
             "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s previous_orchestrator_role_id=%s",
             group_id,
@@ -724,22 +829,26 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "set_mode_normal":
-        try:
-            updated, _ = set_team_role_mode(
-                storage,
-                group_id=group_id,
-                role_id=role_id,
-                mode="normal",
+        result = execute_role_action(
+            storage,
+            RoleActionRequest(action="set_mode_normal", group_id=group_id, role_id=role_id),
+        )
+        if result.is_error or result.value is None:
+            log_structured_error(
+                logger,
+                event="callback_set_mode_normal_failed",
+                error=result.error,
+                extra={"group_id": group_id, "role_id": role_id, "user_id": query.from_user.id},
             )
-        except ValueError as exc:
             await query.edit_message_text(
-                f"Не удалось изменить режим роли: {exc}",
+                to_telegram_message(result.error, "Не удалось изменить режим роли."),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
                 ),
             )
             await query.answer()
             return True
+        updated = result.value.state
         logger.info(
             "group_role set_mode group_id=%s role_id=%s role=%s mode=%s actor_user_id=%s",
             group_id,
@@ -767,7 +876,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
             prompt = role.base_system_prompt
         if not prompt:
             prompt = "(не задано)"
-        pending_prompts = runtime.pending_prompts
         pending_prompts[query.from_user.id] = (group_id, role_id)
         await query.edit_message_text(
             "Ваш системный промпт сейчас такой:\n\n"
@@ -790,7 +898,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "master_set_prompt":
-        pending_roles = runtime.pending_role_ops
         pending_roles[query.from_user.id] = {
             "mode": "master_update",
             "step": "master_prompt",
@@ -806,7 +913,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "master_set_suffix":
-        pending_roles = runtime.pending_role_ops
         pending_roles[query.from_user.id] = {
             "mode": "master_update",
             "step": "master_suffix",
@@ -822,9 +928,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "master_set_model":
-        provider_models = runtime.provider_models
-        provider_model_map = runtime.provider_model_map
-        provider_registry = runtime.provider_registry
         role_for_master = storage.get_role_by_id(role_id)
         current_model = role_for_master.llm_model
         if not current_model:
@@ -947,7 +1050,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "rename_role":
-        pending_roles = runtime.pending_role_ops
         pending_roles[query.from_user.id] = {
             "mode": "rename",
             "step": "name",
@@ -964,9 +1066,6 @@ async def _handle_action(query: CallbackQuery, data: str, context: ContextTypes.
         await query.answer()
         return True
     if action == "set_model":
-        provider_models = runtime.provider_models
-        provider_model_map = runtime.provider_model_map
-        provider_registry = runtime.provider_registry
         current_model = resolve_provider_model(
             provider_models,
             provider_model_map,
@@ -1175,12 +1274,20 @@ async def _handle_skill_toggle(
     return True
 
 
-async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, runtime: RuntimeContext) -> bool:
+async def _handle_set_model(
+    query: CallbackQuery,
+    data: str,
+    storage: Storage,
+    runtime: RuntimeContext,
+    *,
+    provider_model_map: dict[str, object],
+    provider_registry: dict[str, object],
+) -> bool:
     if data.startswith("msetmodel:"):
         _, group_id_str, role_id_str, model_name = data.split(":", 3)
         group_id = int(group_id_str)
         role_id = int(role_id_str)
-        if model_name != "__none__" and model_name not in runtime.provider_model_map:
+        if model_name != "__none__" and model_name not in provider_model_map:
             await query.edit_message_text(
                 "Модель не найдена в llm_providers.",
                 reply_markup=InlineKeyboardMarkup(
@@ -1206,8 +1313,8 @@ async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, r
         )
         label = "(не задана)"
         if new_model:
-            model_obj = runtime.provider_model_map.get(new_model)
-            provider = runtime.provider_registry.get(model_obj.provider_id) if model_obj else None
+            model_obj = provider_model_map.get(new_model)
+            provider = provider_registry.get(model_obj.provider_id) if model_obj else None
             label = model_label(model_obj, provider) if model_obj else new_model
         await query.edit_message_text(
             f"Master-модель для @{role.role_name} обновлена: {label}",
@@ -1222,7 +1329,6 @@ async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, r
     _, group_id_str, role_id_str, model_name = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    provider_model_map = runtime.provider_model_map
     if model_name not in provider_model_map:
         await query.edit_message_text(
             "Модель не найдена в llm_providers.",
@@ -1233,8 +1339,6 @@ async def _handle_set_model(query: CallbackQuery, data: str, storage: Storage, r
         await query.answer()
         return True
     set_team_role_model(storage, group_id=group_id, role_id=role_id, model_name=model_name)
-    provider_registry = runtime.provider_registry
-    provider_model_map = runtime.provider_model_map
     model_obj = provider_model_map.get(model_name)
     label = model_name
     if model_obj:
@@ -1259,13 +1363,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not await _is_owner_callback(query, runtime):
         return
 
-    storage: Storage = runtime.storage
+    storage: Storage = _resolve_storage(context, runtime)
+    pending_prompts, pending_role_ops = _resolve_pending_maps(context, runtime)
+    _, provider_model_map, provider_registry = _resolve_provider_data(context, runtime)
     data = query.data or ""
     if data.startswith("mrole") or data.startswith("mroles"):
         refresh_role_catalog(runtime=runtime, storage=storage)
     if not data.startswith("mrole_create_model:"):
-        runtime.pending_prompts.pop(query.from_user.id, None)
-        runtime.pending_role_ops.pop(query.from_user.id, None)
+        pending_prompts.pop(query.from_user.id, None)
+        pending_role_ops.pop(query.from_user.id, None)
 
     if await _handle_groups_navigation(query, data, storage):
         return
@@ -1283,5 +1389,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if await _handle_skill_toggle(query, data, storage, runtime):
         return
-    if await _handle_set_model(query, data, storage, runtime):
+    if await _handle_set_model(
+        query,
+        data,
+        storage,
+        runtime,
+        provider_model_map=provider_model_map,
+        provider_registry=provider_registry,
+    ):
         return

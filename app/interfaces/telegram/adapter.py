@@ -7,6 +7,7 @@ from telegram import BotCommand, Update
 from telegram import BotCommandScopeAllGroupChats, BotCommandScopeAllPrivateChats, BotCommandScopeChat, BotCommandScopeDefault
 from telegram.ext import Application, ApplicationBuilder, CallbackQueryHandler, ChatMemberHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
+from app.application.authz import AuthzActor, action_for_bootstrap_admin
 from app.core.contracts.interface_io import CorePort
 from app.core.errors.interface import InterfaceConfigError
 from app.handlers.callbacks import handle_callback as cb_handle_callback
@@ -28,11 +29,41 @@ from app.handlers.membership import (
 from app.handlers.messages_group import handle_group_buffered as msg_handle_group_buffered
 from app.handlers.messages_private import handle_private_message as msg_handle_private_message
 from app.runtime import RuntimeContext
-from app.services.group_reconcile import reconcile_active_groups
+from app.services.group_reconcile import (
+    apply_reconcile_active_groups_writes,
+    build_reconcile_active_groups_plan,
+)
 
 
 logger = logging.getLogger("bot")
 HandlerFn = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
+
+
+def _resolve_storage(runtime: RuntimeContext):
+    provider = getattr(runtime, "dependency_provider", None)
+    if provider is not None:
+        result = provider.storage_uow()
+        if result.is_ok and result.value is not None:
+            return result.value.storage
+    return runtime.storage
+
+
+def _resolve_tools_bash_enabled(runtime: RuntimeContext) -> bool:
+    provider = getattr(runtime, "dependency_provider", None)
+    if provider is not None:
+        result = provider.tooling()
+        if result.is_ok and result.value is not None:
+            return bool(result.value.tools_bash_enabled)
+    return bool(runtime.tools_bash_enabled)
+
+
+def _resolve_tools_bash_password(runtime: RuntimeContext) -> str:
+    provider = getattr(runtime, "dependency_provider", None)
+    if provider is not None:
+        result = provider.tooling()
+        if result.is_ok and result.value is not None:
+            return str(result.value.tools_bash_password)
+    return str(runtime.tools_bash_password)
 
 
 def register_handlers(
@@ -62,7 +93,7 @@ def build_telegram_application(token: str, runtime: RuntimeContext) -> Applicati
     application.bot_data.update(runtime.to_bot_data())
     register_handlers(
         application,
-        tools_bash_enabled=runtime.tools_bash_enabled,
+        tools_bash_enabled=_resolve_tools_bash_enabled(runtime),
         private_message_handler=msg_handle_private_message,
         group_buffered_handler=msg_handle_group_buffered,
     )
@@ -85,21 +116,42 @@ async def bootstrap_telegram_application(
     )
     if runtime.team_rollout_mode == "team" and not runtime.team_dual_read_enabled:
         logger.warning("Team rollout mode is 'team' with dual_read disabled; fallback diagnostics are limited")
-    if runtime.tools_bash_enabled and not runtime.tools_bash_password:
+    if _resolve_tools_bash_enabled(runtime) and not _resolve_tools_bash_password(runtime):
         logger.warning("BASH_DANGEROUS_PASSWORD is empty; privileged bash commands will be blocked")
 
-    await reconcile_active_groups(application.bot, runtime.storage)
+    storage = _resolve_storage(runtime)
+    reconcile_plan = await build_reconcile_active_groups_plan(application.bot, storage)
+    with storage.transaction(immediate=True):
+        apply_reconcile_active_groups_writes(storage, reconcile_plan.writes)
+    logger.info(
+        "startup group reconcile checked=%s deactivated=%s",
+        reconcile_plan.checked,
+        reconcile_plan.deactivated,
+    )
     owner_commands = [
         BotCommand("groups", "Список групп и выбор"),
         BotCommand("roles", "Список master-ролей"),
         BotCommand("tools", "Список инструментов"),
     ]
-    if runtime.tools_bash_enabled:
+    if _resolve_tools_bash_enabled(runtime):
         owner_commands.append(BotCommand("bash", "Выполнить bash команду"))
     await application.bot.set_my_commands(owner_commands, scope=BotCommandScopeChat(chat_id=owner_user_id))
     await application.bot.set_my_commands([], scope=BotCommandScopeAllPrivateChats())
     await application.bot.set_my_commands([], scope=BotCommandScopeAllGroupChats())
     await application.bot.set_my_commands([], scope=BotCommandScopeDefault())
+
+
+def resolve_bootstrap_owner_user_id(runtime: RuntimeContext, configured_owner_user_id: int) -> int:
+    authz_service = getattr(runtime, "authz_service", None)
+    if authz_service is None:
+        return int(configured_owner_user_id)
+    actor = AuthzActor(user_id=int(configured_owner_user_id))
+    result = authz_service.authorize(action=action_for_bootstrap_admin(), actor=actor, resource_ctx=None)
+    if result.is_error:
+        raise InterfaceConfigError("Configured owner_user_id is not authorized for telegram bootstrap")
+    if not (result.value and result.value.allowed):
+        raise InterfaceConfigError("Configured owner_user_id is denied by authz policy for telegram bootstrap")
+    return int(configured_owner_user_id)
 
 
 class TelegramInterfaceAdapter:
@@ -126,7 +178,8 @@ class TelegramInterfaceAdapter:
             self._application = build_telegram_application(token, self._runtime)
         if self._initialized:
             return
-        owner_user_id = int(self._config.get("owner_user_id", self._runtime.owner_user_id))
+        configured_owner_user_id = int(self._config.get("owner_user_id", self._runtime.owner_user_id))
+        owner_user_id = resolve_bootstrap_owner_user_id(self._runtime, configured_owner_user_id)
         await self._application.initialize()
         await bootstrap_telegram_application(self._application, self._runtime, owner_user_id=owner_user_id)
         await self._application.start()

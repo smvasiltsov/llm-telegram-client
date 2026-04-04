@@ -143,8 +143,9 @@ class LLMRouter:
             role_id,
             effective_team_role_id,
         )
-        self._storage.add_conversation_message(session_id, "user", content)
-        self._storage.add_conversation_message(session_id, "assistant", response_text)
+        with self._storage.transaction(immediate=True):
+            self._storage.add_conversation_message(session_id, "user", content)
+            self._storage.add_conversation_message(session_id, "assistant", response_text)
         return response_text
 
     def _render_template(

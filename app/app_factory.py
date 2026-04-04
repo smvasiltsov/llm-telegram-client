@@ -7,6 +7,8 @@ from typing import Any, Mapping
 import httpx
 
 from app.auth import AuthService
+from app.application.authz import OwnerOnlyAuthzService
+from app.application.dependencies import build_runtime_dependency_provider
 from app.config import AppConfig
 from app.interfaces.telegram.adapter import build_telegram_application
 from app.llm_executor import LLMExecutor
@@ -123,6 +125,7 @@ def build_runtime(
         provider_registry,
         default_provider_id,
     )
+    authz_service = OwnerOnlyAuthzService(owner_user_id=config.owner_user_id)
 
     tool_registry = ToolRegistry()
     tools_bash_enabled = bool(config.tools_enabled and config.tools_bash_enabled)
@@ -167,13 +170,15 @@ def build_runtime(
         ),
     )
 
-    storage.reset_authorizations()
+    with storage.transaction(immediate=True):
+        storage.reset_authorizations()
+    storage.enable_write_uow_guard()
     if role_catalog.issues:
         for issue in role_catalog.issues:
             logger.warning("role_catalog issue path=%s reason=%s", issue.path, issue.reason)
     if export_result.skipped_by_marker:
         logger.info("role_catalog export skipped by marker")
-    return RuntimeContext(
+    runtime = RuntimeContext(
         bot_username=bot_username,
         storage=storage,
         cipher=cipher,
@@ -186,6 +191,7 @@ def build_runtime(
         message_buffer=message_buffer,
         private_buffer=private_buffer,
         auth_service=auth_service,
+        authz_service=authz_service,
         owner_user_id=config.owner_user_id,
         require_bot_mention=config.require_bot_mention,
         orchestrator_max_chain_auto_steps=config.orchestrator_max_chain_auto_steps,
@@ -224,3 +230,5 @@ def build_runtime(
         skills_to_llm_delay_sec=config.skills_to_llm_delay_sec,
         role_catalog=role_catalog,
     )
+    runtime.dependency_provider = build_runtime_dependency_provider(runtime)
+    return runtime

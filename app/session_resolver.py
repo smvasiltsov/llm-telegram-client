@@ -25,28 +25,22 @@ class SessionResolver:
         existing_session_ids: set[str] | None = None,
     ) -> str:
         team_role = self._storage.get_team_role(team_id, role.role_id)
-        team_role_id = team_role.team_role_id or self._storage.resolve_team_role_id(
-            team_id, role.role_id, ensure_exists=True
-        )
+        team_role_id = team_role.team_role_id or self._resolve_team_role_id_for_session(team_id, role.role_id)
         if team_role_id is None:
             raise ValueError(f"Team role not found for session resolver: team_id={team_id} role_id={role.role_id}")
         if not self._llm_client.supports(model_override, "create_session"):
             session = self._storage.get_user_role_session_by_team_role(telegram_user_id, team_role_id)
             if session:
-                self._storage.touch_user_role_session_by_team_role(telegram_user_id, team_role_id)
+                self._touch_session(telegram_user_id, int(team_role_id))
                 return session.session_id
             local_session_id = uuid4().hex
-            self._storage.save_user_role_session_by_team_role(telegram_user_id, team_role_id, local_session_id)
-            if role.base_system_prompt or role.extra_instruction:
-                base_prompt = team_role.system_prompt_override or role.base_system_prompt
-                extra_instruction = (
-                    team_role.extra_instruction_override
-                    if team_role.extra_instruction_override is not None
-                    else role.extra_instruction
-                )
-                system_prompt = f"{base_prompt}\n\n{extra_instruction}".strip()
-                if system_prompt:
-                    self._storage.add_conversation_message(local_session_id, "system", system_prompt)
+            self._save_local_session_with_optional_warmup(
+                telegram_user_id=telegram_user_id,
+                team_role_id=int(team_role_id),
+                session_id=local_session_id,
+                team_role=team_role,
+                role=role,
+            )
             self._logger.info(
                 "Created local session user_id=%s team_id=%s role=%s",
                 telegram_user_id,
@@ -56,7 +50,7 @@ class SessionResolver:
             return local_session_id
         session = self._storage.get_user_role_session_by_team_role(telegram_user_id, team_role_id)
         if session and (existing_session_ids is None or session.session_id in existing_session_ids):
-            self._storage.touch_user_role_session_by_team_role(telegram_user_id, team_role_id)
+            self._touch_session(telegram_user_id, int(team_role_id))
             return session.session_id
         return await self._create_session(telegram_user_id, team_id, role, session_token, model_override)
 
@@ -79,9 +73,7 @@ class SessionResolver:
         model_override: str | None = None,
     ) -> str:
         team_role = self._storage.get_team_role(team_id, role.role_id)
-        team_role_id = team_role.team_role_id or self._storage.resolve_team_role_id(
-            team_id, role.role_id, ensure_exists=True
-        )
+        team_role_id = team_role.team_role_id or self._resolve_team_role_id_for_session(team_id, role.role_id)
         if team_role_id is None:
             raise ValueError(f"Team role not found for session create: team_id={team_id} role_id={role.role_id}")
         if team_role.system_prompt_override is not None:
@@ -158,7 +150,7 @@ class SessionResolver:
                 team_id,
                 role.role_name,
             )
-        self._storage.save_user_role_session_by_team_role(telegram_user_id, team_role_id, session_id)
+        self._save_session(telegram_user_id, int(team_role_id), session_id)
         self._logger.info(
             "Created session user_id=%s team_id=%s role=%s",
             telegram_user_id,
@@ -166,3 +158,37 @@ class SessionResolver:
             role.role_name,
         )
         return session_id
+
+    def _resolve_team_role_id_for_session(self, team_id: int, role_id: int) -> int | None:
+        with self._storage.transaction(immediate=True):
+            return self._storage.resolve_team_role_id(team_id, role_id, ensure_exists=True)
+
+    def _touch_session(self, telegram_user_id: int, team_role_id: int) -> None:
+        with self._storage.transaction(immediate=True):
+            self._storage.touch_user_role_session_by_team_role(telegram_user_id, team_role_id)
+
+    def _save_session(self, telegram_user_id: int, team_role_id: int, session_id: str) -> None:
+        with self._storage.transaction(immediate=True):
+            self._storage.save_user_role_session_by_team_role(telegram_user_id, team_role_id, session_id)
+
+    def _save_local_session_with_optional_warmup(
+        self,
+        *,
+        telegram_user_id: int,
+        team_role_id: int,
+        session_id: str,
+        team_role,
+        role: Role,
+    ) -> None:
+        with self._storage.transaction(immediate=True):
+            self._storage.save_user_role_session_by_team_role(telegram_user_id, team_role_id, session_id)
+            if role.base_system_prompt or role.extra_instruction:
+                base_prompt = team_role.system_prompt_override or role.base_system_prompt
+                extra_instruction = (
+                    team_role.extra_instruction_override
+                    if team_role.extra_instruction_override is not None
+                    else role.extra_instruction
+                )
+                system_prompt = f"{base_prompt}\n\n{extra_instruction}".strip()
+                if system_prompt:
+                    self._storage.add_conversation_message(session_id, "system", system_prompt)

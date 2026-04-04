@@ -5,6 +5,12 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from app.application.contracts import AppError, log_structured_error, map_exception_to_error
+from app.application.authz import (
+    action_for_private_owner_command,
+    actor_from_update,
+    resource_ctx_from_update,
+)
 from app.core.use_cases import (
     list_team_role_states,
     list_telegram_groups,
@@ -21,13 +27,35 @@ from app.utils import split_message
 logger = logging.getLogger("bot")
 
 
+def _map_value_error(exc: ValueError) -> AppError:
+    code, message, details, http_status, retryable = map_exception_to_error(exc)
+    return AppError(code=code, message=message, details=details, http_status=http_status, retryable=retryable)
+
+
+def _is_owner_authorized(update: Update, runtime: RuntimeContext) -> bool:
+    actor = actor_from_update(update)
+    if actor is None:
+        return False
+    authz_service = getattr(runtime, "authz_service", None)
+    if authz_service is None:
+        return int(actor.user_id) == int(getattr(runtime, "owner_user_id", -1))
+    result = authz_service.authorize(
+        action=action_for_private_owner_command(),
+        actor=actor,
+        resource_ctx=resource_ctx_from_update(update),
+    )
+    if result.is_error:
+        return False
+    return bool(result.value and result.value.allowed)
+
+
 async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     if not update.message or not update.effective_user:
         return
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
     refresh_role_catalog(runtime=runtime, storage=runtime.storage)
     roles = runtime.role_catalog.list_active()
@@ -48,7 +76,7 @@ async def handle_groups(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not update.message or not update.effective_user:
         return
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
     groups = list_telegram_groups(runtime.storage)
     if not groups:
@@ -70,7 +98,7 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not update.message or not update.effective_user:
         return
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
     if not context.args:
         await update.message.reply_text("Использование: /roles <group_id>")
@@ -82,7 +110,14 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
     try:
         list_team_role_states(runtime.storage, group_id)
-    except ValueError:
+    except ValueError as exc:
+        app_error = _map_value_error(exc)
+        log_structured_error(
+            logger,
+            event="commands_group_roles_failed",
+            error=app_error,
+            extra={"group_id": group_id, "user_id": update.effective_user.id},
+        )
         await update.message.reply_text("Группа не найдена.")
         return
     group_roles = list_team_role_states(runtime.storage, group_id)
@@ -112,7 +147,7 @@ async def handle_role_set_prompt(update: Update, context: ContextTypes.DEFAULT_T
     if not update.message or not update.effective_user:
         return
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
     if len(context.args) < 3:
         await update.message.reply_text("Использование: /role_set_prompt <group_id> <role> <prompt>")
@@ -129,7 +164,14 @@ async def handle_role_set_prompt(update: Update, context: ContextTypes.DEFAULT_T
         return
     try:
         team_id = resolve_team_id(runtime.storage, group_id)
-    except ValueError:
+    except ValueError as exc:
+        app_error = _map_value_error(exc)
+        log_structured_error(
+            logger,
+            event="commands_role_set_prompt_resolve_team_failed",
+            error=app_error,
+            extra={"group_id": group_id, "user_id": update.effective_user.id},
+        )
         await update.message.reply_text("Группа не найдена.")
         return
     role = runtime.storage.get_role_for_team_by_name(team_id, role_name)
@@ -144,7 +186,7 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
     if not update.message or not update.effective_user:
         return
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
     if len(context.args) < 2:
         await update.message.reply_text("Использование: /role_reset_session <group_id> <role>")
@@ -157,7 +199,14 @@ async def handle_role_reset_session(update: Update, context: ContextTypes.DEFAUL
     role_name = context.args[1].lstrip("@")
     try:
         team_id = resolve_team_id(runtime.storage, group_id)
-    except ValueError:
+    except ValueError as exc:
+        app_error = _map_value_error(exc)
+        log_structured_error(
+            logger,
+            event="commands_role_reset_session_resolve_team_failed",
+            error=app_error,
+            extra={"group_id": group_id, "user_id": update.effective_user.id},
+        )
         await update.message.reply_text("Группа не найдена.")
         return
     role = runtime.storage.get_role_for_team_by_name(team_id, role_name)
@@ -178,7 +227,7 @@ async def handle_tools(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not update.message or not update.effective_user:
         return
     runtime: RuntimeContext = context.application.bot_data["runtime"]
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
     tool_service: ToolService = runtime.tool_service
     tools = tool_service.list_tools()
@@ -204,7 +253,7 @@ async def handle_bash(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if not runtime.tools_bash_enabled:
         await update.message.reply_text("Инструмент /bash отключён в конфиге.")
         return
-    if update.effective_user.id != runtime.owner_user_id:
+    if not _is_owner_authorized(update, runtime):
         return
 
     text = update.message.text or ""

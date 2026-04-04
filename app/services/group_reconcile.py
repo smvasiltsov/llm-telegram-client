@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+from typing import Literal
 
 from telegram import Bot
 from telegram.constants import ChatMemberStatus
@@ -12,10 +14,26 @@ from app.storage import Storage
 logger = logging.getLogger("bot")
 
 
-async def reconcile_active_groups(bot: Bot, storage: Storage) -> tuple[int, int]:
+@dataclass(frozen=True)
+class ReconcileWrite:
+    action: Literal["upsert_binding", "set_binding_active"]
+    chat_id: int
+    title: str | None = None
+    is_active: bool = True
+
+
+@dataclass(frozen=True)
+class ReconcilePlan:
+    checked: int
+    deactivated: int
+    writes: tuple[ReconcileWrite, ...]
+
+
+async def build_reconcile_active_groups_plan(bot: Bot, storage: Storage) -> ReconcilePlan:
     bindings = storage.list_team_bindings(interface_type="telegram", active_only=True)
     checked = 0
     deactivated = 0
+    writes: list[ReconcileWrite] = []
     for binding in bindings:
         try:
             chat_id = int(binding.external_id)
@@ -32,7 +50,7 @@ async def reconcile_active_groups(bot: Bot, storage: Storage) -> tuple[int, int]
                 ChatMemberStatus.OWNER,
             }
             if not is_active_member:
-                storage.set_telegram_team_binding_active(chat_id, False)
+                writes.append(ReconcileWrite(action="set_binding_active", chat_id=chat_id, is_active=False))
                 deactivated += 1
                 logger.info(
                     "startup group deactivated group_id=%s title=%r membership_status=%s",
@@ -43,7 +61,7 @@ async def reconcile_active_groups(bot: Bot, storage: Storage) -> tuple[int, int]
                 continue
             chat = await bot.get_chat(chat_id)
         except (Forbidden, BadRequest) as exc:
-            storage.set_telegram_team_binding_active(chat_id, False)
+            writes.append(ReconcileWrite(action="set_binding_active", chat_id=chat_id, is_active=False))
             deactivated += 1
             logger.info(
                 "startup group deactivated group_id=%s title=%r reason=%s",
@@ -68,7 +86,32 @@ async def reconcile_active_groups(bot: Bot, storage: Storage) -> tuple[int, int]
             )
             continue
 
-        storage.upsert_telegram_team_binding(chat.id, chat.title, is_active=True)
+        writes.append(
+            ReconcileWrite(
+                action="upsert_binding",
+                chat_id=int(chat.id),
+                title=chat.title,
+                is_active=True,
+            )
+        )
 
-    logger.info("startup group reconcile checked=%s deactivated=%s", checked, deactivated)
-    return checked, deactivated
+    return ReconcilePlan(checked=checked, deactivated=deactivated, writes=tuple(writes))
+
+
+def apply_reconcile_active_groups_writes(storage: Storage, writes: tuple[ReconcileWrite, ...]) -> None:
+    for write in writes:
+        if write.action == "set_binding_active":
+            storage.set_telegram_team_binding_active(write.chat_id, write.is_active)
+            continue
+        if write.action == "upsert_binding":
+            storage.upsert_telegram_team_binding(write.chat_id, write.title, is_active=write.is_active)
+            continue
+        raise ValueError(f"Unsupported reconcile write action: {write.action}")
+
+
+async def reconcile_active_groups(bot: Bot, storage: Storage) -> tuple[int, int]:
+    plan = await build_reconcile_active_groups_plan(bot, storage)
+    with storage.transaction(immediate=True):
+        apply_reconcile_active_groups_writes(storage, plan.writes)
+    logger.info("startup group reconcile checked=%s deactivated=%s", plan.checked, plan.deactivated)
+    return plan.checked, plan.deactivated
