@@ -98,6 +98,22 @@ def provide_tooling_dependencies(app_state: Any) -> Result[ToolingDependencies]:
     return provider.value.tooling()
 
 
+def provide_runtime_dispatch_health(app_state: Any) -> Result[dict[str, Any]]:
+    runtime = getattr(app_state, "runtime", None)
+    if runtime is None:
+        return _dependency_not_ready(
+            "Runtime dispatch health is unavailable",
+            details={"entity": "runtime_dispatch_health", "cause": "runtime_missing"},
+        )
+    return Result.ok(
+        {
+            "mode": str(getattr(runtime, "dispatch_mode", "single-instance")),
+            "is_runner": bool(getattr(runtime, "dispatch_is_runner", True)),
+            "queue_backend": str(getattr(runtime, "queue_backend", "in-memory")),
+            "started_at": getattr(runtime, "started_at", None),
+        }
+    )
+
+
 def build_app_state() -> SimpleNamespace:
     return SimpleNamespace()
-

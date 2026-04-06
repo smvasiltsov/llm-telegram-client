@@ -36,6 +36,9 @@ DEFAULT_INTERFACE_ACTIVE = "telegram"
 DEFAULT_INTERFACE_MODULES_DIR = "app.interfaces"
 DEFAULT_INTERFACE_RUNTIME_MODE = "single"
 ALLOWED_INTERFACE_RUNTIME_MODES = {"single"}
+DEFAULT_DISPATCH_MODE = "single-instance"
+ALLOWED_DISPATCH_MODES = {"single-instance", "single-runner"}
+DEFAULT_DISPATCH_IS_RUNNER = True
 DEFAULT_FREE_TRANSITION_DELAY_SEC = 0
 DEFAULT_SKILLS_TO_LLM_DELAY_SEC = 0
 
@@ -70,6 +73,8 @@ class AppConfig:
     interface_active: str
     interface_modules_dir: str
     interface_runtime_mode: str
+    dispatch_mode: str
+    dispatch_is_runner: bool
     free_transition_delay_sec: int
     skills_to_llm_delay_sec: int
 
@@ -107,6 +112,7 @@ def load_config(path: str | Path) -> AppConfig:
     migration_raw = raw.get("migration", {}) or {}
     team_migration_raw = migration_raw.get("team", {}) or {}
     interface_raw = raw.get("interface", {}) or {}
+    dispatch_raw = raw.get("dispatch", {}) or {}
     runtime_status_raw = raw.get("runtime_status", {}) or {}
 
     safe_commands_raw = bash_raw.get("safe_commands")
@@ -130,6 +136,12 @@ def load_config(path: str | Path) -> AppConfig:
     interface_runtime_mode = str(interface_raw.get("runtime_mode", DEFAULT_INTERFACE_RUNTIME_MODE)).strip().lower()
     if interface_runtime_mode not in ALLOWED_INTERFACE_RUNTIME_MODES:
         interface_runtime_mode = DEFAULT_INTERFACE_RUNTIME_MODE
+    dispatch_mode = str(dispatch_raw.get("mode", DEFAULT_DISPATCH_MODE)).strip().lower()
+    if dispatch_mode not in ALLOWED_DISPATCH_MODES:
+        dispatch_mode = DEFAULT_DISPATCH_MODE
+    dispatch_is_runner = bool(dispatch_raw.get("is_runner", DEFAULT_DISPATCH_IS_RUNNER))
+    if dispatch_mode == "single-instance":
+        dispatch_is_runner = True
 
     return AppConfig(
         telegram_bot_token=raw["telegram_bot_token"],
@@ -166,6 +178,8 @@ def load_config(path: str | Path) -> AppConfig:
         interface_modules_dir=str(interface_raw.get("modules_dir", DEFAULT_INTERFACE_MODULES_DIR)).strip()
         or DEFAULT_INTERFACE_MODULES_DIR,
         interface_runtime_mode=interface_runtime_mode,
+        dispatch_mode=dispatch_mode,
+        dispatch_is_runner=dispatch_is_runner,
         free_transition_delay_sec=max(0, int(runtime_status_raw.get("free_transition_delay_sec", DEFAULT_FREE_TRANSITION_DELAY_SEC))),
         skills_to_llm_delay_sec=max(0, int(runtime_status_raw.get("skills_to_llm_delay_sec", DEFAULT_SKILLS_TO_LLM_DELAY_SEC))),
     )

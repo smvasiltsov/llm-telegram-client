@@ -1,0 +1,208 @@
+{
+  "paths": [
+    "/api/v1/answers/{answer_id}",
+    "/api/v1/orchestrator/feed",
+    "/api/v1/questions",
+    "/api/v1/questions/{question_id}",
+    "/api/v1/questions/{question_id}/answer",
+    "/api/v1/questions/{question_id}/status",
+    "/api/v1/qa-journal",
+    "/api/v1/roles/catalog",
+    "/api/v1/roles/catalog/errors",
+    "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}",
+    "/api/v1/team-roles/{team_role_id}/skills/{skill_id}",
+    "/api/v1/teams",
+    "/api/v1/teams/{team_id}/roles",
+    "/api/v1/teams/{team_id}/roles/{role_id}",
+    "/api/v1/teams/{team_id}/roles/{role_id}/reset-session",
+    "/api/v1/teams/{team_id}/runtime-status",
+    "/api/v1/teams/{team_id}/sessions",
+    "/api/v1/threads/{thread_id}"
+  ],
+  "responses": {
+    "/api/v1/answers/{answer_id}": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "500"
+      ]
+    },
+    "/api/v1/orchestrator/feed": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/questions": {
+      "post": [
+        "202",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/questions/{question_id}": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "500"
+      ]
+    },
+    "/api/v1/questions/{question_id}/answer": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "500"
+      ]
+    },
+    "/api/v1/questions/{question_id}/status": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "500"
+      ]
+    },
+    "/api/v1/qa-journal": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/roles/catalog": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/roles/catalog/errors": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "500"
+      ]
+    },
+    "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}": {
+      "put": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/team-roles/{team_role_id}/skills/{skill_id}": {
+      "put": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams/{team_id}/roles": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams/{team_id}/roles/{role_id}": {
+      "delete": [
+        "204",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ],
+      "patch": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams/{team_id}/roles/{role_id}/reset-session": {
+      "post": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams/{team_id}/runtime-status": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams/{team_id}/sessions": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/threads/{thread_id}": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    }
+  }
+}

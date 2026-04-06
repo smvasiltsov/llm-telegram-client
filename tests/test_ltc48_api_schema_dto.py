@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.application.contracts.result import Result
-from app.models import Role, TeamRole, TeamRoleRuntimeStatus, UserRoleSession
+from app.models import Role, RoleCatalogError, RoleCatalogItem, TeamRole, TeamRoleRuntimeStatus, TeamSessionView, UserRoleSession
 
 _IMPORT_ERROR: Exception | None = None
 try:
@@ -11,15 +11,21 @@ try:
         DeleteRequestDTO,
         ListRequestDTO,
         OperationResultDTO,
+        RoleCatalogErrorDTO,
+        RoleCatalogItemDTO,
         ResetRequestDTO,
+        TeamSessionDTO,
         UpdateRequestDTO,
         delete_request_to_params,
         list_request_to_params,
         operation_result_to_dto,
+        role_catalog_error_to_dto,
+        role_catalog_item_to_dto,
         reset_request_to_params,
         role_to_dto,
         team_role_runtime_status_to_dto,
         team_role_to_dto,
+        team_session_to_dto,
         update_request_to_patch,
         user_role_session_to_dto,
     )
@@ -186,6 +192,33 @@ class LTC48ApiSchemaDtoTests(unittest.TestCase):
 
         empty_result = OperationResultDTO(ok=True)
         self.assertTrue(empty_result.ok)
+
+    def test_catalog_and_session_dto_converters(self) -> None:
+        catalog_item = RoleCatalogItem(
+            role_name="dev",
+            is_active=True,
+            llm_model="gpt",
+            is_orchestrator=True,
+            has_errors=False,
+            source="/tmp/roles/dev.json",
+        )
+        catalog_error = RoleCatalogError(
+            role_name="broken",
+            file="/tmp/roles/broken.json",
+            code="invalid_json",
+            message="bad json",
+            details={"source": "catalog"},
+        )
+        session = TeamSessionView(
+            telegram_user_id=42,
+            team_role_id=7,
+            role_name="dev",
+            session_id="s-1",
+            updated_at="2026-01-01T00:00:00Z",
+        )
+        self.assertIsInstance(role_catalog_item_to_dto(catalog_item), RoleCatalogItemDTO)
+        self.assertIsInstance(role_catalog_error_to_dto(catalog_error), RoleCatalogErrorDTO)
+        self.assertIsInstance(team_session_to_dto(session), TeamSessionDTO)
 
 
 if __name__ == "__main__":

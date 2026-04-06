@@ -61,6 +61,10 @@
     "modules_dir": "app.interfaces",
     "runtime_mode": "single"
   },
+  "dispatch": {
+    "mode": "single-instance",
+    "is_runner": true
+  },
   "migration": {
     "team": {
       "dual_read_enabled": false,

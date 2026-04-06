@@ -31,7 +31,7 @@ from app.services.orchestrator_response import parse_orchestrator_response
 from app.services.formatting import format_with_header, format_with_header_raw, render_llm_text, send_formatted_with_fallback
 from app.services.plugin_pipeline import build_plugin_reply_markup
 from app.services.prompt_builder import build_llm_payload_json, resolve_provider_model, role_requires_auth
-from app.services.role_dispatch_queue import QueueGrant, RoleDispatchQueueService
+from app.services.role_dispatch_queue import DispatchPolicyRejectedError, QueueGrant, RoleDispatchQueueService
 from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.services.skill_calling_loop import SkillCallingLoop, SkillStepSendResult
 from app.session_resolver import SessionResolver
@@ -161,7 +161,10 @@ def _runtime_dispatch_queue_service(context: ContextTypes.DEFAULT_TYPE) -> RoleD
     service = getattr(runtime, "role_dispatch_queue_service", None)
     if isinstance(service, RoleDispatchQueueService):
         return service
-    service = RoleDispatchQueueService()
+    service = RoleDispatchQueueService(
+        dispatch_mode=str(getattr(runtime, "dispatch_mode", "single-instance")),
+        dispatch_is_runner=bool(getattr(runtime, "dispatch_is_runner", True)),
+    )
     setattr(runtime, "role_dispatch_queue_service", service)
     return service
 
@@ -172,6 +175,13 @@ def _runtime_metrics_port(context: ContextTypes.DEFAULT_TYPE):
     if hasattr(metrics, "increment") and hasattr(metrics, "observe_ms") and hasattr(metrics, "operation_timer"):
         return metrics
     return NoopMetricsPort()
+
+
+def _dispatch_observability_labels(context: ContextTypes.DEFAULT_TYPE) -> tuple[str, str]:
+    runtime = _runtime(context)
+    mode = str(getattr(runtime, "dispatch_mode", "single-instance"))
+    runner = "runner" if bool(getattr(runtime, "dispatch_is_runner", True)) else "non-runner"
+    return mode, runner
 
 
 def _resolve_team_role_id_for_dispatch(
@@ -229,10 +239,36 @@ async def _queue_execution_scope(
 ) -> AsyncIterator[QueueGrant]:
     metrics = _runtime_metrics_port(context)
     queue_service = _runtime_dispatch_queue_service(context)
+    dispatch_mode, dispatch_runner = _dispatch_observability_labels(context)
     queue_grant = await queue_service.acquire_execution_slot(
         team_role_id=int(team_role_id),
         request_id=request_id,
     )
+    if not queue_grant.accepted:
+        logger.warning(
+            "role_queue_rejected team_role_id=%s request_id=%s mode=%s runner=%s reason=%s",
+            int(team_role_id),
+            request_id,
+            dispatch_mode,
+            dispatch_runner,
+            queue_grant.reason,
+        )
+        metrics.increment(
+            "runtime_dispatch_rejected_total",
+            labels=build_operation_labels(
+                operation=operation,
+                transport="telegram",
+                result="rejected",
+                error_code="runtime.busy_conflict",
+                mode=dispatch_mode,
+                runner=dispatch_runner,
+            ),
+        )
+        raise DispatchPolicyRejectedError(
+            mode=dispatch_mode,
+            is_runner=(dispatch_runner == "runner"),
+            reason=queue_grant.reason,
+        )
     if queue_grant.queued:
         logger.info(
             "role_queue_wait team_role_id=%s request_id=%s queue_position=%s reason=fifo_wait",
@@ -253,6 +289,8 @@ async def _queue_execution_scope(
                 operation=operation,
                 transport="telegram",
                 result="queued",
+                mode=dispatch_mode,
+                runner=dispatch_runner,
             ),
         )
     try:
@@ -528,6 +566,7 @@ async def execute_role_request(
 ) -> RoleRequestResult:
     corr_id = ensure_correlation_id(correlation_id)
     metrics = _runtime_metrics_port(context)
+    dispatch_mode, dispatch_runner = _dispatch_observability_labels(context)
     runtime = _runtime(context)
     storage: Storage = runtime.storage
     provider_registry = runtime.provider_registry
@@ -617,6 +656,8 @@ async def execute_role_request(
                 transport="telegram",
                 result="conflict",
                 error_code="runtime.busy_conflict",
+                mode=dispatch_mode,
+                runner=dispatch_runner,
             ),
         )
         await asyncio.sleep(0.5)

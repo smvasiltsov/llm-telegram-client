@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiSchema(BaseModel):
@@ -20,5 +20,39 @@ class ApiListResponse(ApiSchema):
     items: list[Any]
 
 
+class ApiPageMeta(ApiSchema):
+    total: int
+    limit: int
+    offset: int
+    returned: int
+
+
+class ApiPagedResponse(ApiSchema):
+    items: list[Any]
+    meta: ApiPageMeta
+
+
+class ApiCursorMeta(ApiSchema):
+    limit: int
+    returned: int
+    next_cursor: str | None = None
+
+
+class ApiCursorResponse(ApiSchema):
+    items: list[Any]
+    meta: ApiCursorMeta
+
+
 class ApiMessageResponse(ApiSchema):
     message: str
+
+
+class ApiErrorBody(ApiSchema):
+    code: str
+    message: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    retryable: bool = False
+
+
+class ApiErrorResponse(ApiSchema):
+    error: ApiErrorBody

@@ -3,13 +3,18 @@ from __future__ import annotations
 import unittest
 
 _IMPORT_ERROR: Exception | None = None
+ValidationError = Exception
 try:
+    from pydantic import ValidationError as _ValidationError
     from app.interfaces.api.schemas import (
+        ApiPagedResponse,
         OperationResultDTO,
+        QaCreateQuestionRequestDTO,
         RoleDTO,
         TeamRoleRuntimeStatusDTO,
         UpdateRequestDTO,
     )
+    ValidationError = _ValidationError
 except Exception as exc:  # pragma: no cover - environment-dependent dependency gap
     _IMPORT_ERROR = exc
 
@@ -40,6 +45,7 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
                 "extra_instruction": "extra",
                 "llm_model": None,
                 "is_active": True,
+                "is_orchestrator": False,
                 "mention_name": None,
             },
         )
@@ -120,6 +126,64 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
                 "runtime_status": None,
             },
         )
+
+    def test_paged_response_shape_contract(self) -> None:
+        dto = ApiPagedResponse(items=[{"team_id": 1}], meta={"total": 1, "limit": 50, "offset": 0, "returned": 1})
+        self.assertEqual(
+            dto.model_dump(mode="json"),
+            {
+                "items": [{"team_id": 1}],
+                "meta": {"total": 1, "limit": 50, "offset": 0, "returned": 1},
+            },
+        )
+
+    def test_strict_contract_rejects_unknown_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            RoleDTO(
+                role_id=1,
+                role_name="dev",
+                description="Developer",
+                base_system_prompt="sys",
+                extra_instruction="extra",
+                llm_model=None,
+                is_active=True,
+                mention_name=None,
+                unexpected_field="boom",
+            )
+
+    def test_qa_create_question_contract_requires_team_id_and_uses_team_role_id(self) -> None:
+        dto = QaCreateQuestionRequestDTO(
+            team_id=1,
+            created_by_user_id=10,
+            text="hello",
+            team_role_id=7,
+        )
+        self.assertEqual(
+            dto.model_dump(mode="json"),
+            {
+                "team_id": 1,
+                "created_by_user_id": 10,
+                "text": "hello",
+                "team_role_id": 7,
+                "origin_type": "user",
+                "source_question_id": None,
+                "parent_answer_id": None,
+                "thread_id": None,
+                "question_id": None,
+            },
+        )
+        with self.assertRaises(ValidationError):
+            QaCreateQuestionRequestDTO(
+                created_by_user_id=10,
+                text="hello",
+            )
+        with self.assertRaises(ValidationError):
+            QaCreateQuestionRequestDTO(
+                team_id=1,
+                created_by_user_id=10,
+                text="hello",
+                target_team_role_id=7,
+            )
 
 
 if __name__ == "__main__":

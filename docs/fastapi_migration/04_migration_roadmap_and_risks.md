@@ -70,6 +70,86 @@
 - Гейт завершения:
   - наблюдаемость и инцидентный контур готовы;
   - риски высокого приоритета закрыты или приняты с mitigation.
+- Статус:
+  - **DONE (2026-04-05, GO)**;
+  - sign-off: `docs/fastapi_migration/17_stage4_runtime_api_hardening_signoff.md`;
+  - checklist/runbook: `docs/fastapi_migration/15_stage4_runtime_api_hardening_checklist.md`, `docs/fastapi_migration/16_stage4_runtime_api_hardening_runbook.md`.
+
+### Stage 5. Q/A API Orchestration (Question-Answer Lifecycle)
+- Цель:
+  - реализовать API-сценарий "отправка вопроса / получение ответа" с разделением create/status/get/journal;
+  - ввести доменную Q/A модель со статусами, thread/lineage и orchestrator feed;
+  - интегрировать Q/A lifecycle с текущим runtime (queue/status/pending mapping) без изменения Telegram UX.
+- Scope:
+  - HTTP/API + storage/domain/application/runtime integration для Q/A;
+  - additive-only в `/api/v1`;
+  - strict backward compatibility для Telegram-пути.
+- Out of scope:
+  - новые Telegram UI сценарии;
+  - unrelated write-расширения вне Q/A lifecycle.
+- Детальная спецификация:
+  - `docs/fastapi_migration/14_stage5_qa_api_orchestration_spec.md`.
+- Execution baseline/checklist:
+  - `docs/fastapi_migration/18_stage5_qa_api_execution_checklist.md`.
+- Статус:
+  - **DONE (2026-04-05, GO)**;
+  - runbook: `docs/fastapi_migration/19_stage5_qa_api_runbook.md`;
+  - sign-off: `docs/fastapi_migration/20_stage5_qa_api_signoff.md`.
+  - blocking CI gate: `scripts/stage5_qa_api_gates.sh`, `.github/workflows/stage5_qa_api_gates.yml`.
+
+#### 5.1 Storage и schema
+- Работы:
+  - миграции для сущностей вопроса/ответа, thread/lineage, idempotency и feed-проекций;
+  - индексы для cursor-pagination и фильтров журнала.
+- Артефакты:
+  - schema migration (blocking);
+  - инварианты хранения (question_id/answer_id/thread_id, parent/source linkage).
+- Зависимости:
+  - до запуска application-layer use-cases.
+
+#### 5.2 Domain/Application слой
+- Работы:
+  - use-cases: create question, get status, get question, get answer, resolve answer by question, journal/thread, orchestrator feed;
+  - статус-машина (`accepted/queued/in_progress/answered/failed/cancelled/timeout`);
+  - mapping runtime-state -> Q/A status и terminal error model.
+- Артефакты:
+  - application contracts + error mapping (blocking);
+  - documented idempotency semantics (create question) и cursor semantics.
+- Зависимости:
+  - требует готовой schema из 5.1;
+  - является базой для HTTP/DTO слоя.
+
+#### 5.3 HTTP API (`/api/v1`)
+- Работы:
+  - endpoint-ы create/status/get/journal/thread/feed согласно Stage 5 spec;
+  - owner-only authz, единый error envelope, correlation-id propagation;
+  - cursor-pagination для журнала и feed.
+- Артефакты:
+  - DTO/OpenAPI контракты (blocking);
+  - endpoint-level contract mapping для кодов ошибок.
+- Зависимости:
+  - после стабилизации domain/application из 5.2.
+
+#### 5.4 Тесты и CI-гейты
+- Работы:
+  - integration/e2e покрытие Q/A lifecycle;
+  - проверки status-machine, lineage/thread, orchestrator feed, idempotency, cursor pagination;
+  - blocking OpenAPI snapshot.
+- Артефакты:
+  - обязательный CI job/script: `stage5_qa_api_gates` (blocking);
+  - протокол прохождения гейтов для sign-off.
+- Зависимости:
+  - после готовности API и DTO из 5.3.
+
+#### 5.5 Документация и закрытие этапа
+- Работы:
+  - runbook отдельного запуска/проверки Q/A API;
+  - sign-off документ Stage 5 (done/out-of-scope/risks).
+- Артефакты:
+  - runbook (blocking);
+  - sign-off документ (blocking).
+- Зависимости:
+  - после зелёного `stage5_qa_api_gates`.
 
 ## 4. Risk matrix
 
@@ -124,6 +204,59 @@
 - Mitigation:
   - единая taxonomy ошибок и централизованный exception mapper для FastAPI.
 
+### R6. Неконсистентный Q/A lineage (thread/source/parent)
+- Вероятность: средняя.
+- Impact: высокий.
+- Подтверждение в коде:
+  - `app/services/role_pipeline.py`
+  - `app/application/use_cases/runtime_orchestration.py`
+- Mitigation:
+  - обязательные инварианты lineage на уровне storage/domain;
+  - integration tests на цепочки `answer -> next question` и thread-retrieval.
+
+### R7. Рассинхронизация runtime состояния и Q/A статусов
+- Вероятность: средняя.
+- Impact: высокий.
+- Подтверждение в коде:
+  - `app/services/role_runtime_status.py`
+  - `app/services/role_dispatch_queue.py`
+  - `app/application/contracts/runtime_ops.py`
+- Mitigation:
+  - явный mapping runtime transitions -> Q/A status machine;
+  - контрактные тесты terminal-state (`failed/cancelled/timeout`).
+
+### R8. Неоднозначное API-представление pending-поведения
+- Вероятность: средняя.
+- Impact: средний/высокий.
+- Подтверждение в коде:
+  - `app/pending_store.py`
+  - `app/handlers/messages_private.py`
+  - `app/handlers/messages_group.py`
+- Mitigation:
+  - API-контракт не копирует Telegram UX pending-flow напрямую;
+  - унифицированная terminal/error модель для HTTP клиентов.
+
+### R9. Непредсказуемость orchestrator feed под нагрузкой
+- Вероятность: средняя.
+- Impact: средний/высокий.
+- Подтверждение в коде:
+  - `app/services/role_pipeline.py`
+  - `app/services/orchestrator_response.py`
+  - `app/storage.py`
+- Mitigation:
+  - feed как отдельная read-модель с cursor-pagination;
+  - отдельные contract/integration тесты для пакета `user -> role -> orchestrator`.
+
+### R10. Нарушение multi-client consistency без строгой идемпотентности
+- Вероятность: средняя.
+- Impact: высокий.
+- Подтверждение в коде:
+  - `app/application/use_cases/write_api.py`
+  - `app/interfaces/api/routers/read_only_v1.py`
+- Mitigation:
+  - обязательный `Idempotency-Key` для create-question;
+  - проверки payload-fingerprint и стабильный replay-result.
+
 ## 5. Контрольные проверки на этапах
 - Перед Этапом 2:
   - доменные операции доступны через application services без Telegram-context.
@@ -132,6 +265,17 @@
 - Перед Этапом 4:
   - write API покрыт contract/integration тестами;
   - критичные runtime regression tests зелёные.
+- Перед Stage 5:
+  - Stage 4 стабилизация завершена;
+  - единый authz/error envelope/correlation baseline уже закреплён.
+- Гейт завершения Stage 5:
+  - статус-машина Q/A подтверждена тестами;
+  - lineage/thread инварианты подтверждены тестами;
+  - orchestrator feed контракт подтверждён;
+  - idempotency + cursor pagination подтверждены;
+  - blocking OpenAPI snapshot зелёный;
+  - `stage5_qa_api_gates` зелёный;
+  - runbook и sign-off документ опубликованы.
 - Перед release:
   - runbook готов;
   - приняты/закрыты высокие риски;
@@ -156,3 +300,5 @@
   - `tests/test_ltc18_pipeline_busy_semantics.py`
   - `tests/test_core_team_roles_use_cases.py`
   - `tests/test_root_dir_pending_flow.py`
+- Stage 5 reference:
+  - `docs/fastapi_migration/14_stage5_qa_api_orchestration_spec.md`

@@ -114,6 +114,11 @@ async def bootstrap_telegram_application(
         runtime.team_dual_read_enabled,
         runtime.team_dual_write_enabled,
     )
+    logger.info(
+        "Runtime dispatch health mode=%s is_runner=%s",
+        runtime.dispatch_mode,
+        runtime.dispatch_is_runner,
+    )
     if runtime.team_rollout_mode == "team" and not runtime.team_dual_read_enabled:
         logger.warning("Team rollout mode is 'team' with dual_read disabled; fallback diagnostics are limited")
     if _resolve_tools_bash_enabled(runtime) and not _resolve_tools_bash_password(runtime):

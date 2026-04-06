@@ -3,14 +3,46 @@ from __future__ import annotations
 from typing import Any
 
 from app.application.contracts.result import Result
-from app.models import Role, Team, TeamBinding, TeamRole, TeamRoleRuntimeStatus, UserRoleSession
+from app.application.use_cases.write_api import (
+    MutationAck,
+    TeamRolePatchOutcome,
+    TeamRolePrepostOutcome,
+    TeamRoleSkillOutcome,
+)
+from app.application.use_cases.qa_api import QaCreateQuestionOutcome, QaQuestionStatus
+from app.models import (
+    QaAnswer,
+    QaOrchestratorFeedItem,
+    QaQuestion,
+    Role,
+    RoleCatalogError,
+    RoleCatalogItem,
+    Team,
+    TeamBinding,
+    TeamRole,
+    TeamRoleRuntimeStatus,
+    TeamSessionView,
+    UserRoleSession,
+)
 
 from .entities import (
+    QaAnswerDTO,
+    QaCreateQuestionResponseDTO,
+    QaOrchestratorFeedItemDTO,
+    QaQuestionDTO,
+    QaQuestionStatusDTO,
     RoleDTO,
+    RoleCatalogErrorDTO,
+    RoleCatalogItemDTO,
+    MutationAckDTO,
     TeamBindingDTO,
     TeamDTO,
+    TeamRolePatchOutcomeDTO,
+    TeamRolePrepostOutcomeDTO,
+    TeamRoleSkillOutcomeDTO,
     TeamRoleDTO,
     TeamRoleRuntimeStatusDTO,
+    TeamSessionDTO,
     UserRoleSessionDTO,
 )
 from .operations import (
@@ -45,6 +77,73 @@ def user_role_session_to_dto(value: UserRoleSession) -> UserRoleSessionDTO:
 
 def team_role_runtime_status_to_dto(value: TeamRoleRuntimeStatus) -> TeamRoleRuntimeStatusDTO:
     return TeamRoleRuntimeStatusDTO.model_validate(value)
+
+
+def role_catalog_item_to_dto(value: RoleCatalogItem) -> RoleCatalogItemDTO:
+    return RoleCatalogItemDTO.model_validate(value)
+
+
+def role_catalog_error_to_dto(value: RoleCatalogError) -> RoleCatalogErrorDTO:
+    return RoleCatalogErrorDTO.model_validate(value)
+
+
+def team_session_to_dto(value: TeamSessionView) -> TeamSessionDTO:
+    return TeamSessionDTO.model_validate(value)
+
+
+def team_role_patch_outcome_to_dto(value: TeamRolePatchOutcome) -> TeamRolePatchOutcomeDTO:
+    return TeamRolePatchOutcomeDTO.model_validate(value)
+
+
+def mutation_ack_to_dto(value: MutationAck) -> MutationAckDTO:
+    return MutationAckDTO.model_validate(value)
+
+
+def team_role_skill_outcome_to_dto(value: TeamRoleSkillOutcome) -> TeamRoleSkillOutcomeDTO:
+    return TeamRoleSkillOutcomeDTO.model_validate(value)
+
+
+def team_role_prepost_outcome_to_dto(value: TeamRolePrepostOutcome) -> TeamRolePrepostOutcomeDTO:
+    return TeamRolePrepostOutcomeDTO.model_validate(value)
+
+
+def qa_question_to_dto(value: QaQuestion) -> QaQuestionDTO:
+    return QaQuestionDTO(
+        question_id=value.question_id,
+        thread_id=value.thread_id,
+        team_id=value.team_id,
+        created_by_user_id=value.created_by_user_id,
+        team_role_id=value.target_team_role_id,
+        source_question_id=value.source_question_id,
+        parent_answer_id=value.parent_answer_id,
+        origin_type=value.origin_type,
+        status=value.status,
+        text=value.text,
+        error_code=value.error_code,
+        error_message=value.error_message,
+        created_at=value.created_at,
+        updated_at=value.updated_at,
+        answered_at=value.answered_at,
+    )
+
+
+def qa_answer_to_dto(value: QaAnswer) -> QaAnswerDTO:
+    return QaAnswerDTO.model_validate(value)
+
+
+def qa_question_status_to_dto(value: QaQuestionStatus) -> QaQuestionStatusDTO:
+    return QaQuestionStatusDTO.model_validate(value)
+
+
+def qa_create_question_outcome_to_dto(value: QaCreateQuestionOutcome) -> QaCreateQuestionResponseDTO:
+    return QaCreateQuestionResponseDTO(
+        question=qa_question_to_dto(value.question),
+        idempotent_replay=bool(value.idempotent_replay),
+    )
+
+
+def qa_orchestrator_feed_item_to_dto(value: QaOrchestratorFeedItem) -> QaOrchestratorFeedItemDTO:
+    return QaOrchestratorFeedItemDTO.model_validate(value)
 
 
 def list_request_to_params(value: ListRequestDTO) -> dict[str, Any]:

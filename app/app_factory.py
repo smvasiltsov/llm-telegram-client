@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -8,9 +9,11 @@ import httpx
 
 from app.auth import AuthService
 from app.application.authz import OwnerOnlyAuthzService
+from app.application.contracts import LoggingMetricsPort
 from app.application.dependencies import build_runtime_dependency_provider
 from app.config import AppConfig
 from app.interfaces.telegram.adapter import build_telegram_application
+from app.interfaces.api import build_read_only_fastapi_app
 from app.llm_executor import LLMExecutor
 from app.llm_providers import load_provider_registry
 from app.llm_router import LLMRouter
@@ -40,6 +43,10 @@ def build_application(
     runtime: RuntimeContext,
 ) -> Any:
     return build_telegram_application(config.telegram_bot_token, runtime)
+
+
+def build_read_only_api_application(runtime: RuntimeContext) -> Any:
+    return build_read_only_fastapi_app(runtime)
 
 
 def build_services(
@@ -109,7 +116,18 @@ def build_runtime(
     )
     startup_cleaned = role_runtime_status_service.cleanup_stale()
     logger.info("startup stale runtime-status cleanup cleaned=%s", startup_cleaned)
-    role_dispatch_queue_service = RoleDispatchQueueService()
+    metrics_port = LoggingMetricsPort()
+    role_dispatch_queue_service = RoleDispatchQueueService(
+        dispatch_mode=config.dispatch_mode,
+        dispatch_is_runner=config.dispatch_is_runner,
+        metrics_port=metrics_port,
+        queue_name="role_dispatch",
+    )
+    logger.info(
+        "runtime dispatch mode=%s runner=%s",
+        config.dispatch_mode,
+        config.dispatch_is_runner,
+    )
 
     pending_store = PendingStore(config.database_path)
     pending_user_fields = PendingUserFieldStore(config.database_path)
@@ -191,6 +209,7 @@ def build_runtime(
         message_buffer=message_buffer,
         private_buffer=private_buffer,
         auth_service=auth_service,
+        metrics_port=metrics_port,
         authz_service=authz_service,
         owner_user_id=config.owner_user_id,
         require_bot_mention=config.require_bot_mention,
@@ -229,6 +248,10 @@ def build_runtime(
         free_transition_delay_sec=config.free_transition_delay_sec,
         skills_to_llm_delay_sec=config.skills_to_llm_delay_sec,
         role_catalog=role_catalog,
+        dispatch_mode=config.dispatch_mode,
+        dispatch_is_runner=config.dispatch_is_runner,
+        queue_backend="in-memory",
+        started_at=datetime.now(timezone.utc).isoformat(),
     )
     runtime.dependency_provider = build_runtime_dependency_provider(runtime)
     return runtime

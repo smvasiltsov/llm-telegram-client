@@ -11,15 +11,16 @@ from app.application.authz import (
     actor_from_update,
     resource_ctx_from_update,
 )
+from app.application.use_cases.role_admin_view import (
+    build_master_roles_view,
+    build_team_roles_view,
+)
 from app.core.use_cases import (
-    list_team_role_states,
     list_telegram_groups,
-    master_roles_list_text,
     reset_team_role_session,
     resolve_team_id,
 )
 from app.runtime import RuntimeContext
-from app.role_catalog_service import refresh_role_catalog
 from app.services.tool_exec import execute_bash_command
 from app.tools import ToolService
 from app.utils import split_message
@@ -57,15 +58,24 @@ async def handle_roles_master(update: Update, context: ContextTypes.DEFAULT_TYPE
     runtime: RuntimeContext = context.application.bot_data["runtime"]
     if not _is_owner_authorized(update, runtime):
         return
-    refresh_role_catalog(runtime=runtime, storage=runtime.storage)
-    roles = runtime.role_catalog.list_active()
+    view_result = build_master_roles_view(runtime=runtime, storage=runtime.storage)
+    if view_result.is_error or view_result.value is None:
+        log_structured_error(
+            logger,
+            event="commands_roles_master_failed",
+            error=view_result.error,
+            extra={"user_id": update.effective_user.id},
+        )
+        await update.message.reply_text("Не удалось загрузить список master-role.")
+        return
+    view = view_result.value
     keyboard = [
-        [InlineKeyboardButton(text=f"@{role.role_name}", callback_data=f"mrole_name:{role.role_name}")]
-        for role in roles
+        [InlineKeyboardButton(text=f"@{role_name}", callback_data=f"mrole_name:{role_name}")]
+        for role_name in view.role_names
     ]
     keyboard.insert(0, [InlineKeyboardButton(text="➕ Создать master-role", callback_data="mrole_create")])
     await update.message.reply_text(
-        master_roles_list_text(runtime),
+        view.text,
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -108,10 +118,11 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text("group_id должен быть числом.")
         return
-    try:
-        list_team_role_states(runtime.storage, group_id)
-    except ValueError as exc:
-        app_error = _map_value_error(exc)
+    view_result = build_team_roles_view(storage=runtime.storage, group_id=group_id)
+    if view_result.is_error or view_result.value is None:
+        app_error = view_result.error
+        if app_error is None:
+            app_error = AppError(code="storage.not_found", message="Group not found", http_status=404, retryable=False)
         log_structured_error(
             logger,
             event="commands_group_roles_failed",
@@ -120,7 +131,7 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         await update.message.reply_text("Группа не найдена.")
         return
-    group_roles = list_team_role_states(runtime.storage, group_id)
+    group_roles = view_result.value.roles
     if not group_roles:
         await update.message.reply_text("Роли для группы не настроены.")
         return

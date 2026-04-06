@@ -10,8 +10,16 @@ class ErrorCode(StrEnum):
     AUTH_UNAUTHORIZED = "auth.unauthorized"
     CONFLICT_ALREADY_EXISTS = "conflict.already_exists"
     RUNTIME_BUSY_CONFLICT = "runtime.busy_conflict"
+    RUNTIME_NON_RUNNER_REJECT = "runtime_non_runner_reject"
     RUNTIME_PENDING_EXISTS = "runtime.pending_exists"
     RUNTIME_REPLAY_FAILED = "runtime.replay_failed"
+    QA_NOT_FOUND = "qa_not_found"
+    QA_ANSWER_NOT_READY = "qa_answer_not_ready"
+    QA_TIMEOUT = "qa_timeout"
+    QA_LINEAGE_INVALID = "qa_lineage_invalid"
+    QA_IDEMPOTENCY_MISMATCH = "qa_idempotency_mismatch"
+    QA_ORCHESTRATOR_NOT_CONFIGURED = "qa_orchestrator_not_configured"
+    QA_ORCHESTRATOR_AMBIGUOUS = "qa_orchestrator_ambiguous"
     INTERNAL_UNEXPECTED = "internal.unexpected"
 
 
@@ -21,8 +29,16 @@ _ERROR_HTTP_STATUS: dict[str, int] = {
     ErrorCode.AUTH_UNAUTHORIZED.value: 401,
     ErrorCode.CONFLICT_ALREADY_EXISTS.value: 409,
     ErrorCode.RUNTIME_BUSY_CONFLICT.value: 409,
+    ErrorCode.RUNTIME_NON_RUNNER_REJECT.value: 409,
     ErrorCode.RUNTIME_PENDING_EXISTS.value: 409,
     ErrorCode.RUNTIME_REPLAY_FAILED.value: 424,
+    ErrorCode.QA_NOT_FOUND.value: 404,
+    ErrorCode.QA_ANSWER_NOT_READY.value: 409,
+    ErrorCode.QA_TIMEOUT.value: 409,
+    ErrorCode.QA_LINEAGE_INVALID.value: 422,
+    ErrorCode.QA_IDEMPOTENCY_MISMATCH.value: 422,
+    ErrorCode.QA_ORCHESTRATOR_NOT_CONFIGURED.value: 422,
+    ErrorCode.QA_ORCHESTRATOR_AMBIGUOUS.value: 422,
     ErrorCode.INTERNAL_UNEXPECTED.value: 500,
 }
 
@@ -55,6 +71,12 @@ def map_exception_to_error(
             return normalize_error_code(code), (fallback_message or message), details, resolve_http_status(code), retryable
         if message.startswith("Team role not found:"):
             details.setdefault("entity", "team_role")
+            details.setdefault("cause", "not_found")
+            details.setdefault("id", message.split(":", 1)[1].strip())
+            code = ErrorCode.STORAGE_NOT_FOUND
+            return normalize_error_code(code), (fallback_message or message), details, resolve_http_status(code), retryable
+        if message.startswith("Team not found:"):
+            details.setdefault("entity", "team")
             details.setdefault("cause", "not_found")
             details.setdefault("id", message.split(":", 1)[1].strip())
             code = ErrorCode.STORAGE_NOT_FOUND

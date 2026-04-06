@@ -127,7 +127,14 @@ class MasterDefaultsTelegramFlowTests(unittest.IsolatedAsyncioTestCase):
                 storage=storage,
             )
             query = self._FakeQuery(user_id=1)
-            handled = await _handle_set_model(query, f"msetmodel:1:{role.role_id}:missing:model", storage, runtime)  # type: ignore[misc]
+            handled = await _handle_set_model(  # type: ignore[misc]
+                query,
+                f"msetmodel:1:{role.role_id}:missing:model",
+                storage,
+                runtime,
+                provider_model_map=runtime.provider_model_map,
+                provider_registry=runtime.provider_registry,
+            )
             self.assertTrue(handled)
             self.assertTrue(any("не найдена" in msg for msg in query.edits))
 

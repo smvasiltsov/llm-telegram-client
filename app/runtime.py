@@ -43,6 +43,7 @@ class RuntimeContext:
     message_buffer: MessageBuffer
     private_buffer: MessageBuffer
     auth_service: AuthService
+    metrics_port: Any
     authz_service: "AuthzService"
     owner_user_id: int
     require_bot_mention: bool
@@ -81,10 +82,20 @@ class RuntimeContext:
     free_transition_delay_sec: int
     skills_to_llm_delay_sec: int
     role_catalog: RoleCatalog
+    dispatch_mode: str = "single-instance"
+    dispatch_is_runner: bool = True
+    queue_backend: str = "in-memory"
+    started_at: str | None = None
     dependency_provider: "RuntimeDependencyProvider | None" = None
 
     def to_bot_data(self) -> dict[str, Any]:
-        data: dict[str, Any] = {"runtime": self}
+        data: dict[str, Any] = {
+            "runtime": self,
+            "runtime_dispatch_health": {
+                "mode": self.dispatch_mode,
+                "is_runner": bool(self.dispatch_is_runner),
+            },
+        }
         if self.dependency_provider is not None:
             data["runtime_dependencies"] = self.dependency_provider
         return data

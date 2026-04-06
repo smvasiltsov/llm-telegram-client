@@ -73,6 +73,15 @@ class LTC43ErrorContractsTests(unittest.TestCase):
         self.assertEqual(details, {"entity": "team_role", "cause": "not_found", "id": "team_id=1 role_id=2"})
         self.assertEqual(message, text)
 
+    def test_storage_team_not_found_contract(self) -> None:
+        text = "Team not found: 77"
+        code, message, details, http_status, retryable = map_exception_to_error(ValueError(text))
+        self.assertEqual(code, "storage.not_found")
+        self.assertEqual(http_status, 404)
+        self.assertFalse(retryable)
+        self.assertEqual(details, {"entity": "team", "cause": "not_found", "id": "77"})
+        self.assertEqual(message, text)
+
 
 class _FakeMessage:
     def __init__(self) -> None:

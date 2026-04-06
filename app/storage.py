@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import secrets
 import sqlite3
 import json
@@ -14,6 +16,10 @@ from app.models import (
     AuthToken,
     Group,
     GroupRole,
+    QaAnswer,
+    QaIdempotencyRecord,
+    QaOrchestratorFeedItem,
+    QaQuestion,
     RoleLockGroup,
     Role,
     RolePrePostProcessing,
@@ -23,6 +29,7 @@ from app.models import (
     TeamBinding,
     TeamRole,
     TeamRoleRuntimeStatus,
+    TeamSessionView,
     User,
     UserRoleSession,
 )
@@ -47,6 +54,9 @@ def _utc_now() -> str:
 
 def _iso_plus_seconds(ts: str, seconds: int) -> str:
     return (datetime.fromisoformat(ts) + timedelta(seconds=max(0, int(seconds)))).isoformat()
+
+
+QA_STATUSES: set[str] = {"accepted", "queued", "in_progress", "answered", "failed", "cancelled", "timeout"}
 
 
 class Storage:
@@ -467,9 +477,108 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS questions (
+                question_id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                team_id INTEGER NOT NULL,
+                created_by_user_id INTEGER NOT NULL,
+                target_team_role_id INTEGER,
+                source_question_id TEXT,
+                parent_answer_id TEXT,
+                origin_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                text TEXT NOT NULL,
+                error_code TEXT,
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                answered_at TEXT,
+                FOREIGN KEY (team_id) REFERENCES teams(team_id),
+                FOREIGN KEY (target_team_role_id) REFERENCES team_roles(team_role_id),
+                CHECK (status IN ('accepted', 'queued', 'in_progress', 'answered', 'failed', 'cancelled', 'timeout')),
+                CHECK (origin_type IN ('user', 'role_dispatch', 'orchestrator'))
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS answers (
+                answer_id TEXT PRIMARY KEY,
+                question_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                team_id INTEGER NOT NULL,
+                team_role_id INTEGER,
+                role_name TEXT,
+                text TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (question_id) REFERENCES questions(question_id),
+                FOREIGN KEY (team_id) REFERENCES teams(team_id),
+                FOREIGN KEY (team_role_id) REFERENCES team_roles(team_role_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qa_idempotency (
+                scope TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                payload_hash TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (scope, idempotency_key),
+                FOREIGN KEY (question_id) REFERENCES questions(question_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS orchestrator_feed (
+                feed_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                team_id INTEGER NOT NULL,
+                thread_id TEXT NOT NULL,
+                question_id TEXT NOT NULL,
+                answer_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (team_id) REFERENCES teams(team_id),
+                FOREIGN KEY (question_id) REFERENCES questions(question_id),
+                FOREIGN KEY (answer_id) REFERENCES answers(answer_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS qa_dispatch_bridge_state (
+                question_id TEXT PRIMARY KEY,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                lease_expires_at TEXT,
+                retry_not_before TEXT,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (question_id) REFERENCES questions(question_id)
+            )
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_chain_step ON skill_runs(chain_id, step_index, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_created ON skill_runs(skill_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_status ON team_role_runtime_status(status)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_questions_created_cursor ON questions(created_at DESC, question_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_questions_thread_cursor ON questions(thread_id, created_at DESC, question_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_questions_team_cursor ON questions(team_id, created_at DESC, question_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_questions_status_cursor ON questions(status, created_at DESC, question_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_answers_question_cursor ON answers(question_id, created_at DESC, answer_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_answers_thread_cursor ON answers(thread_id, created_at DESC, answer_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_answers_team_cursor ON answers(team_id, created_at DESC, answer_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orchestrator_feed_team_cursor ON orchestrator_feed(team_id, created_at DESC, feed_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_orchestrator_feed_thread_cursor ON orchestrator_feed(thread_id, created_at DESC, feed_id DESC)")
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_qa_bridge_state_lease "
+            "ON qa_dispatch_bridge_state(lease_expires_at, retry_not_before, attempt_count)"
+        )
         cur.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_provider_user_data_team_role_lookup
@@ -2018,6 +2127,7 @@ class Storage:
             llm_model=catalog_role.llm_model,
             is_active=bool(catalog_role.is_active),
             mention_name=role.mention_name,
+            is_orchestrator=role.is_orchestrator,
         )
 
     @staticmethod
@@ -2043,6 +2153,7 @@ class Storage:
             llm_model=row["llm_model"] if "llm_model" in row.keys() else None,
             is_active=bool(row["is_active"] if "is_active" in row.keys() else True),
             mention_name=mention_name if mention_name is not None else (row["mention_name"] if "mention_name" in row.keys() else None),
+            is_orchestrator=(str(row["mode"]).strip().lower() == "orchestrator") if "mode" in row.keys() and row["mode"] is not None else False,
         )
 
     def get_role_by_name(self, role_name: str) -> Role:
@@ -2336,26 +2447,48 @@ class Storage:
             raise ValueError(f"Multiple enabled orchestrators found for team_id={team_id}")
         return self._row_to_team_role(rows[0])
 
-    def list_roles_for_team(self, team_id: int) -> list[Role]:
+    def list_roles_for_team(self, team_id: int, *, include_inactive: bool = False) -> list[Role]:
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT
-                tr.role_id,
-                COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
-                r.description,
-                r.base_system_prompt,
-                r.extra_instruction,
-                r.llm_model,
-                COALESCE(r.is_active, 1) AS is_active,
-                COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
-            FROM team_roles tr
-            LEFT JOIN roles r ON r.role_id = tr.role_id
-            WHERE tr.team_id = ? AND tr.is_active = 1 AND tr.enabled = 1
-            ORDER BY lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name))
-            """,
-            (team_id,),
-        )
+        if include_inactive:
+            cur.execute(
+                """
+                SELECT
+                    tr.role_id,
+                    COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
+                    r.description,
+                    r.base_system_prompt,
+                    r.extra_instruction,
+                    r.llm_model,
+                    tr.mode,
+                    CASE WHEN tr.is_active = 1 AND tr.enabled = 1 AND COALESCE(r.is_active, 1) = 1 THEN 1 ELSE 0 END AS is_active,
+                    COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
+                FROM team_roles tr
+                LEFT JOIN roles r ON r.role_id = tr.role_id
+                WHERE tr.team_id = ? AND tr.is_active = 1
+                ORDER BY lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name))
+                """,
+                (team_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT
+                    tr.role_id,
+                    COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
+                    r.description,
+                    r.base_system_prompt,
+                    r.extra_instruction,
+                    r.llm_model,
+                    tr.mode,
+                    CASE WHEN tr.is_active = 1 AND tr.enabled = 1 AND COALESCE(r.is_active, 1) = 1 THEN 1 ELSE 0 END AS is_active,
+                    COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
+                FROM team_roles tr
+                LEFT JOIN roles r ON r.role_id = tr.role_id
+                WHERE tr.team_id = ? AND tr.is_active = 1 AND tr.enabled = 1
+                ORDER BY lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name))
+                """,
+                (team_id,),
+            )
         rows = cur.fetchall()
         roles: list[Role] = []
         for row in rows:
@@ -2364,7 +2497,7 @@ class Storage:
                 continue
             role = self._apply_catalog_master_fields(self._role_from_row(row))
             role.mention_name = row["mention_name"]
-            if role.is_active:
+            if include_inactive or role.is_active:
                 roles.append(role)
         return roles
 
@@ -3366,6 +3499,23 @@ class Storage:
         )
         return int(cur.rowcount or 0)
 
+    def list_enabled_orchestrator_role_names(self) -> list[str]:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT DISTINCT lower(role_name) AS role_name
+            FROM team_roles
+            WHERE is_active = 1
+              AND enabled = 1
+              AND mode = 'orchestrator'
+              AND role_name IS NOT NULL
+              AND trim(role_name) <> ''
+            ORDER BY lower(role_name)
+            """
+        )
+        rows = cur.fetchall()
+        return [str(row["role_name"]) for row in rows]
+
     def ensure_group_role(self, group_id: int, role_id: int) -> GroupRole:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.ensure_team_role(team_id, role_id)
@@ -3703,6 +3853,53 @@ class Storage:
                 """,
                 (now, telegram_user_id, team_id, role_id),
             )
+
+    def list_team_sessions(self, team_id: int, *, limit: int, offset: int) -> tuple[list[TeamSessionView], int]:
+        safe_limit = max(1, int(limit))
+        safe_offset = max(0, int(offset))
+        cur = self._conn.cursor()
+        cur.execute("SELECT COUNT(*) AS total FROM user_role_sessions WHERE team_id = ?", (team_id,))
+        count_row = cur.fetchone()
+        total = int(count_row["total"]) if count_row else 0
+        cur.execute(
+            """
+            SELECT
+                urs.telegram_user_id,
+                COALESCE(urs.team_role_id, tr.team_role_id) AS team_role_id,
+                COALESCE(NULLIF(tr.role_name, ''), r.role_name, '') AS role_name,
+                urs.session_id,
+                urs.last_used_at AS updated_at
+            FROM user_role_sessions urs
+            LEFT JOIN team_roles tr
+                ON (
+                    (urs.team_role_id IS NOT NULL AND tr.team_role_id = urs.team_role_id)
+                    OR (
+                        urs.team_role_id IS NULL
+                        AND tr.team_id = urs.team_id
+                        AND tr.role_id = urs.role_id
+                    )
+                )
+            LEFT JOIN roles r ON r.role_id = urs.role_id
+            WHERE urs.team_id = ?
+            ORDER BY urs.last_used_at DESC, urs.telegram_user_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (team_id, safe_limit, safe_offset),
+        )
+        rows = cur.fetchall()
+        return (
+            [
+                TeamSessionView(
+                    telegram_user_id=int(row["telegram_user_id"]),
+                    team_role_id=(int(row["team_role_id"]) if row["team_role_id"] is not None else None),
+                    role_name=str(row["role_name"] or ""),
+                    session_id=str(row["session_id"]),
+                    updated_at=str(row["updated_at"]),
+                )
+                for row in rows
+            ],
+            total,
+        )
 
     def list_user_sessions(self, telegram_user_id: int) -> list[str]:
         cur = self._conn.cursor()
@@ -4489,3 +4686,964 @@ class Storage:
     def delete_role_skill(self, group_id: int, role_id: int, skill_id: str) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.delete_role_skill_for_team(team_id, role_id, skill_id)
+
+    @staticmethod
+    def _encode_cursor(created_at: str, tie_break_id: str) -> str:
+        raw = json.dumps({"created_at": created_at, "id": tie_break_id}, ensure_ascii=True, separators=(",", ":"))
+        return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
+
+    @staticmethod
+    def _decode_cursor(cursor: str | None) -> tuple[str, str] | None:
+        if not cursor:
+            return None
+        raw = str(cursor).strip()
+        if not raw:
+            return None
+        try:
+            decoded = base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8")
+            payload = json.loads(decoded)
+        except (ValueError, binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError("Invalid cursor") from None
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid cursor")
+        created_at = payload.get("created_at")
+        tie_break_id = payload.get("id")
+        if not isinstance(created_at, str) or not isinstance(tie_break_id, str):
+            raise ValueError("Invalid cursor")
+        return created_at, tie_break_id
+
+    @staticmethod
+    def _row_to_qa_question(row: sqlite3.Row) -> QaQuestion:
+        return QaQuestion(
+            question_id=str(row["question_id"]),
+            thread_id=str(row["thread_id"]),
+            team_id=int(row["team_id"]),
+            created_by_user_id=int(row["created_by_user_id"]),
+            target_team_role_id=(int(row["target_team_role_id"]) if row["target_team_role_id"] is not None else None),
+            source_question_id=(str(row["source_question_id"]) if row["source_question_id"] is not None else None),
+            parent_answer_id=(str(row["parent_answer_id"]) if row["parent_answer_id"] is not None else None),
+            origin_type=str(row["origin_type"]),
+            status=str(row["status"]),
+            text=str(row["text"]),
+            error_code=(str(row["error_code"]) if row["error_code"] is not None else None),
+            error_message=(str(row["error_message"]) if row["error_message"] is not None else None),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            answered_at=(str(row["answered_at"]) if row["answered_at"] is not None else None),
+        )
+
+    @staticmethod
+    def _row_to_qa_answer(row: sqlite3.Row) -> QaAnswer:
+        return QaAnswer(
+            answer_id=str(row["answer_id"]),
+            question_id=str(row["question_id"]),
+            thread_id=str(row["thread_id"]),
+            team_id=int(row["team_id"]),
+            team_role_id=(int(row["team_role_id"]) if row["team_role_id"] is not None else None),
+            role_name=(str(row["role_name"]) if row["role_name"] is not None else None),
+            text=str(row["text"]),
+            created_at=str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_qa_idempotency(row: sqlite3.Row) -> QaIdempotencyRecord:
+        return QaIdempotencyRecord(
+            scope=str(row["scope"]),
+            idempotency_key=str(row["idempotency_key"]),
+            payload_hash=str(row["payload_hash"]),
+            question_id=str(row["question_id"]),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_orchestrator_feed(row: sqlite3.Row) -> QaOrchestratorFeedItem:
+        return QaOrchestratorFeedItem(
+            feed_id=int(row["feed_id"]),
+            team_id=int(row["team_id"]),
+            thread_id=str(row["thread_id"]),
+            question_id=str(row["question_id"]),
+            answer_id=str(row["answer_id"]),
+            created_at=str(row["created_at"]),
+        )
+
+    def _question_exists(self, question_id: str) -> bool:
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM questions WHERE question_id = ? LIMIT 1", (question_id,))
+        return cur.fetchone() is not None
+
+    def _answer_exists(self, answer_id: str) -> bool:
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM answers WHERE answer_id = ? LIMIT 1", (answer_id,))
+        return cur.fetchone() is not None
+
+    def create_question(
+        self,
+        *,
+        question_id: str,
+        thread_id: str,
+        team_id: int,
+        created_by_user_id: int,
+        text: str,
+        status: str = "accepted",
+        origin_type: str = "user",
+        target_team_role_id: int | None = None,
+        source_question_id: str | None = None,
+        parent_answer_id: str | None = None,
+    ) -> QaQuestion:
+        self._require_write_transaction('create_question')
+        status_value = str(status).strip().lower()
+        if status_value not in QA_STATUSES:
+            raise ValueError(f"Unsupported question status: {status}")
+        origin_type_value = str(origin_type).strip().lower()
+        if origin_type_value not in {"user", "role_dispatch", "orchestrator"}:
+            raise ValueError(f"Unsupported question origin_type: {origin_type}")
+        if source_question_id is not None and not self._question_exists(source_question_id):
+            raise ValueError(f"source_question_id not found: {source_question_id}")
+        if parent_answer_id is not None and not self._answer_exists(parent_answer_id):
+            raise ValueError(f"parent_answer_id not found: {parent_answer_id}")
+        if target_team_role_id is not None and self.resolve_team_role_identity(target_team_role_id) is None:
+            raise ValueError(f"Team role not found: team_role_id={target_team_role_id}")
+        self.get_team(int(team_id))
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO questions (
+                question_id,
+                thread_id,
+                team_id,
+                created_by_user_id,
+                target_team_role_id,
+                source_question_id,
+                parent_answer_id,
+                origin_type,
+                status,
+                text,
+                error_code,
+                error_message,
+                created_at,
+                updated_at,
+                answered_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL)
+            """,
+            (
+                question_id,
+                thread_id,
+                int(team_id),
+                int(created_by_user_id),
+                int(target_team_role_id) if target_team_role_id is not None else None,
+                source_question_id,
+                parent_answer_id,
+                origin_type_value,
+                status_value,
+                text,
+                now,
+                now,
+            ),
+        )
+        created = self.get_question(question_id)
+        if created is None:
+            raise RuntimeError("Failed to create question")
+        return created
+
+    def get_question(self, question_id: str) -> QaQuestion | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                question_id,
+                thread_id,
+                team_id,
+                created_by_user_id,
+                target_team_role_id,
+                source_question_id,
+                parent_answer_id,
+                origin_type,
+                status,
+                text,
+                error_code,
+                error_message,
+                created_at,
+                updated_at,
+                answered_at
+            FROM questions
+            WHERE question_id = ?
+            LIMIT 1
+            """,
+            (question_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_qa_question(row)
+
+    def transition_question_status(
+        self,
+        *,
+        question_id: str,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        answered_at: str | None = None,
+    ) -> QaQuestion | None:
+        self._require_write_transaction('transition_question_status')
+        status_value = str(status).strip().lower()
+        if status_value not in QA_STATUSES:
+            raise ValueError(f"Unsupported question status: {status}")
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE questions
+            SET status = ?, error_code = ?, error_message = ?, answered_at = ?, updated_at = ?
+            WHERE question_id = ?
+            """,
+            (
+                status_value,
+                error_code,
+                error_message,
+                answered_at if answered_at is not None else (now if status_value == "answered" else None),
+                now,
+                question_id,
+            ),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_question(question_id)
+
+    def _ensure_qa_bridge_state(self, question_id: str, *, now: str | None = None) -> None:
+        cur = self._conn.cursor()
+        ts = str(now or _utc_now())
+        cur.execute(
+            """
+            INSERT INTO qa_dispatch_bridge_state (
+                question_id,
+                attempt_count,
+                lease_expires_at,
+                retry_not_before,
+                last_error_code,
+                last_error_message,
+                created_at,
+                updated_at
+            )
+            VALUES (?, 0, NULL, NULL, NULL, NULL, ?, ?)
+            ON CONFLICT(question_id) DO UPDATE SET
+                updated_at = excluded.updated_at
+            """,
+            (question_id, ts, ts),
+        )
+
+    def _qa_bridge_attempt_count(self, question_id: str) -> int:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT attempt_count
+            FROM qa_dispatch_bridge_state
+            WHERE question_id = ?
+            LIMIT 1
+            """,
+            (question_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return 0
+        return int(row["attempt_count"] or 0)
+
+    def get_qa_dispatch_attempt_count(self, question_id: str) -> int:
+        return self._qa_bridge_attempt_count(question_id)
+
+    def claim_questions_for_dispatch(
+        self,
+        *,
+        limit: int = 20,
+        max_attempts: int = 3,
+        now: str | None = None,
+    ) -> list[QaQuestion]:
+        self._require_write_transaction('claim_questions_for_dispatch')
+        safe_limit = max(1, int(limit))
+        attempts_cap = max(1, int(max_attempts))
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT q.question_id
+            FROM questions q
+            LEFT JOIN qa_dispatch_bridge_state s ON s.question_id = q.question_id
+            WHERE q.status = 'accepted'
+              AND COALESCE(s.attempt_count, 0) < ?
+              AND (s.retry_not_before IS NULL OR s.retry_not_before <= ?)
+            ORDER BY q.created_at ASC, q.question_id ASC
+            LIMIT ?
+            """,
+            (attempts_cap, ts, safe_limit),
+        )
+        rows = cur.fetchall()
+        claimed: list[QaQuestion] = []
+        for row in rows:
+            question_id = str(row["question_id"])
+            self._ensure_qa_bridge_state(question_id, now=ts)
+            cur.execute(
+                """
+                UPDATE questions
+                SET status = 'queued', updated_at = ?, error_code = NULL, error_message = NULL
+                WHERE question_id = ? AND status = 'accepted'
+                """,
+                (ts, question_id),
+            )
+            if int(cur.rowcount or 0) <= 0:
+                continue
+            cur.execute(
+                """
+                UPDATE qa_dispatch_bridge_state
+                SET lease_expires_at = NULL,
+                    retry_not_before = NULL,
+                    updated_at = ?
+                WHERE question_id = ?
+                """,
+                (ts, question_id),
+            )
+            item = self.get_question(question_id)
+            if item is not None:
+                claimed.append(item)
+        return claimed
+
+    def list_queued_questions_for_dispatch(
+        self,
+        *,
+        limit: int = 20,
+        max_attempts: int = 3,
+        now: str | None = None,
+    ) -> list[QaQuestion]:
+        safe_limit = max(1, int(limit))
+        attempts_cap = max(1, int(max_attempts))
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT q.question_id
+            FROM questions q
+            LEFT JOIN qa_dispatch_bridge_state s ON s.question_id = q.question_id
+            WHERE q.status = 'queued'
+              AND COALESCE(s.attempt_count, 0) < ?
+              AND (s.retry_not_before IS NULL OR s.retry_not_before <= ?)
+            ORDER BY q.updated_at ASC, q.question_id ASC
+            LIMIT ?
+            """,
+            (attempts_cap, ts, safe_limit),
+        )
+        items: list[QaQuestion] = []
+        for row in cur.fetchall():
+            question = self.get_question(str(row["question_id"]))
+            if question is not None:
+                items.append(question)
+        return items
+
+    def start_question_dispatch_attempt(
+        self,
+        *,
+        question_id: str,
+        lease_ttl_sec: int = 120,
+        max_attempts: int = 3,
+        now: str | None = None,
+    ) -> QaQuestion | None:
+        self._require_write_transaction('start_question_dispatch_attempt')
+        question = self.get_question(question_id)
+        if question is None:
+            return None
+        if question.status != "queued":
+            return None
+        attempts_cap = max(1, int(max_attempts))
+        ts = str(now or _utc_now())
+        self._ensure_qa_bridge_state(question_id, now=ts)
+        attempt_count = self._qa_bridge_attempt_count(question_id)
+        if attempt_count >= attempts_cap:
+            return None
+        lease_expires_at = _iso_plus_seconds(ts, max(1, int(lease_ttl_sec)))
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE qa_dispatch_bridge_state
+            SET attempt_count = ?,
+                lease_expires_at = ?,
+                retry_not_before = NULL,
+                updated_at = ?
+            WHERE question_id = ?
+            """,
+            (attempt_count + 1, lease_expires_at, ts, question_id),
+        )
+        cur.execute(
+            """
+            UPDATE questions
+            SET status = 'in_progress', updated_at = ?, error_code = NULL, error_message = NULL
+            WHERE question_id = ? AND status = 'queued'
+            """,
+            (ts, question_id),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_question(question_id)
+
+    def persist_question_terminal_outcome(
+        self,
+        *,
+        question_id: str,
+        status: str,
+        error_code: str | None = None,
+        error_message: str | None = None,
+        answer_id: str | None = None,
+        answer_text: str | None = None,
+        answer_team_role_id: int | None = None,
+        answer_role_name: str | None = None,
+        append_orchestrator_feed: bool = False,
+        now: str | None = None,
+    ) -> tuple[QaQuestion | None, QaAnswer | None, QaOrchestratorFeedItem | None]:
+        self._require_write_transaction('persist_question_terminal_outcome')
+        question = self.get_question(question_id)
+        if question is None:
+            return None, None, None
+        terminal_status = str(status or "").strip().lower()
+        if terminal_status not in {"answered", "failed", "timeout", "cancelled"}:
+            raise ValueError(f"Unsupported terminal status: {status}")
+        ts = str(now or _utc_now())
+        answer: QaAnswer | None = None
+        feed_item: QaOrchestratorFeedItem | None = None
+        if answer_text is not None:
+            if not str(answer_id or "").strip():
+                raise ValueError("answer_id is required when answer_text is provided")
+            existing = self.get_answer(str(answer_id))
+            if existing is None:
+                answer = self.create_answer(
+                    answer_id=str(answer_id),
+                    question_id=question_id,
+                    thread_id=question.thread_id,
+                    team_id=question.team_id,
+                    team_role_id=answer_team_role_id,
+                    role_name=answer_role_name,
+                    text=str(answer_text),
+                )
+            else:
+                answer = existing
+            if append_orchestrator_feed and answer is not None:
+                cur = self._conn.cursor()
+                cur.execute(
+                    """
+                    SELECT feed_id, team_id, thread_id, question_id, answer_id, created_at
+                    FROM orchestrator_feed
+                    WHERE question_id = ? AND answer_id = ?
+                    ORDER BY feed_id DESC
+                    LIMIT 1
+                    """,
+                    (question_id, answer.answer_id),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    feed_item = self._row_to_orchestrator_feed(row)
+                else:
+                    feed_item = self.append_orchestrator_feed_item(
+                        team_id=question.team_id,
+                        thread_id=question.thread_id,
+                        question_id=question_id,
+                        answer_id=answer.answer_id,
+                    )
+        updated = self.transition_question_status(
+            question_id=question_id,
+            status=terminal_status,
+            error_code=error_code,
+            error_message=error_message,
+            answered_at=(ts if terminal_status == "answered" else None),
+        )
+        self._ensure_qa_bridge_state(question_id, now=ts)
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE qa_dispatch_bridge_state
+            SET lease_expires_at = NULL,
+                retry_not_before = NULL,
+                last_error_code = ?,
+                last_error_message = ?,
+                updated_at = ?
+            WHERE question_id = ?
+            """,
+            (error_code, error_message, ts, question_id),
+        )
+        return updated, answer, feed_item
+
+    def sweep_expired_question_dispatch_leases(
+        self,
+        *,
+        now: str | None = None,
+        max_attempts: int = 3,
+        attempt_ttl_sec: int = 120,
+    ) -> tuple[list[QaQuestion], list[QaQuestion]]:
+        self._require_write_transaction('sweep_expired_question_dispatch_leases')
+        ts = str(now or _utc_now())
+        attempts_cap = max(1, int(max_attempts))
+        _ = max(1, int(attempt_ttl_sec))
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT q.question_id, COALESCE(s.attempt_count, 0) AS attempt_count
+            FROM questions q
+            JOIN qa_dispatch_bridge_state s ON s.question_id = q.question_id
+            WHERE q.status = 'in_progress'
+              AND s.lease_expires_at IS NOT NULL
+              AND s.lease_expires_at <= ?
+            ORDER BY q.updated_at ASC, q.question_id ASC
+            """,
+            (ts,),
+        )
+        rows = cur.fetchall()
+        requeued: list[QaQuestion] = []
+        timed_out: list[QaQuestion] = []
+        for row in rows:
+            question_id = str(row["question_id"])
+            attempt_count = int(row["attempt_count"] or 0)
+            if attempt_count >= attempts_cap:
+                item = self.transition_question_status(
+                    question_id=question_id,
+                    status="timeout",
+                    error_code="provider_timeout",
+                    error_message="Execution attempt lease expired",
+                )
+                cur.execute(
+                    """
+                    UPDATE qa_dispatch_bridge_state
+                    SET lease_expires_at = NULL,
+                        retry_not_before = NULL,
+                        last_error_code = 'provider_timeout',
+                        last_error_message = 'Execution attempt lease expired',
+                        updated_at = ?
+                    WHERE question_id = ?
+                    """,
+                    (ts, question_id),
+                )
+                if item is not None:
+                    timed_out.append(item)
+                continue
+            cur.execute(
+                """
+                UPDATE questions
+                SET status = 'queued', updated_at = ?, error_code = NULL, error_message = NULL
+                WHERE question_id = ? AND status = 'in_progress'
+                """,
+                (ts, question_id),
+            )
+            if int(cur.rowcount or 0) <= 0:
+                continue
+            cur.execute(
+                """
+                UPDATE qa_dispatch_bridge_state
+                SET lease_expires_at = NULL,
+                    retry_not_before = ?,
+                    updated_at = ?
+                WHERE question_id = ?
+                """,
+                (ts, ts, question_id),
+            )
+            item = self.get_question(question_id)
+            if item is not None:
+                requeued.append(item)
+        return requeued, timed_out
+
+    def finalize_question_dispatch_attempt_failure(
+        self,
+        *,
+        question_id: str,
+        error_code: str,
+        error_message: str,
+        max_attempts: int = 3,
+        retry_delay_sec: int = 0,
+        now: str | None = None,
+    ) -> QaQuestion | None:
+        self._require_write_transaction('finalize_question_dispatch_attempt_failure')
+        question = self.get_question(question_id)
+        if question is None:
+            return None
+        ts = str(now or _utc_now())
+        self._ensure_qa_bridge_state(question_id, now=ts)
+        attempts_cap = max(1, int(max_attempts))
+        attempt_count = self._qa_bridge_attempt_count(question_id)
+        cur = self._conn.cursor()
+        if attempt_count >= attempts_cap:
+            item = self.transition_question_status(
+                question_id=question_id,
+                status="failed",
+                error_code=error_code,
+                error_message=error_message,
+            )
+            cur.execute(
+                """
+                UPDATE qa_dispatch_bridge_state
+                SET lease_expires_at = NULL,
+                    retry_not_before = NULL,
+                    last_error_code = ?,
+                    last_error_message = ?,
+                    updated_at = ?
+                WHERE question_id = ?
+                """,
+                (error_code, error_message, ts, question_id),
+            )
+            return item
+
+        retry_not_before = _iso_plus_seconds(ts, max(0, int(retry_delay_sec)))
+        cur.execute(
+            """
+            UPDATE questions
+            SET status = 'queued', updated_at = ?, error_code = NULL, error_message = NULL
+            WHERE question_id = ? AND status IN ('in_progress', 'queued')
+            """,
+            (ts, question_id),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return self.get_question(question_id)
+        cur.execute(
+            """
+            UPDATE qa_dispatch_bridge_state
+            SET lease_expires_at = NULL,
+                retry_not_before = ?,
+                last_error_code = ?,
+                last_error_message = ?,
+                updated_at = ?
+            WHERE question_id = ?
+            """,
+            (retry_not_before, error_code, error_message, ts, question_id),
+        )
+        return self.get_question(question_id)
+
+    def create_answer(
+        self,
+        *,
+        answer_id: str,
+        question_id: str,
+        thread_id: str,
+        team_id: int,
+        text: str,
+        team_role_id: int | None = None,
+        role_name: str | None = None,
+    ) -> QaAnswer:
+        self._require_write_transaction('create_answer')
+        question = self.get_question(question_id)
+        if question is None:
+            raise ValueError(f"Question not found: {question_id}")
+        if question.thread_id != thread_id:
+            raise ValueError("Answer thread_id must match question.thread_id")
+        if int(question.team_id) != int(team_id):
+            raise ValueError("Answer team_id must match question.team_id")
+        if team_role_id is not None and self.resolve_team_role_identity(team_role_id) is None:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO answers (
+                answer_id,
+                question_id,
+                thread_id,
+                team_id,
+                team_role_id,
+                role_name,
+                text,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                answer_id,
+                question_id,
+                thread_id,
+                int(team_id),
+                int(team_role_id) if team_role_id is not None else None,
+                role_name,
+                text,
+                now,
+            ),
+        )
+        created = self.get_answer(answer_id)
+        if created is None:
+            raise RuntimeError("Failed to create answer")
+        return created
+
+    def get_answer(self, answer_id: str) -> QaAnswer | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT answer_id, question_id, thread_id, team_id, team_role_id, role_name, text, created_at
+            FROM answers
+            WHERE answer_id = ?
+            LIMIT 1
+            """,
+            (answer_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_qa_answer(row)
+
+    def get_latest_answer_for_question(self, question_id: str) -> QaAnswer | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT answer_id, question_id, thread_id, team_id, team_role_id, role_name, text, created_at
+            FROM answers
+            WHERE question_id = ?
+            ORDER BY created_at DESC, answer_id DESC
+            LIMIT 1
+            """,
+            (question_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_qa_answer(row)
+
+    def get_qa_idempotency(self, *, scope: str, idempotency_key: str) -> QaIdempotencyRecord | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT scope, idempotency_key, payload_hash, question_id, created_at, updated_at
+            FROM qa_idempotency
+            WHERE scope = ? AND idempotency_key = ?
+            LIMIT 1
+            """,
+            (scope, idempotency_key),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_qa_idempotency(row)
+
+    def upsert_qa_idempotency(
+        self,
+        *,
+        scope: str,
+        idempotency_key: str,
+        payload_hash: str,
+        question_id: str,
+    ) -> QaIdempotencyRecord:
+        self._require_write_transaction('upsert_qa_idempotency')
+        if not self._question_exists(question_id):
+            raise ValueError(f"Question not found: {question_id}")
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO qa_idempotency (
+                scope,
+                idempotency_key,
+                payload_hash,
+                question_id,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, idempotency_key) DO UPDATE SET
+                payload_hash=excluded.payload_hash,
+                question_id=excluded.question_id,
+                updated_at=excluded.updated_at
+            """,
+            (scope, idempotency_key, payload_hash, question_id, now, now),
+        )
+        record = self.get_qa_idempotency(scope=scope, idempotency_key=idempotency_key)
+        if record is None:
+            raise RuntimeError("Failed to upsert qa_idempotency")
+        return record
+
+    def append_orchestrator_feed_item(
+        self,
+        *,
+        team_id: int,
+        thread_id: str,
+        question_id: str,
+        answer_id: str,
+    ) -> QaOrchestratorFeedItem:
+        self._require_write_transaction('append_orchestrator_feed_item')
+        if not self._question_exists(question_id):
+            raise ValueError(f"Question not found: {question_id}")
+        if not self._answer_exists(answer_id):
+            raise ValueError(f"Answer not found: {answer_id}")
+        self.get_team(int(team_id))
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO orchestrator_feed (
+                team_id,
+                thread_id,
+                question_id,
+                answer_id,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (int(team_id), thread_id, question_id, answer_id, now),
+        )
+        feed_id = int(cur.lastrowid)
+        cur.execute(
+            """
+            SELECT feed_id, team_id, thread_id, question_id, answer_id, created_at
+            FROM orchestrator_feed
+            WHERE feed_id = ?
+            LIMIT 1
+            """,
+            (feed_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RuntimeError("Failed to append orchestrator feed item")
+        return self._row_to_orchestrator_feed(row)
+
+    def list_qa_journal(
+        self,
+        *,
+        team_id: int | None = None,
+        team_role_id: int | None = None,
+        status: str | None = None,
+        thread_id: str | None = None,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[QaQuestion], str | None]:
+        safe_limit = max(1, min(int(limit), 200))
+        binds: list[object] = []
+        where_parts: list[str] = []
+        if team_id is not None:
+            where_parts.append("q.team_id = ?")
+            binds.append(int(team_id))
+        if team_role_id is not None:
+            where_parts.append("q.target_team_role_id = ?")
+            binds.append(int(team_role_id))
+        if status is not None:
+            status_value = str(status).strip().lower()
+            if status_value not in QA_STATUSES:
+                raise ValueError(f"Unsupported status filter: {status}")
+            where_parts.append("q.status = ?")
+            binds.append(status_value)
+        if thread_id is not None:
+            where_parts.append("q.thread_id = ?")
+            binds.append(thread_id)
+        cursor_data = self._decode_cursor(cursor)
+        if cursor_data is not None:
+            where_parts.append("(q.created_at < ? OR (q.created_at = ? AND q.question_id < ?))")
+            binds.extend([cursor_data[0], cursor_data[0], cursor_data[1]])
+        where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                q.question_id,
+                q.thread_id,
+                q.team_id,
+                q.created_by_user_id,
+                q.target_team_role_id,
+                q.source_question_id,
+                q.parent_answer_id,
+                q.origin_type,
+                q.status,
+                q.text,
+                q.error_code,
+                q.error_message,
+                q.created_at,
+                q.updated_at,
+                q.answered_at
+            FROM questions q
+            {where_sql}
+            ORDER BY q.created_at DESC, q.question_id DESC
+            LIMIT ?
+            """,
+            (*binds, safe_limit + 1),
+        )
+        rows = cur.fetchall()
+        has_more = len(rows) > safe_limit
+        page_rows = rows[:safe_limit]
+        items = [self._row_to_qa_question(row) for row in page_rows]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = self._encode_cursor(last.created_at, last.question_id)
+        return items, next_cursor
+
+    def list_thread_questions(
+        self,
+        *,
+        thread_id: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[QaQuestion], str | None]:
+        return self.list_qa_journal(thread_id=thread_id, cursor=cursor, limit=limit)
+
+    def list_thread_answers(
+        self,
+        *,
+        thread_id: str,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[QaAnswer], str | None]:
+        safe_limit = max(1, min(int(limit), 200))
+        binds: list[object] = [thread_id]
+        where_parts = ["thread_id = ?"]
+        cursor_data = self._decode_cursor(cursor)
+        if cursor_data is not None:
+            where_parts.append("(created_at < ? OR (created_at = ? AND answer_id < ?))")
+            binds.extend([cursor_data[0], cursor_data[0], cursor_data[1]])
+        where_sql = "WHERE " + " AND ".join(where_parts)
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT answer_id, question_id, thread_id, team_id, team_role_id, role_name, text, created_at
+            FROM answers
+            {where_sql}
+            ORDER BY created_at DESC, answer_id DESC
+            LIMIT ?
+            """,
+            (*binds, safe_limit + 1),
+        )
+        rows = cur.fetchall()
+        has_more = len(rows) > safe_limit
+        page_rows = rows[:safe_limit]
+        items = [self._row_to_qa_answer(row) for row in page_rows]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = self._encode_cursor(last.created_at, last.answer_id)
+        return items, next_cursor
+
+    def list_orchestrator_feed(
+        self,
+        *,
+        team_id: int,
+        cursor: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[QaOrchestratorFeedItem], str | None]:
+        safe_limit = max(1, min(int(limit), 200))
+        binds: list[object] = [int(team_id)]
+        where_parts = ["team_id = ?"]
+        cursor_data = self._decode_cursor(cursor)
+        if cursor_data is not None:
+            try:
+                feed_cursor_id = int(cursor_data[1])
+            except ValueError:
+                raise ValueError("Invalid cursor") from None
+            where_parts.append("(created_at < ? OR (created_at = ? AND feed_id < ?))")
+            binds.extend([cursor_data[0], cursor_data[0], feed_cursor_id])
+        where_sql = "WHERE " + " AND ".join(where_parts)
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT feed_id, team_id, thread_id, question_id, answer_id, created_at
+            FROM orchestrator_feed
+            {where_sql}
+            ORDER BY created_at DESC, feed_id DESC
+            LIMIT ?
+            """,
+            (*binds, safe_limit + 1),
+        )
+        rows = cur.fetchall()
+        has_more = len(rows) > safe_limit
+        page_rows = rows[:safe_limit]
+        items = [self._row_to_orchestrator_feed(row) for row in page_rows]
+        next_cursor = None
+        if has_more and items:
+            last = items[-1]
+            next_cursor = self._encode_cursor(last.created_at, str(last.feed_id))
+        return items, next_cursor

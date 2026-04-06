@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from app.application.dependencies import RuntimeContextDependencyProvider, resolve_storage_uow_dependencies
 from app.interfaces.api.dependencies import (
     attach_runtime_dependencies_to_app_state,
+    provide_runtime_dispatch_health,
     provide_runtime_dependency_provider,
     provide_storage_uow_dependencies,
 )
@@ -35,6 +36,10 @@ def _runtime_stub() -> SimpleNamespace:
         bash_cwd_by_user={},
         tools_bash_password="p",
         tools_bash_enabled=False,
+        dispatch_mode="single-runner",
+        dispatch_is_runner=False,
+        queue_backend="in-memory",
+        started_at="2026-04-05T00:00:00+00:00",
     )
 
 
@@ -66,7 +71,21 @@ class LTC47DependencyProviderTests(unittest.TestCase):
         self.assertTrue(provider_result.is_ok)
         self.assertIsNotNone(provider_result.value)
 
+    def test_api_runtime_dispatch_health_provider(self) -> None:
+        runtime = _runtime_stub()
+        state = SimpleNamespace(runtime=runtime)
+        health_result = provide_runtime_dispatch_health(state)
+        self.assertTrue(health_result.is_ok)
+        self.assertEqual(
+            health_result.value,
+            {
+                "mode": "single-runner",
+                "is_runner": False,
+                "queue_backend": "in-memory",
+                "started_at": "2026-04-05T00:00:00+00:00",
+            },
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
-

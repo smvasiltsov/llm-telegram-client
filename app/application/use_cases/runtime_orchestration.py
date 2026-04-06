@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 from typing import Any, Callable, Awaitable
 
@@ -11,6 +12,9 @@ from app.application.contracts.runtime_ops import (
     RuntimeState,
     RuntimeTransition,
 )
+from app.services.role_dispatch_queue import DispatchPolicyRejectedError
+
+logger = logging.getLogger("runtime.operation")
 
 
 RUNTIME_OPERATION_TRANSITION_TABLE: tuple[dict[str, str], ...] = (
@@ -57,6 +61,17 @@ def _resolve_metrics_port(context: Any):
         ):
             return runtime_metrics
     return NoopMetricsPort()
+
+
+def _resolve_dispatch_runtime_labels(context: Any) -> tuple[str, str]:
+    app = getattr(context, "application", None)
+    bot_data = getattr(app, "bot_data", None)
+    if isinstance(bot_data, dict):
+        runtime = bot_data.get("runtime")
+        mode = str(getattr(runtime, "dispatch_mode", "single-instance"))
+        runner = "runner" if bool(getattr(runtime, "dispatch_is_runner", True)) else "non-runner"
+        return mode, runner
+    return "single-instance", "runner"
 
 
 def _build_runtime_transitions(
@@ -143,15 +158,42 @@ async def execute_run_chain_operation(
     req_id = request_id or uuid4().hex
     corr_id = ensure_correlation_id(correlation_id)
     metrics = _resolve_metrics_port(context)
+    dispatch_mode, dispatch_runner = _resolve_dispatch_runtime_labels(context)
     timer = metrics.operation_timer(op_name, transport="telegram")
     metrics.increment(
+        "runtime_inflight_operations",
+        labels={"operation": op_name},
+        value=1,
+    )
+    logger.info(
+        "runtime_operation_started correlation_id=%s operation=%s request_id=%s trigger=%s team_id=%s user_id=%s",
+        corr_id,
+        op_name,
+        req_id,
+        chain_origin,
+        team_id,
+        user_id,
+    )
+    metrics.increment(
         "runtime_operation_total",
-        labels=build_operation_labels(operation=op_name, transport="telegram", result="started"),
+        labels=build_operation_labels(
+            operation=op_name,
+            transport="telegram",
+            result="started",
+            mode=dispatch_mode,
+            runner=dispatch_runner,
+        ),
     )
     if op_name == RuntimeOperation.PENDING_REPLAY.value:
         metrics.increment(
             "runtime_pending_replay_total",
-            labels=build_operation_labels(operation=op_name, transport="telegram", result="started"),
+            labels=build_operation_labels(
+                operation=op_name,
+                transport="telegram",
+                result="started",
+                mode=dispatch_mode,
+                runner=dispatch_runner,
+            ),
         )
     try:
         chain_result = await run_chain_fn(
@@ -174,6 +216,52 @@ async def execute_run_chain_operation(
             chain_origin=chain_origin,  # type: ignore[arg-type]
             correlation_id=corr_id,
         )
+    except DispatchPolicyRejectedError as exc:
+        reject_code = (
+            ErrorCode.RUNTIME_NON_RUNNER_REJECT
+            if str(exc.reason or "").strip().lower() == "non_runner_instance"
+            else ErrorCode.RUNTIME_BUSY_CONFLICT
+        )
+        failure = Result.fail(
+            reject_code,
+            "Runtime dispatch unavailable on non-runner instance",
+            details={
+                "entity": "runtime_operation",
+                "operation": op_name,
+                "cause": "dispatch_policy_rejected",
+                "request_id": req_id,
+                "correlation_id": corr_id,
+                "mode": exc.mode,
+                "runner": exc.is_runner,
+                "reason": exc.reason,
+            },
+        )
+        error_code = failure.error.code if failure.error else reject_code.value
+        metrics.increment(
+            "runtime_operation_total",
+            labels=build_operation_labels(
+                operation=op_name,
+                transport="telegram",
+                result="failed",
+                error_code=error_code,
+                mode=dispatch_mode,
+                runner=dispatch_runner,
+            ),
+        )
+        timer.observe(result="failed", error_code=error_code)
+        metrics.increment(
+            "runtime_inflight_operations",
+            labels={"operation": op_name},
+            value=-1,
+        )
+        logger.warning(
+            "runtime_operation_failed correlation_id=%s operation=%s request_id=%s error_code=%s",
+            corr_id,
+            op_name,
+            req_id,
+            error_code,
+        )
+        return failure
     except Exception as exc:
         code = ErrorCode.RUNTIME_REPLAY_FAILED if op_name == RuntimeOperation.PENDING_REPLAY.value else ErrorCode.INTERNAL_UNEXPECTED
         failure = Result.fail_from_exception(
@@ -196,6 +284,8 @@ async def execute_run_chain_operation(
                 transport="telegram",
                 result="failed",
                 error_code=error_code,
+                mode=dispatch_mode,
+                runner=dispatch_runner,
             ),
         )
         if op_name == RuntimeOperation.PENDING_REPLAY.value:
@@ -206,9 +296,23 @@ async def execute_run_chain_operation(
                     transport="telegram",
                     result="failed",
                     error_code=error_code,
+                    mode=dispatch_mode,
+                    runner=dispatch_runner,
                 ),
             )
         timer.observe(result="failed", error_code=error_code)
+        metrics.increment(
+            "runtime_inflight_operations",
+            labels={"operation": op_name},
+            value=-1,
+        )
+        logger.exception(
+            "runtime_operation_failed correlation_id=%s operation=%s request_id=%s error_code=%s",
+            corr_id,
+            op_name,
+            req_id,
+            error_code,
+        )
         return failure
 
     completed = not chain_result.had_error
@@ -217,14 +321,39 @@ async def execute_run_chain_operation(
     result_label = "success" if completed else "failed"
     metrics.increment(
         "runtime_operation_total",
-        labels=build_operation_labels(operation=op_name, transport="telegram", result=result_label),
+        labels=build_operation_labels(
+            operation=op_name,
+            transport="telegram",
+            result=result_label,
+            mode=dispatch_mode,
+            runner=dispatch_runner,
+        ),
     )
     if op_name == RuntimeOperation.PENDING_REPLAY.value:
         metrics.increment(
             "runtime_pending_replay_total",
-            labels=build_operation_labels(operation=op_name, transport="telegram", result=result_label),
+            labels=build_operation_labels(
+                operation=op_name,
+                transport="telegram",
+                result=result_label,
+                mode=dispatch_mode,
+                runner=dispatch_runner,
+            ),
         )
     timer.observe(result=result_label)
+    metrics.increment(
+        "runtime_inflight_operations",
+        labels={"operation": op_name},
+        value=-1,
+    )
+    logger.info(
+        "runtime_operation_finished correlation_id=%s operation=%s request_id=%s result=%s completed=%s",
+        corr_id,
+        op_name,
+        req_id,
+        result_label,
+        completed,
+    )
     return Result.ok(
         RuntimeOperationResult(
             operation=op_name,

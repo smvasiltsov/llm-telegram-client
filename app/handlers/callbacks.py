@@ -16,8 +16,9 @@ from app.application.authz import (
     actor_from_callback,
     resource_ctx_from_callback,
 )
-from app.application.contracts import log_structured_error, to_telegram_message
+from app.application.contracts import ErrorCode, Result, log_structured_error, to_telegram_message
 from app.application.use_cases.callback_role_actions import RoleActionRequest, execute_role_action
+from app.application.use_cases.transaction_boundaries import toggle_team_role_skill_result
 from app.core.use_cases import (
     bind_master_role_to_group,
     clear_team_role_prompt,
@@ -1226,10 +1227,12 @@ async def _handle_prepost_processing_toggle(
         return True
     current = storage.get_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id)
     if current is None:
-        storage.upsert_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id, enabled=True, config=None)
+        with storage.transaction(immediate=True):
+            storage.upsert_role_prepost_processing_for_team_role(team_role_id, prepost_processing_id, enabled=True, config=None)
         state_note = f"Pre/Post Processing {prepost_processing_id} включен."
     else:
-        storage.set_role_prepost_processing_enabled_for_team_role(team_role_id, prepost_processing_id, not current.enabled)
+        with storage.transaction(immediate=True):
+            storage.set_role_prepost_processing_enabled_for_team_role(team_role_id, prepost_processing_id, not current.enabled)
         state_note = f"Pre/Post Processing {prepost_processing_id} {'включен' if not current.enabled else 'выключен'}."
     await query.edit_message_text(
         f"{state_note}\n\nPre/Post Processing для роли @{_role_public_name(storage, group_id, role_id)}:",
@@ -1250,25 +1253,25 @@ async def _handle_skill_toggle(
     _, group_id_str, role_id_str, skill_id = data.split(":", 3)
     group_id = int(group_id_str)
     role_id = int(role_id_str)
-    team_role_id = _team_role_id(storage, group_id, role_id, ensure_exists=True)
-    if runtime.skills_registry.get(skill_id) is None:
+    toggle_result = toggle_team_role_skill_result(
+        storage=storage,
+        skills_registry=runtime.skills_registry,
+        group_id=group_id,
+        role_id=role_id,
+        skill_id=skill_id,
+    )
+    if toggle_result.is_error or toggle_result.value is None:
+        message = toggle_result.error.message if toggle_result.error else "Не удалось переключить skill."
         await query.edit_message_text(
-            f"Skill {skill_id} не найден в реестре.",
+            message,
             reply_markup=InlineKeyboardMarkup(
                 [[InlineKeyboardButton(text="⬅️ Назад", callback_data=f"role:{group_id}:{role_id}")]]
             ),
         )
         await query.answer()
         return True
-    current = storage.get_role_skill_for_team_role(team_role_id, skill_id)
-    if current is None:
-        storage.upsert_role_skill_for_team_role(team_role_id, skill_id, enabled=True, config=None)
-        state_note = f"Skill {skill_id} включен."
-    else:
-        storage.set_role_skill_enabled_for_team_role(team_role_id, skill_id, not current.enabled)
-        state_note = f"Skill {skill_id} {'включен' if not current.enabled else 'выключен'}."
     await query.edit_message_text(
-        f"{state_note}\n\nSkills для роли @{_role_public_name(storage, group_id, role_id)}:",
+        f"{toggle_result.value.state_note}\n\nSkills для роли @{_role_public_name(storage, group_id, role_id)}:",
         reply_markup=_role_skills_keyboard(runtime, storage, group_id, role_id),
     )
     await query.answer()
@@ -1388,9 +1391,33 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     if await _handle_action(query, data, context, storage, runtime):
         return
-    if await _handle_prepost_processing_toggle(query, data, storage, runtime):
-        return
-    if await _handle_skill_toggle(query, data, storage, runtime):
+    try:
+        if await _handle_prepost_processing_toggle(query, data, storage, runtime):
+            return
+        if await _handle_skill_toggle(query, data, storage, runtime):
+            return
+    except Exception as exc:
+        error_result = Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to process callback action",
+            fallback_details={
+                "entity": "callback_action",
+                "cause": "toggle_failed",
+                "id": data,
+                "correlation_id": correlation_id,
+            },
+        )
+        log_structured_error(
+            logger,
+            event="callbacks_toggle_failed",
+            error=error_result.error,
+            extra={"user_id": query.from_user.id},
+        )
+        await query.answer(
+            text=to_telegram_message(error_result.error, "Не удалось выполнить действие. Попробуйте позже."),
+            show_alert=False,
+        )
         return
     if await _handle_set_model(
         query,

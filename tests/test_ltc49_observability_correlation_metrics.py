@@ -22,6 +22,17 @@ telegram_error = sys.modules.get("telegram.error")
 if telegram_error is None:
     telegram_error = types.ModuleType("telegram.error")
     sys.modules["telegram.error"] = telegram_error
+httpx_module = sys.modules.get("httpx")
+if httpx_module is None:
+    httpx_module = types.ModuleType("httpx")
+
+    class _HTTPStatusError(Exception):
+        def __init__(self, *args, response=None, **kwargs) -> None:
+            super().__init__(*args)
+            self.response = response
+
+    httpx_module.HTTPStatusError = _HTTPStatusError
+    sys.modules["httpx"] = httpx_module
 
 
 class _Dummy:
@@ -171,8 +182,12 @@ class LTC49ObservabilityCorrelationMetricsTests(unittest.IsolatedAsyncioTestCase
         self.assertEqual(captured, ["external-corr-id"])
         started = [item for item in metrics.increments if item[0] == "runtime_operation_total" and item[2].get("result") == "started"]
         success = [item for item in metrics.increments if item[0] == "runtime_operation_total" and item[2].get("result") == "success"]
+        inflight_up = [item for item in metrics.increments if item[0] == "runtime_inflight_operations" and item[1] == 1]
+        inflight_down = [item for item in metrics.increments if item[0] == "runtime_inflight_operations" and item[1] == -1]
         self.assertTrue(started)
         self.assertTrue(success)
+        self.assertTrue(inflight_up)
+        self.assertTrue(inflight_down)
         self.assertTrue(any(item[0] == "runtime_operation_latency_ms" for item in metrics.observations))
 
     async def test_execute_run_chain_generates_correlation_id_when_missing(self) -> None:

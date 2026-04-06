@@ -7,7 +7,18 @@ from time import monotonic
 from typing import Mapping, Protocol
 
 
-_ALLOWED_LABEL_KEYS = ("operation", "result", "error_code", "transport")
+_ALLOWED_LABEL_KEYS = (
+    "operation",
+    "result",
+    "error_code",
+    "transport",
+    "mode",
+    "runner",
+    "method",
+    "route",
+    "status",
+    "queue_name",
+)
 _SAFE_LABEL_PATTERN = re.compile(r"[^a-z0-9._-]+")
 _MAX_LABEL_LEN = 64
 
@@ -57,6 +68,8 @@ def build_operation_labels(
     transport: str,
     result: str | None = None,
     error_code: str | None = None,
+    mode: str | None = None,
+    runner: str | None = None,
 ) -> dict[str, str]:
     labels: dict[str, object] = {
         "operation": operation,
@@ -66,6 +79,10 @@ def build_operation_labels(
         labels["result"] = result
     if error_code is not None:
         labels["error_code"] = error_code
+    if mode is not None:
+        labels["mode"] = mode
+    if runner is not None:
+        labels["runner"] = runner
     return sanitize_metric_labels(labels)
 
 

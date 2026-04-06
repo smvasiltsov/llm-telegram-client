@@ -21,6 +21,7 @@ class Role:
     llm_model: str | None
     is_active: bool
     mention_name: str | None = None
+    is_orchestrator: bool = False
 
     def public_name(self) -> str:
         return self.mention_name or self.role_name
@@ -106,6 +107,34 @@ class TeamRoleRuntimeStatus:
 
 
 @dataclass
+class RoleCatalogItem:
+    role_name: str
+    is_active: bool
+    llm_model: str | None
+    is_orchestrator: bool
+    has_errors: bool
+    source: str
+
+
+@dataclass
+class RoleCatalogError:
+    role_name: str
+    file: str
+    code: str
+    message: str
+    details: dict[str, object]
+
+
+@dataclass
+class TeamSessionView:
+    telegram_user_id: int
+    team_role_id: int | None
+    role_name: str
+    session_id: str
+    updated_at: str
+
+
+@dataclass
 class RoleLockGroup:
     lock_group_id: int
     name: str
@@ -178,4 +207,55 @@ class SkillRun:
     duration_ms: int | None
     error_text: str | None
     output_json: str | None
+    created_at: str
+
+
+@dataclass
+class QaQuestion:
+    question_id: str
+    thread_id: str
+    team_id: int
+    created_by_user_id: int
+    target_team_role_id: int | None
+    source_question_id: str | None
+    parent_answer_id: str | None
+    origin_type: str
+    status: str
+    text: str
+    error_code: str | None
+    error_message: str | None
+    created_at: str
+    updated_at: str
+    answered_at: str | None
+
+
+@dataclass
+class QaAnswer:
+    answer_id: str
+    question_id: str
+    thread_id: str
+    team_id: int
+    team_role_id: int | None
+    role_name: str | None
+    text: str
+    created_at: str
+
+
+@dataclass
+class QaIdempotencyRecord:
+    scope: str
+    idempotency_key: str
+    payload_hash: str
+    question_id: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class QaOrchestratorFeedItem:
+    feed_id: int
+    team_id: int
+    thread_id: str
+    question_id: str
+    answer_id: str
     created_at: str
