@@ -13,6 +13,8 @@
   - `docs/fastapi_migration/19_stage5_qa_api_runbook.md`.
 - Sign-off:
   - `docs/fastapi_migration/20_stage5_qa_api_signoff.md`.
+- Stage 5 API parity extension checklist:
+  - `docs/fastapi_migration/26_stage5_api_parity_extension_checklist.md`.
 
 ## 2. Границы Stage 5
 - В scope:

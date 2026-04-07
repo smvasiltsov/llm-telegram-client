@@ -375,8 +375,34 @@ def list_qa_journal_result(
             cursor=cursor,
             limit=limit,
         )
+        enriched_items: list[QaQuestion] = []
+        for item in items:
+            answer_id: str | None = None
+            if str(item.status) == "answered":
+                answer = storage.get_latest_answer_for_question(item.question_id)
+                answer_id = answer.answer_id if answer is not None else None
+            enriched_items.append(
+                QaQuestion(
+                    question_id=item.question_id,
+                    thread_id=item.thread_id,
+                    team_id=item.team_id,
+                    created_by_user_id=item.created_by_user_id,
+                    target_team_role_id=item.target_team_role_id,
+                    source_question_id=item.source_question_id,
+                    parent_answer_id=item.parent_answer_id,
+                    origin_type=item.origin_type,
+                    status=item.status,
+                    text=item.text,
+                    error_code=item.error_code,
+                    error_message=item.error_message,
+                    created_at=item.created_at,
+                    updated_at=item.updated_at,
+                    answered_at=item.answered_at,
+                    answer_id=answer_id,
+                )
+            )
         safe_limit = max(1, min(int(limit), 200))
-        return Result.ok(CursorPage(items=items, next_cursor=next_cursor, limit=safe_limit))
+        return Result.ok(CursorPage(items=enriched_items, next_cursor=next_cursor, limit=safe_limit))
     except ValueError as exc:
         return Result.fail_from_exception(
             exc,

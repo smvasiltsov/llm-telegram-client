@@ -6,6 +6,7 @@
 Addendum (contract patch): **2026-04-06T00:00:00Z** (`team_id/team_role_id` routing fix, additive-only, без Telegram UX-регрессий).
 Addendum (contract patch): **2026-04-06T01:00:00Z** (orchestrator fallback routing для `POST /questions`, additive-only, без Telegram UX-регрессий).
 Addendum (dispatch bridge v1): **2026-04-06T09:00:00Z** (execution bridge, retry/timeout semantics, observability и blocking gate `stage5_execution_bridge_gates`).
+Addendum (API parity extension): **2026-04-06T14:30:00Z** (`skills/prepost`, `roles/catalog` master-role shape, `PATCH /roles/{role_id}`, `qa-journal.answer_id`; additive-only).
 
 ## 1. Решение
 - Stage 5 v1 Q/A API orchestration: **GO**.
@@ -131,4 +132,29 @@ Addendum (dispatch bridge v1): **2026-04-06T09:00:00Z** (execution bridge, retry
 - Итоговый статус:
   - dispatch bridge v1 — **GO**;
   - `stage5_execution_bridge_gates` — **PASS**;
+  - общий Stage 5 статус остаётся **GO**.
+
+## 11. Addendum (2026-04-06, API parity extension)
+- Что изменено:
+  - добавлены endpoint-ы:
+    - `GET /api/v1/skills`;
+    - `GET /api/v1/pre_processing_tools`;
+    - `GET /api/v1/post_processing_tools`;
+    - `PATCH /api/v1/roles/{role_id}`;
+  - расширен `GET /api/v1/teams/{team_id}/roles`:
+    - `skills`, `pre_processing_tools`, `post_processing_tools` (только enabled, сортировка по `id`);
+  - пересобран `GET /api/v1/roles/catalog` под master-role контракт:
+    - `role_id`, `role_name`, `llm_model`, `system_prompt`, `extra_instruction`, `has_errors`, `source`;
+    - `include_inactive` оставлен в compat-режиме (игнорируется);
+  - расширен `GET /api/v1/qa-journal`:
+    - добавлен `answer_id` (`nullable`).
+- Валидация/gates:
+  - `stage5_qa_api_gates` — **PASS**;
+  - `stage5_execution_bridge_gates` — **PASS**;
+  - OpenAPI snapshot updated (blocking) — **PASS**.
+- Риски:
+  - существенных новых рисков сверх Stage 5 baseline не выявлено;
+  - ограничение single-instance bridge/runtime остаётся (известный риск Stage 5).
+- Итоговый статус:
+  - API parity extension — **GO**;
   - общий Stage 5 статус остаётся **GO**.

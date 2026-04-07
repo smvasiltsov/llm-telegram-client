@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
 from time import monotonic
-from types import SimpleNamespace
 from typing import Awaitable, Callable
 from uuid import uuid4
 
 from app.application.contracts import ErrorCode, NoopMetricsPort
-from app.application.contracts.runtime_ops import RuntimeOperation
 from app.application.observability import correlation_scope, ensure_correlation_id
 from app.application.use_cases.qa_dispatch_bridge import (
     claim_questions_for_dispatch_result,
@@ -18,177 +15,52 @@ from app.application.use_cases.qa_dispatch_bridge import (
     start_question_dispatch_attempt_result,
     sweep_expired_question_dispatch_leases_result,
 )
+from app.application.use_cases.qa_runtime_bridge_core import (
+    BridgeExecutionResult,
+    execute_question_through_adapter,
+    resolve_execution_auth_token as _core_resolve_execution_auth_token,
+    resolve_execution_session as _core_resolve_execution_session,
+    resolve_role_requires_auth as _core_resolve_role_requires_auth,
+)
+from app.interfaces.runtime.qa_runtime_execution_adapter import TelegramQaRuntimeExecutionAdapter
 from app.models import QaQuestion
 
 logger = logging.getLogger("api.qa_dispatch_bridge")
 
 
-@dataclass(frozen=True)
-class BridgeExecutionResult:
-    answer_text: str
-    role_name: str | None
-    answer_team_role_id: int | None
-    append_orchestrator_feed: bool = True
-
-
-class _NoopBot:
-    async def send_message(self, *args, **kwargs):  # noqa: ANN002, ANN003
-        _ = (args, kwargs)
-        return None
-
-
-class _BridgeApp:
-    def __init__(self, runtime) -> None:
-        if hasattr(runtime, "to_bot_data"):
-            bot_data = runtime.to_bot_data()
-        else:
-            bot_data = {"runtime": runtime}
-        self.bot_data = bot_data
+_DEFAULT_RUNTIME_EXECUTION_ADAPTER = TelegramQaRuntimeExecutionAdapter()
 
 
 async def _default_execute_question(runtime, question: QaQuestion, correlation_id: str) -> BridgeExecutionResult:
-    # Lazy import keeps API schema/tests loadable even when Telegram deps are missing.
-    from app.services.role_pipeline import execute_role_request
-
-    storage = runtime.storage
-    if question.target_team_role_id is None:
-        raise RuntimeError("dispatch_rejected:missing_target_team_role_id")
-    identity = storage.resolve_team_role_identity(int(question.target_team_role_id))
-    if identity is None:
-        raise ValueError(f"Team role not found: team_role_id={question.target_team_role_id}")
-    team_id, role_id = identity
-    role = storage.get_role_by_id(int(role_id))
-
-    execution_user_id, session_token = _resolve_execution_session(
+    return await execute_question_through_adapter(
         runtime=runtime,
         question=question,
-        team_id=int(team_id),
-        role=role,
         correlation_id=correlation_id,
-    )
-
-    context = SimpleNamespace(
-        application=_BridgeApp(runtime),
-        bot=_NoopBot(),
-        correlation_id=correlation_id,
-    )
-    result = await execute_role_request(
-        context=context,
-        team_id=int(team_id),
-        user_id=int(execution_user_id),
-        role=role,
-        session_token=session_token,
-        user_text=str(question.text),
-        reply_text=None,
-        actor_username=f"api_user_{execution_user_id}",
-        trigger_type="api_question",
-        mentioned_roles=[role.public_name()],
-        recipient=role.public_name(),
-        wait_until_available=True,
-        queue_request_id=question.question_id,
-        correlation_id=correlation_id,
-        operation=RuntimeOperation.RUN_CHAIN.value,
-    )
-    if bool(result.busy_acquired) and result.team_role_id is not None:
-        try:
-            runtime.role_runtime_status_service.release_busy(
-                team_role_id=int(result.team_role_id),
-                release_reason="api_bridge_answered",
-            )
-        except Exception:
-            logger.exception(
-                "qa_bridge_release_busy_failed correlation_id=%s question_id=%s team_role_id=%s",
-                correlation_id,
-                question.question_id,
-                result.team_role_id,
-            )
-
-    return BridgeExecutionResult(
-        answer_text=str(result.response_text),
-        role_name=role.public_name(),
-        answer_team_role_id=int(result.team_role_id or question.target_team_role_id),
-        append_orchestrator_feed=True,
+        adapter=_DEFAULT_RUNTIME_EXECUTION_ADAPTER,
     )
 
 
 def _resolve_role_requires_auth(*, runtime, team_id: int, role, correlation_id: str | None = None) -> bool:
-    # Keep provider/model resolution aligned with runtime path used in Telegram flow.
-    from app.services.prompt_builder import resolve_provider_model, role_requires_auth
-
-    provider_registry = dict(getattr(runtime, "provider_registry", {}) or {})
-    provider_models = list(getattr(runtime, "provider_models", []) or [])
-    provider_model_map = dict(getattr(runtime, "provider_model_map", {}) or {})
-    default_provider_id = str(getattr(runtime, "default_provider_id", "") or "")
-    storage = runtime.storage
-    try:
-        group_role = storage.get_team_role(int(team_id), int(role.role_id))
-        selected_model = group_role.model_override or getattr(role, "llm_model", None)
-        if provider_models:
-            model_override = resolve_provider_model(
-                provider_models,
-                provider_model_map,
-                provider_registry,
-                selected_model,
-            )
-        else:
-            model_override = selected_model
-        return bool(role_requires_auth(provider_registry, model_override, default_provider_id))
-    except Exception:
-        # Fail-safe: deny-by-default when provider config is unavailable/invalid.
-        logger.warning(
-            "qa_bridge_auth_mode_resolution_failed correlation_id=%s team_id=%s role_id=%s",
-            ensure_correlation_id(correlation_id),
-            team_id,
-            int(getattr(role, "role_id", 0) or 0),
-        )
-        return True
-
-
-def _resolve_execution_auth_token(runtime, question: QaQuestion, correlation_id: str):
-    storage = runtime.storage
-    question_user_id = int(question.created_by_user_id)
-    token = storage.get_auth_token(question_user_id)
-    if token is not None and bool(token.is_authorized):
-        return question_user_id, token
-
-    owner_user_id = getattr(runtime, "owner_user_id", None)
-    if owner_user_id is not None:
-        owner_id = int(owner_user_id)
-        if owner_id != question_user_id:
-            fallback = storage.get_auth_token(owner_id)
-            if fallback is not None and bool(fallback.is_authorized):
-                logger.warning(
-                    "qa_bridge_token_owner_fallback correlation_id=%s question_id=%s question_user_id=%s owner_user_id=%s",
-                    correlation_id,
-                    question.question_id,
-                    question_user_id,
-                    owner_id,
-                )
-                return owner_id, fallback
-
-    raise RuntimeError("dispatch_rejected:missing_authorized_token")
-
-
-def _resolve_execution_session(*, runtime, question: QaQuestion, team_id: int, role, correlation_id: str) -> tuple[int, str]:
-    requires_auth = _resolve_role_requires_auth(
+    return _core_resolve_role_requires_auth(
         runtime=runtime,
         team_id=team_id,
         role=role,
         correlation_id=correlation_id,
     )
-    question_user_id = int(question.created_by_user_id)
-    if not requires_auth:
-        logger.info(
-            "qa_bridge_auth_mode_none correlation_id=%s question_id=%s team_id=%s team_role_id=%s execution_user_id=%s",
-            correlation_id,
-            question.question_id,
-            team_id,
-            question.target_team_role_id,
-            question_user_id,
-        )
-        return question_user_id, ""
-    execution_user_id, auth_token = _resolve_execution_auth_token(runtime, question, correlation_id)
-    return execution_user_id, runtime.cipher.decrypt(auth_token.encrypted_token)
+
+
+def _resolve_execution_auth_token(runtime, question: QaQuestion, correlation_id: str):
+    return _core_resolve_execution_auth_token(runtime, question, correlation_id)
+
+
+def _resolve_execution_session(*, runtime, question: QaQuestion, team_id: int, role, correlation_id: str) -> tuple[int, str]:
+    return _core_resolve_execution_session(
+        runtime=runtime,
+        question=question,
+        team_id=team_id,
+        role=role,
+        correlation_id=correlation_id,
+    )
 
 
 class QaDispatchBridgeWorker:
@@ -493,6 +365,14 @@ class QaDispatchBridgeWorker:
             value_ms=float(max(0, self._pending_ids.qsize())),
             labels={"queue_name": "qa_dispatch_bridge"},
         )
+
+    def snapshot(self) -> dict[str, int | bool]:
+        return {
+            "is_running": bool(self.is_running),
+            "pending_queue_depth": int(self._pending_ids.qsize()),
+            "inflight_count": int(len(self._inflight_by_question)),
+            "queued_ids_count": int(len(self._queued_ids)),
+        }
 
 
 def _map_execution_failure(exc: Exception) -> tuple[str, str]:

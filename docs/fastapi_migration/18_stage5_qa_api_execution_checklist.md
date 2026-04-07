@@ -274,3 +274,16 @@
   - `tests/test_ltc80_stage5_dispatch_bridge_foundation.py`
   - `tests/test_ltc81_stage5_dispatch_bridge_worker.py`
   - `tests/test_ltc82_stage5_execution_bridge_e2e_smoke.py`
+
+## 11. Addendum: API parity extension (2026-04-06)
+- Scope addendum:
+  - `GET /api/v1/skills`;
+  - `GET /api/v1/pre_processing_tools`;
+  - `GET /api/v1/post_processing_tools`;
+  - `PATCH /api/v1/roles/{role_id}`;
+  - расширения `GET /api/v1/teams/{team_id}/roles`, `GET /api/v1/roles/catalog`, `GET /api/v1/qa-journal`.
+- Gate status:
+  - `stage5_qa_api_gates` — **PASS**;
+  - `stage5_execution_bridge_gates` — **PASS**.
+- Артефакт:
+  - `docs/fastapi_migration/26_stage5_api_parity_extension_checklist.md`.

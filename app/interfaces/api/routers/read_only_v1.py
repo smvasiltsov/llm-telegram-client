@@ -7,8 +7,11 @@ from app.application.authz import AuthzActor
 from app.application.contracts import ErrorCode
 from app.application.observability import ensure_correlation_id, get_correlation_id
 from app.application.use_cases.read_api import (
+    list_master_roles_catalog_result,
+    list_post_processing_tools_result,
+    list_pre_processing_tools_result,
     list_roles_catalog_errors_result,
-    list_roles_catalog_result,
+    list_skills_result,
     list_team_roles_result,
     list_team_runtime_status_result,
     list_team_sessions_result,
@@ -26,10 +29,12 @@ from app.application.use_cases.qa_api import (
     resolve_answer_by_question_result,
 )
 from app.application.use_cases.write_api import (
+    MasterRolePatchRequest,
     TeamRolePatchRequest,
     TeamRolePrepostPutRequest,
     TeamRoleSkillPutRequest,
     deactivate_team_role_binding_write_result,
+    patch_master_role_result,
     patch_team_role_result,
     put_team_role_prepost_result,
     put_team_role_skill_result,
@@ -49,7 +54,12 @@ from app.interfaces.api.schemas import (
     ApiErrorResponse,
     ApiPageMeta,
     ApiPagedResponse,
+    MasterRoleCatalogItemDTO,
+    MasterRolePatchOutcomeDTO,
+    MasterRolePatchRequestDTO,
     MutationAckDTO,
+    PostProcessingToolDTO,
+    PreProcessingToolDTO,
     QaAnswerDTO,
     QaCreateQuestionRequestDTO,
     QaCreateQuestionResponseDTO,
@@ -59,6 +69,7 @@ from app.interfaces.api.schemas import (
     QaThreadResponseDTO,
     RoleDTO,
     RoleCatalogErrorDTO,
+    SkillDTO,
     TeamDTO,
     TeamRolePatchOutcomeDTO,
     TeamRolePatchRequestDTO,
@@ -68,15 +79,19 @@ from app.interfaces.api.schemas import (
     TeamRoleSkillOutcomeDTO,
     TeamRoleSkillPutRequestDTO,
     TeamRoleUserMutationRequestDTO,
+    master_role_catalog_item_to_dto,
+    master_role_patch_outcome_to_dto,
     mutation_ack_to_dto,
+    post_processing_tool_to_dto,
+    pre_processing_tool_to_dto,
     qa_answer_to_dto,
     qa_create_question_outcome_to_dto,
     qa_orchestrator_feed_item_to_dto,
     qa_question_status_to_dto,
     qa_question_to_dto,
     role_catalog_error_to_dto,
-    role_catalog_item_to_dto,
     role_to_dto,
+    skill_to_dto,
     team_role_patch_outcome_to_dto,
     team_role_prepost_outcome_to_dto,
     team_role_skill_outcome_to_dto,
@@ -182,6 +197,72 @@ def build_read_only_v1_router(*, app_state: Any):
         return None
 
     @router.get(
+        "/skills",
+        response_model=list[SkillDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_skills(
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        result = list_skills_result(app_state.runtime)
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return _ok_list(result.value, skill_to_dto)
+
+    @router.get(
+        "/pre_processing_tools",
+        response_model=list[PreProcessingToolDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_pre_processing_tools(
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        result = list_pre_processing_tools_result(app_state.runtime)
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return _ok_list(result.value, pre_processing_tool_to_dto)
+
+    @router.get(
+        "/post_processing_tools",
+        response_model=list[PostProcessingToolDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_post_processing_tools(
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        result = list_post_processing_tools_result(app_state.runtime)
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return _ok_list(result.value, post_processing_tool_to_dto)
+
+    @router.get(
         "/teams",
         response_model=ApiPagedResponse,
         responses={
@@ -241,6 +322,7 @@ def build_read_only_v1_router(*, app_state: Any):
             deps_result.value.storage,
             team_id=team_id,
             include_inactive=include_inactive,
+            runtime=app_state.runtime,
         )
         if roles_result.is_error or roles_result.value is None:
             mapped = map_result_error_to_api(roles_result)
@@ -271,7 +353,7 @@ def build_read_only_v1_router(*, app_state: Any):
             mapped = map_result_error_to_api(deps_result)
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
 
-        catalog_result = list_roles_catalog_result(
+        catalog_result = list_master_roles_catalog_result(
             app_state.runtime,
             deps_result.value.storage,
             include_inactive=include_inactive,
@@ -283,7 +365,7 @@ def build_read_only_v1_router(*, app_state: Any):
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
         return _ok_paged(
             catalog_result.value.items,
-            role_catalog_item_to_dto,
+            master_role_catalog_item_to_dto,
             total=catalog_result.value.total,
             limit=catalog_result.value.limit,
             offset=catalog_result.value.offset,
@@ -716,6 +798,49 @@ def build_read_only_v1_router(*, app_state: Any):
             limit=result.value.limit,
             next_cursor=result.value.next_cursor,
         )
+
+    @router.patch(
+        "/roles/{role_id}",
+        response_model=MasterRolePatchOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def patch_master_role(
+        role_id: int,
+        payload: MasterRolePatchRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = patch_master_role_result(
+            deps_result.value.storage,
+            role_id=role_id,
+            patch=MasterRolePatchRequest(
+                role_name=payload.role_name,
+                llm_model=payload.llm_model,
+                system_prompt=payload.system_prompt,
+                extra_instruction=payload.extra_instruction,
+            ),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return master_role_patch_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.patch(
         "/teams/{team_id}/roles/{role_id}",

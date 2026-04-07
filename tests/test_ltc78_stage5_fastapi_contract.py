@@ -206,6 +206,9 @@ class LTC78Stage5FastApiContractTests(unittest.TestCase):
         self.assertEqual(feed.status_code, 200)
         self.assertEqual(journal.json()["meta"]["limit"], 50)
         self.assertIn("next_cursor", journal.json()["meta"])
+        self.assertIn("answer_id", journal.json()["items"][0])
+        by_qid = {item["question_id"]: item for item in journal.json()["items"]}
+        self.assertEqual(by_qid["q-ready"]["answer_id"], "a-ready")
         self.assertIn("questions", thread.json())
         self.assertIn("answers", thread.json())
         self.assertIn("meta", feed.json())

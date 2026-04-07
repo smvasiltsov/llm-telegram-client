@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal
 
+from pydantic import Field
+
 from .common import ApiCursorResponse, ApiSchema
 
 
@@ -15,6 +17,14 @@ class RoleDTO(ApiSchema):
     is_active: bool
     is_orchestrator: bool = False
     mention_name: str | None = None
+    skills: list["RoleLinkedItemDTO"] = Field(default_factory=list)
+    pre_processing_tools: list["RoleLinkedItemDTO"] = Field(default_factory=list)
+    post_processing_tools: list["RoleLinkedItemDTO"] = Field(default_factory=list)
+
+
+class RoleLinkedItemDTO(ApiSchema):
+    id: str
+    name: str
 
 
 class TeamDTO(ApiSchema):
@@ -91,6 +101,16 @@ class RoleCatalogItemDTO(ApiSchema):
     source: str
 
 
+class MasterRoleCatalogItemDTO(ApiSchema):
+    role_id: int
+    role_name: str
+    llm_model: str | None
+    system_prompt: str
+    extra_instruction: str
+    has_errors: bool
+    source: str
+
+
 class RoleCatalogErrorDTO(ApiSchema):
     role_name: str
     file: str
@@ -107,6 +127,27 @@ class TeamSessionDTO(ApiSchema):
     updated_at: str
 
 
+class SkillDTO(ApiSchema):
+    skill_id: str
+    name: str
+    description: str
+    source: str
+
+
+class PreProcessingToolDTO(ApiSchema):
+    tool_id: str
+    name: str
+    description: str
+    source: str
+
+
+class PostProcessingToolDTO(ApiSchema):
+    tool_id: str
+    name: str
+    description: str
+    source: str
+
+
 class TeamRolePatchRequestDTO(ApiSchema):
     enabled: bool | None = None
     is_orchestrator: bool | None = None
@@ -116,6 +157,21 @@ class TeamRolePatchRequestDTO(ApiSchema):
     extra_instruction_override: str | None = None
     user_prompt_suffix: str | None = None
     user_reply_prefix: str | None = None
+
+
+class MasterRolePatchRequestDTO(ApiSchema):
+    role_name: str | None = None
+    llm_model: str | None = None
+    system_prompt: str | None = None
+    extra_instruction: str | None = None
+
+
+class MasterRolePatchOutcomeDTO(ApiSchema):
+    role_id: int
+    role_name: str
+    llm_model: str | None
+    system_prompt: str
+    extra_instruction: str
 
 
 class TeamRolePatchOutcomeDTO(ApiSchema):
@@ -199,6 +255,7 @@ class QaQuestionDTO(ApiSchema):
     created_at: str
     updated_at: str
     answered_at: str | None
+    answer_id: str | None = None
 
 
 class QaCreateQuestionResponseDTO(ApiSchema):

@@ -11,6 +11,12 @@ class User:
     created_at: str
 
 
+@dataclass(frozen=True)
+class RoleLinkedItem:
+    id: str
+    name: str
+
+
 @dataclass
 class Role:
     role_id: int
@@ -22,6 +28,9 @@ class Role:
     is_active: bool
     mention_name: str | None = None
     is_orchestrator: bool = False
+    skills: tuple[RoleLinkedItem, ...] = ()
+    pre_processing_tools: tuple[RoleLinkedItem, ...] = ()
+    post_processing_tools: tuple[RoleLinkedItem, ...] = ()
 
     def public_name(self) -> str:
         return self.mention_name or self.role_name
@@ -112,6 +121,17 @@ class RoleCatalogItem:
     is_active: bool
     llm_model: str | None
     is_orchestrator: bool
+    has_errors: bool
+    source: str
+
+
+@dataclass
+class MasterRoleCatalogItem:
+    role_id: int
+    role_name: str
+    llm_model: str | None
+    system_prompt: str
+    extra_instruction: str
     has_errors: bool
     source: str
 
@@ -227,6 +247,7 @@ class QaQuestion:
     created_at: str
     updated_at: str
     answered_at: str | None
+    answer_id: str | None = None
 
 
 @dataclass

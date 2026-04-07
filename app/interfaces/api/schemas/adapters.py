@@ -4,17 +4,21 @@ from typing import Any
 
 from app.application.contracts.result import Result
 from app.application.use_cases.write_api import (
+    MasterRolePatchOutcome,
     MutationAck,
     TeamRolePatchOutcome,
     TeamRolePrepostOutcome,
     TeamRoleSkillOutcome,
 )
 from app.application.use_cases.qa_api import QaCreateQuestionOutcome, QaQuestionStatus
+from app.application.use_cases.read_api import RegistryItem
 from app.models import (
+    MasterRoleCatalogItem,
     QaAnswer,
     QaOrchestratorFeedItem,
     QaQuestion,
     Role,
+    RoleLinkedItem,
     RoleCatalogError,
     RoleCatalogItem,
     Team,
@@ -35,7 +39,13 @@ from .entities import (
     RoleCatalogErrorDTO,
     RoleCatalogItemDTO,
     MutationAckDTO,
+    MasterRoleCatalogItemDTO,
+    MasterRolePatchOutcomeDTO,
+    PostProcessingToolDTO,
+    PreProcessingToolDTO,
     TeamBindingDTO,
+    RoleLinkedItemDTO,
+    SkillDTO,
     TeamDTO,
     TeamRolePatchOutcomeDTO,
     TeamRolePrepostOutcomeDTO,
@@ -56,7 +66,20 @@ from .operations import (
 
 
 def role_to_dto(value: Role) -> RoleDTO:
-    return RoleDTO.model_validate(value)
+    return RoleDTO(
+        role_id=value.role_id,
+        role_name=value.role_name,
+        description=value.description,
+        base_system_prompt=value.base_system_prompt,
+        extra_instruction=value.extra_instruction,
+        llm_model=value.llm_model,
+        is_active=value.is_active,
+        is_orchestrator=value.is_orchestrator,
+        mention_name=value.mention_name,
+        skills=[_linked_item_to_dto(item) for item in value.skills],
+        pre_processing_tools=[_linked_item_to_dto(item) for item in value.pre_processing_tools],
+        post_processing_tools=[_linked_item_to_dto(item) for item in value.post_processing_tools],
+    )
 
 
 def team_to_dto(value: Team) -> TeamDTO:
@@ -83,6 +106,10 @@ def role_catalog_item_to_dto(value: RoleCatalogItem) -> RoleCatalogItemDTO:
     return RoleCatalogItemDTO.model_validate(value)
 
 
+def master_role_catalog_item_to_dto(value: MasterRoleCatalogItem) -> MasterRoleCatalogItemDTO:
+    return MasterRoleCatalogItemDTO.model_validate(value)
+
+
 def role_catalog_error_to_dto(value: RoleCatalogError) -> RoleCatalogErrorDTO:
     return RoleCatalogErrorDTO.model_validate(value)
 
@@ -93,6 +120,10 @@ def team_session_to_dto(value: TeamSessionView) -> TeamSessionDTO:
 
 def team_role_patch_outcome_to_dto(value: TeamRolePatchOutcome) -> TeamRolePatchOutcomeDTO:
     return TeamRolePatchOutcomeDTO.model_validate(value)
+
+
+def master_role_patch_outcome_to_dto(value: MasterRolePatchOutcome) -> MasterRolePatchOutcomeDTO:
+    return MasterRolePatchOutcomeDTO.model_validate(value)
 
 
 def mutation_ack_to_dto(value: MutationAck) -> MutationAckDTO:
@@ -124,6 +155,7 @@ def qa_question_to_dto(value: QaQuestion) -> QaQuestionDTO:
         created_at=value.created_at,
         updated_at=value.updated_at,
         answered_at=value.answered_at,
+        answer_id=value.answer_id,
     )
 
 
@@ -144,6 +176,37 @@ def qa_create_question_outcome_to_dto(value: QaCreateQuestionOutcome) -> QaCreat
 
 def qa_orchestrator_feed_item_to_dto(value: QaOrchestratorFeedItem) -> QaOrchestratorFeedItemDTO:
     return QaOrchestratorFeedItemDTO.model_validate(value)
+
+
+def skill_to_dto(value: RegistryItem) -> SkillDTO:
+    return SkillDTO(
+        skill_id=value.id,
+        name=value.name,
+        description=value.description,
+        source=value.source,
+    )
+
+
+def pre_processing_tool_to_dto(value: RegistryItem) -> PreProcessingToolDTO:
+    return PreProcessingToolDTO(
+        tool_id=value.id,
+        name=value.name,
+        description=value.description,
+        source=value.source,
+    )
+
+
+def post_processing_tool_to_dto(value: RegistryItem) -> PostProcessingToolDTO:
+    return PostProcessingToolDTO(
+        tool_id=value.id,
+        name=value.name,
+        description=value.description,
+        source=value.source,
+    )
+
+
+def _linked_item_to_dto(value: RoleLinkedItem) -> RoleLinkedItemDTO:
+    return RoleLinkedItemDTO(id=value.id, name=value.name)
 
 
 def list_request_to_params(value: ListRequestDTO) -> dict[str, Any]:

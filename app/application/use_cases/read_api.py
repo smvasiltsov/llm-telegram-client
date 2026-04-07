@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Generic, TypeVar
 
 from app.application.contracts import ErrorCode, Result
-from app.models import RoleCatalogError, RoleCatalogItem, TeamSessionView
+from app.models import MasterRoleCatalogItem, RoleCatalogError, RoleCatalogItem, RoleLinkedItem, TeamSessionView
 from app.services.role_runtime_status import RoleRuntimeStatusService
 from app.storage import Storage
 
@@ -20,6 +20,14 @@ class PagedItems(Generic[T]):
     offset: int
 
 
+@dataclass(frozen=True)
+class RegistryItem:
+    id: str
+    name: str
+    description: str
+    source: str
+
+
 def list_teams_result(storage: Storage) -> Result[list]:
     try:
         return Result.ok(storage.list_teams())
@@ -32,10 +40,65 @@ def list_teams_result(storage: Storage) -> Result[list]:
         )
 
 
-def list_team_roles_result(storage: Storage, *, team_id: int, include_inactive: bool = False) -> Result[list]:
+def list_team_roles_result(
+    storage: Storage,
+    *,
+    team_id: int,
+    include_inactive: bool = False,
+    runtime: Any | None = None,
+) -> Result[list]:
     try:
         storage.get_team(team_id)
-        return Result.ok(storage.list_roles_for_team(team_id, include_inactive=include_inactive))
+        roles = list(storage.list_roles_for_team(team_id, include_inactive=include_inactive))
+        if runtime is None:
+            return Result.ok(roles)
+        skills_by_id = _skill_names_by_id(runtime)
+        prepost_by_id = _prepost_names_by_id(runtime)
+        enriched = []
+        for role in roles:
+            team_role_id = storage.resolve_team_role_id(team_id, role.role_id)
+            if team_role_id is None:
+                enriched.append(role)
+                continue
+            skills = sorted(
+                (
+                    RoleLinkedItem(
+                        id=str(item.skill_id),
+                        name=str(skills_by_id.get(str(item.skill_id), str(item.skill_id))),
+                    )
+                    for item in storage.list_role_skills_for_team_role(team_role_id, enabled_only=True)
+                    if bool(item.enabled)
+                ),
+                key=lambda item: item.id,
+            )
+            prepost = sorted(
+                (
+                    RoleLinkedItem(
+                        id=str(item.prepost_processing_id),
+                        name=str(prepost_by_id.get(str(item.prepost_processing_id), str(item.prepost_processing_id))),
+                    )
+                    for item in storage.list_role_prepost_processing_for_team_role(team_role_id, enabled_only=True)
+                    if bool(item.enabled)
+                ),
+                key=lambda item: item.id,
+            )
+            enriched.append(
+                type(role)(
+                    role_id=role.role_id,
+                    role_name=role.role_name,
+                    description=role.description,
+                    base_system_prompt=role.base_system_prompt,
+                    extra_instruction=role.extra_instruction,
+                    llm_model=role.llm_model,
+                    is_active=role.is_active,
+                    mention_name=role.mention_name,
+                    is_orchestrator=role.is_orchestrator,
+                    skills=tuple(skills),
+                    pre_processing_tools=tuple(prepost),
+                    post_processing_tools=tuple(prepost),
+                )
+            )
+        return Result.ok(enriched)
     except ValueError as exc:
         return Result.fail_from_exception(
             exc,
@@ -115,6 +178,85 @@ def list_roles_catalog_result(
             fallback_message="Failed to list role catalog",
             fallback_details={"entity": "role_catalog", "cause": "list"},
         )
+
+
+def list_master_roles_catalog_result(
+    runtime: Any,
+    storage: Storage,
+    *,
+    include_inactive: bool = False,
+    limit: int = 50,
+    offset: int = 0,
+) -> Result[PagedItems[MasterRoleCatalogItem]]:
+    try:
+        catalog = runtime.role_catalog
+        all_items = list(catalog.list_all())
+        issue_by_role = _issues_by_role(catalog.issues)
+        roles_by_name = {item.role_name.lower(): item for item in storage.list_roles()}
+        # Backward compatibility: keep query param accepted but ignore for master-role catalog contract.
+        _ = include_inactive
+        filtered = all_items
+        page = _paginate(filtered, limit=limit, offset=offset)
+        return Result.ok(
+            PagedItems(
+                items=[
+                    MasterRoleCatalogItem(
+                        role_id=int(getattr(roles_by_name.get(item.role_name.lower()), "role_id", 0) or 0),
+                        role_name=item.role_name,
+                        llm_model=item.llm_model,
+                        system_prompt=item.base_system_prompt,
+                        extra_instruction=item.extra_instruction,
+                        has_errors=item.role_name.lower() in issue_by_role,
+                        source=str(item.source_path),
+                    )
+                    for item in page.items
+                ],
+                total=page.total,
+                limit=page.limit,
+                offset=page.offset,
+            )
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to list master role catalog",
+            fallback_details={"entity": "master_role_catalog", "cause": "list"},
+        )
+
+
+def list_skills_result(runtime: Any) -> Result[list[RegistryItem]]:
+    try:
+        registry = getattr(runtime, "skills_registry", None)
+        specs = list(getattr(registry, "list_specs", lambda: [])())
+        items = sorted(
+            (
+                RegistryItem(
+                    id=str(spec.skill_id),
+                    name=str(spec.name),
+                    description=str(getattr(spec, "description", "") or ""),
+                    source=_registry_source(registry, str(spec.skill_id), default_source="skills_registry"),
+                )
+                for spec in specs
+            ),
+            key=lambda item: item.id,
+        )
+        return Result.ok(items)
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to list skills",
+            fallback_details={"entity": "skills_registry", "cause": "list"},
+        )
+
+
+def list_pre_processing_tools_result(runtime: Any) -> Result[list[RegistryItem]]:
+    return _list_prepost_tools_result(runtime, source_default="prepost_registry")
+
+
+def list_post_processing_tools_result(runtime: Any) -> Result[list[RegistryItem]]:
+    return _list_prepost_tools_result(runtime, source_default="prepost_registry")
 
 
 def list_roles_catalog_errors_result(runtime: Any, storage: Storage) -> Result[list[RoleCatalogError]]:
@@ -213,3 +355,54 @@ def _paginate(items: list[T], *, limit: int, offset: int) -> PagedItems[T]:
     total = len(items)
     window = items[safe_offset : safe_offset + safe_limit]
     return PagedItems(items=window, total=total, limit=safe_limit, offset=safe_offset)
+
+
+def _skill_names_by_id(runtime: Any) -> dict[str, str]:
+    registry = getattr(runtime, "skills_registry", None)
+    specs = list(getattr(registry, "list_specs", lambda: [])())
+    return {str(spec.skill_id): str(spec.name) for spec in specs}
+
+
+def _prepost_names_by_id(runtime: Any) -> dict[str, str]:
+    registry = getattr(runtime, "prepost_processing_registry", None)
+    specs = list(getattr(registry, "list_specs", lambda: [])())
+    return {str(spec.prepost_processing_id): str(spec.name) for spec in specs}
+
+
+def _list_prepost_tools_result(runtime: Any, *, source_default: str) -> Result[list[RegistryItem]]:
+    try:
+        registry = getattr(runtime, "prepost_processing_registry", None)
+        specs = list(getattr(registry, "list_specs", lambda: [])())
+        items = sorted(
+            (
+                RegistryItem(
+                    id=str(spec.prepost_processing_id),
+                    name=str(spec.name),
+                    description=str(getattr(spec, "description", "") or ""),
+                    source=_registry_source(registry, str(spec.prepost_processing_id), default_source=source_default),
+                )
+                for spec in specs
+            ),
+            key=lambda item: item.id,
+        )
+        return Result.ok(items)
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to list pre/post processing tools",
+            fallback_details={"entity": "prepost_processing_registry", "cause": "list"},
+        )
+
+
+def _registry_source(registry: Any, item_id: str, *, default_source: str) -> str:
+    if registry is None:
+        return default_source
+    record = getattr(registry, "get", lambda _id: None)(item_id)
+    if record is None:
+        return default_source
+    manifest = getattr(record, "manifest", {}) or {}
+    entrypoint = str(manifest.get("entrypoint", "") or "").strip()
+    if entrypoint:
+        return entrypoint
+    return default_source

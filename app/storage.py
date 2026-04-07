@@ -3575,6 +3575,39 @@ class Storage:
                 (role_name, role_id),
             )
 
+    def update_master_role(
+        self,
+        *,
+        role_id: int,
+        role_name: str,
+        base_system_prompt: str,
+        extra_instruction: str,
+        llm_model: str | None,
+    ) -> None:
+        self._require_write_transaction('update_master_role')
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM roles WHERE role_id = ? LIMIT 1", (role_id,))
+        if cur.fetchone() is None:
+            raise ValueError(f"Role not found: {role_id}")
+        cur.execute(
+            """
+            UPDATE roles
+            SET role_name = ?, base_system_prompt = ?, extra_instruction = ?, llm_model = ?
+            WHERE role_id = ?
+            """,
+            (role_name, base_system_prompt, extra_instruction, llm_model, role_id),
+        )
+        if self.has_team_role_name_binding():
+            cur.execute(
+                "UPDATE team_roles SET role_name = ? WHERE role_id = ?",
+                (role_name, role_id),
+            )
+        if self.has_provider_user_data_role_name():
+            cur.execute(
+                "UPDATE provider_user_data SET role_name = ? WHERE role_id = ?",
+                (role_name, role_id),
+            )
+
     def delete_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.delete_user_role_session_by_team(telegram_user_id, team_id, role_id)

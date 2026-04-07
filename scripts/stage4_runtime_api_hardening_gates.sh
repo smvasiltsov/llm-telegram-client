@@ -21,7 +21,8 @@ echo "[stage4_runtime_api_hardening_gates] 4/5 stage4 API smoke/integration"
 python3 -m unittest \
   tests.test_ltc69_read_only_fastapi_contract \
   tests.test_ltc71_read_only_api_e2e_smoke \
-  tests.test_ltc74_write_fastapi_contract
+  tests.test_ltc74_write_fastapi_contract \
+  tests.test_ltc84_runtime_service_process_smoke
 
 echo "[stage4_runtime_api_hardening_gates] 5/5 rollback drill"
 python3 -m unittest tests.test_ltc75_stage4_runtime_hardening

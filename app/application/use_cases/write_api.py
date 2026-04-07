@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, TypeVar
@@ -80,6 +81,23 @@ class TeamRolePrepostOutcome:
     prepost_id: str
     enabled: bool
     config: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class MasterRolePatchRequest:
+    role_name: str | None = None
+    llm_model: str | None = None
+    system_prompt: str | None = None
+    extra_instruction: str | None = None
+
+
+@dataclass(frozen=True)
+class MasterRolePatchOutcome:
+    role_id: int
+    role_name: str
+    llm_model: str | None
+    system_prompt: str
+    extra_instruction: str
 
 
 @dataclass(frozen=True)
@@ -361,6 +379,91 @@ def put_team_role_prepost_result(
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to update team-role pre/post processing state",
             fallback_details={"entity": "prepost_binding", "id": f"{request.team_role_id}:{request.prepost_id}", "cause": "put"},
+        )
+
+
+def patch_master_role_result(
+    storage: Storage,
+    *,
+    role_id: int,
+    patch: MasterRolePatchRequest,
+) -> Result[MasterRolePatchOutcome]:
+    if all(
+        value is None
+        for value in (
+            patch.role_name,
+            patch.llm_model,
+            patch.system_prompt,
+            patch.extra_instruction,
+        )
+    ):
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "Patch payload is empty",
+            details={"entity": "master_role", "cause": "empty_patch"},
+        )
+    normalized_role_name = None
+    if patch.role_name is not None:
+        normalized_role_name = str(patch.role_name).strip()
+        if not normalized_role_name:
+            return Result.fail(
+                ErrorCode.VALIDATION_INVALID_INPUT,
+                "role_name must be a non-empty string",
+                details={"entity": "master_role", "cause": "invalid_role_name"},
+            )
+    try:
+        with storage.transaction(immediate=True):
+            current = storage.get_role_by_id(role_id)
+            next_role_name = normalized_role_name if normalized_role_name is not None else str(current.role_name)
+            if next_role_name.lower() != str(current.role_name).lower():
+                existing = None
+                try:
+                    existing = storage.get_role_by_name(next_role_name)
+                except ValueError:
+                    existing = None
+                if existing is not None and int(existing.role_id) != int(role_id):
+                    return Result.fail(
+                        ErrorCode.CONFLICT_ALREADY_EXISTS,
+                        f"Role name already exists: {next_role_name}",
+                        details={"entity": "master_role", "cause": "name_conflict", "role_name": next_role_name},
+                    )
+            storage.update_master_role(
+                role_id=role_id,
+                role_name=next_role_name,
+                llm_model=patch.llm_model if patch.llm_model is not None else current.llm_model,
+                base_system_prompt=patch.system_prompt if patch.system_prompt is not None else current.base_system_prompt,
+                extra_instruction=patch.extra_instruction
+                if patch.extra_instruction is not None
+                else current.extra_instruction,
+            )
+            updated = storage.get_role_by_id(role_id)
+            return Result.ok(
+                MasterRolePatchOutcome(
+                    role_id=updated.role_id,
+                    role_name=updated.role_name,
+                    llm_model=updated.llm_model,
+                    system_prompt=updated.base_system_prompt,
+                    extra_instruction=updated.extra_instruction,
+                )
+            )
+    except sqlite3.IntegrityError:
+        return Result.fail(
+            ErrorCode.CONFLICT_ALREADY_EXISTS,
+            "Role name conflict",
+            details={"entity": "master_role", "id": role_id, "cause": "name_conflict"},
+        )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "master_role", "id": role_id, "cause": "patch"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to patch master role",
+            fallback_details={"entity": "master_role", "id": role_id, "cause": "patch"},
         )
 
 

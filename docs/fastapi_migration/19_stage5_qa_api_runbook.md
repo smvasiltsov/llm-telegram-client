@@ -17,6 +17,22 @@
 - `GET /api/v1/threads/{thread_id}`
 - `GET /api/v1/orchestrator/feed`
 
+### 2.1 Addendum: Stage 5 API parity extension (2026-04-06)
+- Новые read endpoint-ы:
+  - `GET /api/v1/skills`
+  - `GET /api/v1/pre_processing_tools`
+  - `GET /api/v1/post_processing_tools`
+- Новый write endpoint:
+  - `PATCH /api/v1/roles/{role_id}` (master-role patch, `409` при конфликте имени).
+- Изменённые endpoint-ы:
+  - `GET /api/v1/teams/{team_id}/roles`:
+    - добавлены `skills`, `pre_processing_tools`, `post_processing_tools` (только enabled, сортировка по `id`);
+  - `GET /api/v1/roles/catalog`:
+    - master-role shape: `role_id`, `role_name`, `llm_model`, `system_prompt`, `extra_instruction`, `has_errors`, `source`;
+    - `include_inactive` принимается, но игнорируется (compat mode);
+  - `GET /api/v1/qa-journal`:
+    - добавлено `answer_id` (nullable).
+
 ## 3. Нормативная семантика Stage 5
 
 ### 3.1 Status machine
@@ -90,6 +106,9 @@
   - `409` conflict/not-ready (`qa_answer_not_ready`, runtime conflicts);
   - `422` validation/invariant (`qa_lineage_invalid`, `qa_orchestrator_not_configured`, `qa_orchestrator_ambiguous`, `qa_idempotency_mismatch`, invalid cursor);
   - единый error envelope + `details.correlation_id`.
+- Для API parity extension:
+  - `GET /skills|/pre_processing_tools|/post_processing_tools`: `200/401/403`;
+  - `PATCH /roles/{role_id}`: `200/401/403/404/409/422`.
 
 ## 5. Операционные проверки
 
@@ -175,4 +194,5 @@
 ## 9. Связанные документы
 - `docs/fastapi_migration/14_stage5_qa_api_orchestration_spec.md`
 - `docs/fastapi_migration/18_stage5_qa_api_execution_checklist.md`
+- `docs/fastapi_migration/26_stage5_api_parity_extension_checklist.md`
 - `docs/fastapi_migration/04_migration_roadmap_and_risks.md`

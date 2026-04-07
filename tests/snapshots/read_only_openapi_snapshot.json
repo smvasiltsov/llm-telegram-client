@@ -2,13 +2,17 @@
   "paths": [
     "/api/v1/answers/{answer_id}",
     "/api/v1/orchestrator/feed",
+    "/api/v1/post_processing_tools",
+    "/api/v1/pre_processing_tools",
     "/api/v1/questions",
     "/api/v1/questions/{question_id}",
     "/api/v1/questions/{question_id}/answer",
     "/api/v1/questions/{question_id}/status",
     "/api/v1/qa-journal",
+    "/api/v1/roles/{role_id}",
     "/api/v1/roles/catalog",
     "/api/v1/roles/catalog/errors",
+    "/api/v1/skills",
     "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}",
     "/api/v1/team-roles/{team_role_id}/skills/{skill_id}",
     "/api/v1/teams",
@@ -30,6 +34,24 @@
       ]
     },
     "/api/v1/orchestrator/feed": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/post_processing_tools": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/pre_processing_tools": {
       "get": [
         "200",
         "401",
@@ -86,6 +108,17 @@
         "500"
       ]
     },
+    "/api/v1/roles/{role_id}": {
+      "patch": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
     "/api/v1/roles/catalog": {
       "get": [
         "200",
@@ -100,6 +133,15 @@
         "200",
         "401",
         "403",
+        "500"
+      ]
+    },
+    "/api/v1/skills": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
         "500"
       ]
     },
