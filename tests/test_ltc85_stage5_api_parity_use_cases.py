@@ -6,15 +6,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.application.contracts import ErrorCode
-from app.application.use_cases.qa_api import list_qa_journal_result
+from app.application.use_cases.qa_api import get_question_result, get_question_status_result, list_qa_journal_result
 from app.application.use_cases.read_api import (
     list_master_roles_catalog_result,
+    list_prepost_processing_tools_result,
     list_post_processing_tools_result,
     list_pre_processing_tools_result,
     list_skills_result,
     list_team_roles_result,
 )
-from app.application.use_cases.write_api import MasterRolePatchRequest, patch_master_role_result
+from app.application.use_cases.write_api import (
+    MasterRolePatchRequest,
+    bind_master_role_to_team_result,
+    patch_master_role_result,
+)
 from app.role_catalog import RoleCatalog
 from app.storage import Storage
 from prepost_processing_sdk.contract import PrePostProcessingSpec
@@ -93,14 +98,18 @@ class LTC85Stage5ApiParityUseCasesTests(unittest.TestCase):
             self.assertTrue(skills.is_ok and skills.value is not None)
             self.assertTrue(pre.is_ok and pre.value is not None)
             self.assertTrue(post.is_ok and post.value is not None)
+            unified = list_prepost_processing_tools_result(runtime)
+            self.assertTrue(unified.is_ok and unified.value is not None)
             self.assertEqual([item.id for item in skills.value], ["s1", "s2", "s3"])
-            self.assertEqual(skills.value[0].source, "skills.a:make")
+            self.assertIsNone(skills.value[0].source)
             self.assertEqual([item.id for item in pre.value], ["p1", "p2", "p3"])
             self.assertEqual([item.id for item in post.value], ["p1", "p2", "p3"])
+            self.assertEqual([item.id for item in unified.value], ["p1", "p2", "p3"])
 
             roles = list_team_roles_result(storage, team_id=team_id, runtime=runtime)
             self.assertTrue(roles.is_ok and roles.value is not None and roles.value)
             view = roles.value[0]
+            self.assertIsInstance(view.team_role_id, int)
             self.assertEqual([item.id for item in view.skills], ["s1", "s2"])
             self.assertEqual([item.id for item in view.pre_processing_tools], ["p1", "p2"])
             self.assertEqual([item.id for item in view.post_processing_tools], ["p1", "p2"])
@@ -203,6 +212,81 @@ class LTC85Stage5ApiParityUseCasesTests(unittest.TestCase):
             by_id = {item.question_id: item.answer_id for item in result.value.items}
             self.assertEqual(by_id.get("q1"), "a1")
             self.assertIsNone(by_id.get("q2"))
+
+    def test_get_question_and_status_include_answer_id_for_answered(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "ltc85_question_status.sqlite3")
+            with storage.transaction(immediate=True):
+                group = storage.upsert_group(-9852, "qa")
+                role = storage.upsert_role("dev", "d", "sp", "ei", None, True)
+                storage.ensure_group_role(group.group_id, role.role_id)
+                team_id = int(group.team_id or 0)
+                team_role_id = int(storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True) or 0)
+
+                q = storage.create_question(
+                    question_id="q-ready",
+                    thread_id="t-ready",
+                    team_id=team_id,
+                    created_by_user_id=700,
+                    target_team_role_id=team_role_id,
+                    text="first",
+                )
+                storage.transition_question_status(question_id=q.question_id, status="queued")
+                storage.transition_question_status(question_id=q.question_id, status="in_progress")
+                storage.create_answer(
+                    answer_id="a-ready",
+                    question_id=q.question_id,
+                    thread_id=q.thread_id,
+                    team_id=q.team_id,
+                    team_role_id=team_role_id,
+                    role_name="dev",
+                    text="ok",
+                )
+                storage.transition_question_status(question_id=q.question_id, status="answered")
+
+            question = get_question_result(storage, question_id="q-ready")
+            status = get_question_status_result(storage, question_id="q-ready")
+            self.assertTrue(question.is_ok and question.value is not None)
+            self.assertTrue(status.is_ok and status.value is not None)
+            self.assertEqual(question.value.answer_id, "a-ready")
+            self.assertEqual(status.value.answer_id, "a-ready")
+
+    def test_bind_master_role_to_team_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "ltc85_bind.sqlite3")
+            with storage.transaction(immediate=True):
+                group = storage.upsert_group(-9853, "qa")
+                role = storage.upsert_role("dev", "d", "sp", "ei", None, True)
+                team_id = int(group.team_id or 0)
+                role_id = int(role.role_id)
+
+            first = bind_master_role_to_team_result(storage, team_id=team_id, role_id=role_id)
+            second = bind_master_role_to_team_result(storage, team_id=team_id, role_id=role_id)
+            self.assertTrue(first.is_ok and first.value is not None)
+            self.assertTrue(second.is_ok and second.value is not None)
+            self.assertTrue(first.value.created_or_reactivated)
+            self.assertFalse(second.value.created_or_reactivated)
+
+    def test_team_roles_include_inactive_returns_inactive_bindings_with_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "ltc85_include_inactive.sqlite3")
+            with storage.transaction(immediate=True):
+                group = storage.upsert_group(-9854, "qa")
+                role = storage.upsert_role("dev", "d", "sp", "ei", None, True)
+                storage.ensure_group_role(group.group_id, role.role_id)
+                team_id = int(group.team_id or 0)
+                storage._conn.execute(  # noqa: SLF001
+                    "UPDATE team_roles SET is_active = 0 WHERE team_id = ? AND role_id = ?",
+                    (team_id, role.role_id),
+                )
+
+            active_only = list_team_roles_result(storage, team_id=team_id, include_inactive=False, runtime=None)
+            with_inactive = list_team_roles_result(storage, team_id=team_id, include_inactive=True, runtime=None)
+            self.assertTrue(active_only.is_ok and active_only.value is not None)
+            self.assertTrue(with_inactive.is_ok and with_inactive.value is not None)
+            self.assertEqual(len(active_only.value), 0)
+            self.assertEqual(len(with_inactive.value), 1)
+            self.assertFalse(with_inactive.value[0].is_active)
 
 
 if __name__ == "__main__":

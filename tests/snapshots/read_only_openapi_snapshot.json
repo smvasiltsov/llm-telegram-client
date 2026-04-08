@@ -2,8 +2,7 @@
   "paths": [
     "/api/v1/answers/{answer_id}",
     "/api/v1/orchestrator/feed",
-    "/api/v1/post_processing_tools",
-    "/api/v1/pre_processing_tools",
+    "/api/v1/prepost_processing_tools",
     "/api/v1/questions",
     "/api/v1/questions/{question_id}",
     "/api/v1/questions/{question_id}/answer",
@@ -42,16 +41,7 @@
         "500"
       ]
     },
-    "/api/v1/post_processing_tools": {
-      "get": [
-        "200",
-        "401",
-        "403",
-        "422",
-        "500"
-      ]
-    },
-    "/api/v1/pre_processing_tools": {
+    "/api/v1/prepost_processing_tools": {
       "get": [
         "200",
         "401",
@@ -197,6 +187,15 @@
         "500"
       ],
       "patch": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ],
+      "post": [
         "200",
         "401",
         "403",

@@ -17,11 +17,11 @@
 - `GET /api/v1/threads/{thread_id}`
 - `GET /api/v1/orchestrator/feed`
 
-### 2.1 Addendum: Stage 5 API parity extension (2026-04-06)
+### 2.1 Addendum: Stage 5 API parity extension (2026-04-06, baseline)
 - Новые read endpoint-ы:
   - `GET /api/v1/skills`
-  - `GET /api/v1/pre_processing_tools`
-  - `GET /api/v1/post_processing_tools`
+  - `GET /api/v1/pre_processing_tools` (legacy, заменён в Wave 2)
+  - `GET /api/v1/post_processing_tools` (legacy, заменён в Wave 2)
 - Новый write endpoint:
   - `PATCH /api/v1/roles/{role_id}` (master-role patch, `409` при конфликте имени).
 - Изменённые endpoint-ы:
@@ -29,9 +29,34 @@
     - добавлены `skills`, `pre_processing_tools`, `post_processing_tools` (только enabled, сортировка по `id`);
   - `GET /api/v1/roles/catalog`:
     - master-role shape: `role_id`, `role_name`, `llm_model`, `system_prompt`, `extra_instruction`, `has_errors`, `source`;
-    - `include_inactive` принимается, но игнорируется (compat mode);
+    - `include_inactive` принимался и игнорировался (compat mode, до Wave 2);
   - `GET /api/v1/qa-journal`:
     - добавлено `answer_id` (nullable).
+
+### 2.2 Addendum: API parity extension Wave 2 (2026-04-08, current)
+- Консолидирован pre/post endpoint:
+  - `GET /api/v1/prepost_processing_tools`;
+  - `/api/v1/pre_processing_tools` и `/api/v1/post_processing_tools` удалены из роутера/OpenAPI.
+- `GET /api/v1/skills` и `GET /api/v1/prepost_processing_tools`:
+  - `source` возвращается как POSIX путь относительно корня репо или `null`.
+- `GET /api/v1/roles/catalog`:
+  - `include_inactive` удалён из API-контракта.
+- `GET /api/v1/teams/{team_id}/roles`:
+  - обязательный `team_role_id`;
+  - `is_active` читается из `team_roles.is_active`;
+  - `include_inactive=false` -> только active;
+  - `include_inactive=true` -> active + inactive.
+- `GET /api/v1/teams/{team_id}/runtime-status`:
+  - только active team roles;
+  - стабильный порядок по `team_role_id`.
+- `POST /api/v1/questions`:
+  - `created_by_user_id` удалён из публичного input;
+  - автор берётся из owner-only контекста;
+  - legacy `created_by_user_id` в payload принимается и игнорируется.
+- `GET /api/v1/questions/{question_id}` и `/status`:
+  - добавлен `answer_id` (`nullable`).
+- Новый endpoint:
+  - `POST /api/v1/teams/{team_id}/roles/{role_id}` (идемпотентный bind, `200`/`404`).
 
 ## 3. Нормативная семантика Stage 5
 
@@ -107,8 +132,9 @@
   - `422` validation/invariant (`qa_lineage_invalid`, `qa_orchestrator_not_configured`, `qa_orchestrator_ambiguous`, `qa_idempotency_mismatch`, invalid cursor);
   - единый error envelope + `details.correlation_id`.
 - Для API parity extension:
-  - `GET /skills|/pre_processing_tools|/post_processing_tools`: `200/401/403`;
+  - `GET /skills|/prepost_processing_tools`: `200/401/403`;
   - `PATCH /roles/{role_id}`: `200/401/403/404/409/422`.
+  - `POST /teams/{team_id}/roles/{role_id}`: `200/401/403/404`.
 
 ## 5. Операционные проверки
 

@@ -101,6 +101,24 @@ class MasterRolePatchOutcome:
 
 
 @dataclass(frozen=True)
+class TeamRoleBindOutcome:
+    team_id: int
+    role_id: int
+    team_role_id: int | None
+    enabled: bool
+    is_active: bool
+    mode: str
+    is_orchestrator: bool
+    model_override: str | None
+    display_name: str | None
+    system_prompt_override: str | None
+    extra_instruction_override: str | None
+    user_prompt_suffix: str | None
+    user_reply_prefix: str | None
+    created_or_reactivated: bool
+
+
+@dataclass(frozen=True)
 class _IdempotencyRecord:
     fingerprint: str
     result: Result[Any]
@@ -464,6 +482,50 @@ def patch_master_role_result(
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to patch master role",
             fallback_details={"entity": "master_role", "id": role_id, "cause": "patch"},
+        )
+
+
+def bind_master_role_to_team_result(
+    storage: Storage,
+    *,
+    team_id: int,
+    role_id: int,
+) -> Result[TeamRoleBindOutcome]:
+    try:
+        with storage.transaction(immediate=True):
+            storage.get_team(team_id)
+            storage.get_role_by_id(role_id)
+            current, created = storage.bind_master_role_to_team(team_id, role_id)
+            return Result.ok(
+                TeamRoleBindOutcome(
+                    team_id=current.team_id,
+                    role_id=current.role_id,
+                    team_role_id=current.team_role_id,
+                    enabled=current.enabled,
+                    is_active=current.is_active,
+                    mode=current.mode,
+                    is_orchestrator=(current.mode == "orchestrator"),
+                    model_override=current.model_override,
+                    display_name=current.display_name,
+                    system_prompt_override=current.system_prompt_override,
+                    extra_instruction_override=current.extra_instruction_override,
+                    user_prompt_suffix=current.user_prompt_suffix,
+                    user_reply_prefix=current.user_reply_prefix,
+                    created_or_reactivated=bool(created),
+                )
+            )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "team_role_binding", "id": f"team_id={team_id} role_id={role_id}", "cause": "bind"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to bind master role to team",
+            fallback_details={"entity": "team_role_binding", "id": f"team_id={team_id} role_id={role_id}", "cause": "bind"},
         )
 
 

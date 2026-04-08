@@ -1,223 +1,280 @@
 # 26. Stage 5 API Parity Extension Checklist (Telegram UI parity)
 
 ## Статус
-- Текущий этап: `Finalized`.
-- Реализация: `DONE (2026-04-06)`.
-- Gate-статус:
-  - `stage5_qa_api_gates`: **PASS**.
-  - `stage5_execution_bridge_gates`: **PASS**.
+- Текущий этап: `Wave 2 closeout`.
+- Реализация Wave 2: `DONE`.
+- Контекст:
+  - Stage5/bridge baseline: `GO`.
+  - Данная поставка — дополнительный пакет API-доработок без изменения Telegram UX.
 
-## Scope (подтверждено)
-- Добавить read endpoints:
-  - `GET /api/v1/skills`
-  - `GET /api/v1/pre_processing_tools`
-  - `GET /api/v1/post_processing_tools`
-- Расширить `GET /api/v1/teams/{team_id}/roles`:
-  - добавить включённые `skills`, `pre_processing_tools`, `post_processing_tools`.
-- Пересобрать контракт `GET /api/v1/roles/catalog` как каталог только master-role.
-- Добавить write endpoint:
-  - `PATCH /api/v1/roles/{role_id}` (редактирование master-role).
-- Расширить `GET /api/v1/qa-journal`:
-  - добавить `answer_id` (nullable).
+## Scope (Wave 2, подтверждено)
+- `GET /api/v1/skills`:
+  - `source` = POSIX-путь относительно корня репо;
+  - если файловый источник не определён: `source = null`.
+- Pre/Post endpoint consolidation:
+  - целевой endpoint: `GET /api/v1/prepost_processing_tools`;
+  - удалить из роутера/OpenAPI:
+    - `GET /api/v1/pre_processing_tools`
+    - `GET /api/v1/post_processing_tools`
+  - `source` для prepost: POSIX-путь относительно корня репо, иначе `null`.
+- `GET /api/v1/roles/catalog`:
+  - удалить `include_inactive` из API-контракта и документации;
+  - неизвестные query-параметры обрабатываются стандартным FastAPI-поведением.
+- `GET /api/v1/teams/{team_id}/roles`:
+  - добавить обязательный `team_role_id` в response;
+  - `is_active` брать из team-binding (`team_roles.is_active`);
+  - `include_inactive=false` -> только активные;
+  - `include_inactive=true` -> активные + неактивные с корректным `is_active`.
+- `GET /api/v1/teams/{team_id}/runtime-status`:
+  - возвращать только активные team-roles;
+  - порядок ответа: стабильный, по `team_role_id`.
+- `POST /api/v1/questions`:
+  - убрать `created_by_user_id` из публичного input/OpenAPI;
+  - внутри использовать `owner_user_id` из owner-only контекста;
+  - если поле `created_by_user_id` прислано клиентом: принять и игнорировать.
+- `GET /api/v1/questions/{question_id}/status` и `GET /api/v1/questions/{question_id}`:
+  - добавить `answer_id` (nullable);
+  - для не-`answered`: `null`;
+  - для `answered`: последний `answer_id` по текущей policy.
+- Новый endpoint привязки master-role к команде:
+  - `POST /api/v1/teams/{team_id}/roles/{role_id}`;
+  - успех: `200` + DTO team-role binding;
+  - повторная привязка: идемпотентный `200` с текущим состоянием;
+  - `404` для team/role not found.
 
-## Endpoint contracts
+## Endpoint contracts (Wave 2)
 
 ### 1) `GET /api/v1/skills`
-- Pagination: нет (полный список).
 - Item shape: `skill_id`, `name`, `description`, `source`.
-- Source: registry/каталог навыков (без team bindings).
+- `source`: POSIX-relative path от корня репо, иначе `null`.
 
-### 2) `GET /api/v1/pre_processing_tools`
-- Pagination: нет (полный список).
+### 2) `GET /api/v1/prepost_processing_tools`
 - Item shape: `tool_id`, `name`, `description`, `source`.
+- `source`: POSIX-relative path от корня репо, иначе `null`.
+- Legacy endpoints `/pre_processing_tools` и `/post_processing_tools` выводятся из контракта.
 
-### 3) `GET /api/v1/post_processing_tools`
-- Pagination: нет (полный список).
-- Item shape: `tool_id`, `name`, `description`, `source`.
+### 3) `GET /api/v1/teams/{team_id}/roles`
+- Обязательные поля:
+  - `team_role_id`
+  - `is_active` (из `team_roles.is_active`).
+- `include_inactive=false`: только активные bindings.
+- `include_inactive=true`: активные + неактивные bindings.
+- Для вложенных `skills/pre_processing_tools/post_processing_tools`:
+  - только enabled элементы;
+  - сортировка по `id`.
 
-### 4) `GET /api/v1/teams/{team_id}/roles`
-- Additive поля:
-  - `skills: [{id, name}]`
-  - `pre_processing_tools: [{id, name}]`
-  - `post_processing_tools: [{id, name}]`
-- Показывать только включённые для роли.
-- Сортировка в каждом списке: стабильная по `id`.
-
-### 5) `GET /api/v1/roles/catalog`
+### 4) `GET /api/v1/roles/catalog`
 - Только master roles.
-- Поля строго:
-  - `role_id`
-  - `role_name`
-  - `llm_model`
-  - `system_prompt`
-  - `extra_instruction`
-  - `has_errors`
-  - `source`
-- Не возвращать:
-  - `is_active`
-  - `is_orchestrator`
-- `include_inactive` игнорируется (без `422`, для совместимости).
-- `has_errors` основан на текущей catalog/validation логике.
-- `source` оставляем в текущем формате проекта.
+- Query `include_inactive` удалён из контракта.
 
-### 6) `PATCH /api/v1/roles/{role_id}`
-- Разрешённые поля:
-  - `role_name`
-  - `llm_model`
-  - `system_prompt`
-  - `extra_instruction`
-- Rename разрешён.
-- Конфликт имени: `409`.
-- Response: `200` + обновлённая master-role.
-- `Idempotency-Key`: не требуется.
+### 5) `POST /api/v1/questions`
+- Публичный input не содержит `created_by_user_id`.
+- Источник автора: owner-only контекст (`owner_user_id`).
+- Legacy field `created_by_user_id` в payload принимается и игнорируется.
 
-### 7) `GET /api/v1/qa-journal`
-- Additive поле записи: `answer_id: string | null`.
-- Для статусов не `answered`: `null`.
+### 6) `GET /api/v1/questions/{question_id}` и `/status`
+- Добавляется `answer_id: string | null`.
+
+### 7) `POST /api/v1/teams/{team_id}/roles/{role_id}`
+- Идемпотентная bind-операция master-role -> team.
+- `200` success (включая повторную привязку), `404` not found.
 
 ## Status/Code policy
-- Новые GET endpoints: `200/401/403`.
-- `PATCH /api/v1/roles/{role_id}`: `200/401/403/404/409/422`.
-- Сохранить единый error envelope.
+- `GET /skills`, `GET /prepost_processing_tools`: `200/401/403`.
+- `POST /teams/{team_id}/roles/{role_id}`: `200/401/403/404`.
+- Для изменённых endpoint-ов сохраняется owner-only/authz и единый error envelope.
 
 ## Invariants
 - `owner-only/authz`: без изменений.
-- `additive-only`: без breaking-изменений существующего API.
+- `additive/safe` где возможно; контрактные корректировки выполняются по согласованному scope.
 - Без регрессий Stage 5/dispatch bridge.
 - Telegram UX/поведение: без изменений.
 
 ## CI/Gates policy
-- Проверки включить в текущие цепочки:
+- Blocking:
   - `scripts/stage5_qa_api_gates.sh`
-  - при необходимости `scripts/stage5_execution_bridge_gates.sh`
-- OpenAPI snapshot остаётся blocking в действующих gate-пайплайнах.
+  - `scripts/stage5_execution_bridge_gates.sh` (при затрагивании bridge/runtime совместимости)
+- OpenAPI snapshot: blocking.
 
-## Финализация поставки (этап 6)
-- [x] API boundary и DTO/OpenAPI wiring для scope из раздела `Scope`.
-- [x] Обновлены контракты и тесты:
-  - `409` на конфликт имени в `PATCH /api/v1/roles/{role_id}`;
-  - `answer_id` (nullable) в `GET /api/v1/qa-journal`;
-  - сортировка и только enabled элементы в `skills/pre/post` у `GET /api/v1/teams/{team_id}/roles`.
-- [x] OpenAPI snapshot обновлён (blocking).
-- [x] Прогнаны blocking gates:
-  - `scripts/stage5_qa_api_gates.sh`;
-  - `scripts/stage5_execution_bridge_gates.sh`.
+## Тестовые критерии (Wave 2, must-pass)
+- Контракт/интеграция:
+  - новый `GET /prepost_processing_tools`;
+  - отсутствие старых `/pre_processing_tools` и `/post_processing_tools`;
+  - `roles/catalog` без документированного `include_inactive`;
+  - `team_role_id` + корректный `is_active` в `/teams/{team_id}/roles`;
+  - фильтрация и сортировка `/teams/{team_id}/runtime-status`;
+  - `POST /questions` без публичного `created_by_user_id` + tolerant-ignore legacy поля;
+  - `answer_id` в `/questions/{id}` и `/questions/{id}/status`;
+  - `POST /teams/{team_id}/roles/{role_id}` (idempotent `200`, `404` mapping).
+- Regression:
+  - Stage5/dispatch bridge без регрессий;
+  - Telegram UX regression suite зелёный.
 
-## Риски и допущения (остаточные)
-- Runtime/parity extension не меняет Telegram UX и публичный контракт Stage5 Q/A lifecycle.
-- `GET /api/v1/roles/catalog` использует master-role shape; `include_inactive` остаётся ignore-compatible для обратной совместимости.
-- Расширение остаётся additive-only в пределах согласованного baseline.
+## Closeout (Wave 2, 2026-04-08)
+- Реализация:
+  - `GET /api/v1/prepost_processing_tools` включён, legacy pre/post endpoint-ы убраны.
+  - `GET /api/v1/skills` и `GET /api/v1/prepost_processing_tools` возвращают `source` как repo-relative POSIX path или `null`.
+  - `GET /api/v1/roles/catalog` без `include_inactive` в контракте.
+  - `GET /api/v1/teams/{team_id}/roles` возвращает `team_role_id`, корректный `is_active`, корректный `include_inactive`.
+  - `GET /api/v1/teams/{team_id}/runtime-status` фильтрует inactive и стабильно сортируется по `team_role_id`.
+  - `POST /api/v1/questions` убран публичный `created_by_user_id` (legacy поле tolerant-ignore).
+  - `GET /api/v1/questions/{question_id}` и `/status` включают `answer_id`.
+  - `POST /api/v1/teams/{team_id}/roles/{role_id}` реализован как идемпотентный bind.
+- Gates:
+  - `scripts/stage5_qa_api_gates.sh` — **PASS**.
+  - `scripts/stage5_execution_bridge_gates.sh` — **PASS**.
+  - blocking OpenAPI snapshot — **PASS**.
+- Итог:
+  - Wave 2 status: **GO**.
 
-## Итог по поставке
-- Статус: **GO**.
-- Переход к следующему этапу: **разрешён**.
+## Appendix: исторический аудит Wave 2 (до реализации)
 
-## Этап 2. Аудит кода: точки врезки и пробелы
-
-### R1. Новый `GET /api/v1/skills`
-- Текущее состояние:
-  - Endpoint отсутствует в `app/interfaces/api/routers/read_only_v1.py`.
-  - В runtime уже есть источник данных: `runtime.skills_registry.list_specs()` (`app/skills/registry.py`).
+### W2.1 `GET /api/v1/skills.source` -> repo-relative POSIX path или `null`
+- Факт:
+  - endpoint уже есть в `app/interfaces/api/routers/read_only_v1.py`;
+  - source формируется через `_registry_source(...)` и сейчас возвращает `entrypoint`/fallback-строку (`app/application/use_cases/read_api.py`).
 - Пробел:
-  - Нет API DTO и adapter-конвертера для `skill_id/name/description/source`.
-  - Нет read use-case, возвращающего registry-backed список.
+  - нет вычисления относительного пути к папке навыка от корня репо;
+  - `source` тип сейчас `str`, требуется `null` для non-file source.
 - Точки врезки:
-  - Router: `app/interfaces/api/routers/read_only_v1.py`
-  - Read use-case: `app/application/use_cases/read_api.py`
-  - DTO/adapters: `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`, `app/interfaces/api/schemas/__init__.py`
-  - Тесты: `tests/test_ltc69_read_only_fastapi_contract.py`, `tests/test_ltc70_openapi_snapshot.py`
+  - `app/application/use_cases/read_api.py` (`RegistryItem.source`, `_registry_source`);
+  - `app/interfaces/api/schemas/entities.py` (`SkillDTO.source` -> nullable);
+  - `app/interfaces/api/schemas/adapters.py`.
+- Тесты/гейты:
+  - `tests/test_ltc85_stage5_api_parity_use_cases.py`
+  - `tests/test_ltc69_read_only_fastapi_contract.py`
+  - `tests/test_ltc70_openapi_snapshot.py`
 
-### R2. Новые `GET /api/v1/pre_processing_tools` и `GET /api/v1/post_processing_tools`
-- Текущее состояние:
-  - Endpoint-ы отсутствуют в router.
-  - Источник данных существует: `runtime.prepost_processing_registry.list_specs()` (`app/prepost_processing/registry.py`).
+### W2.2 Consolidation pre/post -> `GET /api/v1/prepost_processing_tools`
+- Факт:
+  - сейчас есть два endpoint-а: `/pre_processing_tools` и `/post_processing_tools` (`read_only_v1.py`);
+  - оба используют одну и ту же prepost registry (`read_api.py`).
 - Пробел:
-  - Нет разделения в API-контракте на pre/post списки.
-  - Нет DTO для `tool_id/name/description/source`.
+  - отсутствует целевой единый endpoint;
+  - старые endpoint-ы всё ещё в роутере, тестах и OpenAPI snapshot.
 - Точки врезки:
-  - Router: `app/interfaces/api/routers/read_only_v1.py`
-  - Read use-case: `app/application/use_cases/read_api.py`
-  - DTO/adapters: `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`, `app/interfaces/api/schemas/__init__.py`
-  - Тесты/gates: `tests/test_ltc69_read_only_fastapi_contract.py`, `tests/test_ltc70_openapi_snapshot.py`, `scripts/stage5_qa_api_gates.sh`
+  - router: `app/interfaces/api/routers/read_only_v1.py`;
+  - use-case: добавить unified list-функцию в `app/application/use_cases/read_api.py`;
+  - DTO: unified tool DTO в `app/interfaces/api/schemas/entities.py`;
+  - adapters/exports: `app/interfaces/api/schemas/adapters.py`, `__init__.py`.
+- Совместимость/миграция:
+  - удаление старых endpoint-ов будет контрактной корректировкой;
+  - требуется обновить docs/runbook + OpenAPI snapshot + contract tests.
+- Тесты/гейты:
+  - `tests/test_ltc69_read_only_fastapi_contract.py`
+  - `tests/test_ltc70_openapi_snapshot.py`
+  - `scripts/stage5_qa_api_gates.sh`
 
-### R3. Расширение `GET /api/v1/teams/{team_id}/roles` включёнными `skills/pre/post`
-- Текущее состояние:
-  - Endpoint существует, возвращает `RoleDTO` без вложенных списков (`app/interfaces/api/schemas/entities.py`).
-  - В storage есть данные для включённых связей:
-    - `list_role_skills_for_team_role(..., enabled_only=True)` (`app/storage.py`)
-    - `list_role_prepost_processing_for_team_role(..., enabled_only=True)` (`app/storage.py`)
+### W2.3 `GET /api/v1/roles/catalog`: убрать `include_inactive` из контракта
+- Факт:
+  - router сейчас принимает `include_inactive` и прокидывает в use-case (`read_only_v1.py`);
+  - use-case фактически игнорирует параметр (`list_master_roles_catalog_result`).
 - Пробел:
-  - Нет расширенной модели ответа (списки `{id, name}`).
-  - Нет orchestration-слоя, объединяющего роль + enabled bindings + имена из registry.
+  - query параметр остаётся в OpenAPI/доках, хотя больше не нужен.
 - Точки врезки:
-  - Read use-case: `app/application/use_cases/read_api.py` (расширенный payload team-role view)
-  - Storage usage: `app/storage.py` (reuse существующих list_* методов)
-  - Router/DTO: `app/interfaces/api/routers/read_only_v1.py`, `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`
-  - Regression tests: `tests/test_ltc69_read_only_fastapi_contract.py`, `tests/test_ltc78_stage5_fastapi_contract.py`
+  - router signature: `app/interfaces/api/routers/read_only_v1.py`;
+  - use-case signature cleanup: `app/application/use_cases/read_api.py`;
+  - docs/tests snapshot.
+- Совместимость/миграция:
+  - FastAPI по умолчанию игнорирует неизвестный query-param, поэтому удаление из сигнатуры остаётся безопасным для клиентов.
+- Тесты/гейты:
+  - `tests/test_ltc69_read_only_fastapi_contract.py` (убрать сценарии include_inactive для catalog);
+  - `tests/test_ltc70_openapi_snapshot.py`.
 
-### R4. Пересборка `GET /api/v1/roles/catalog` под master-role контракт
-- Текущее состояние:
-  - Endpoint уже есть, но использует текущий `RoleCatalogItemDTO` с полями `is_active` и `is_orchestrator`.
-  - Read use-case `list_roles_catalog_result(...)` добавляет team-derived `is_orchestrator` и фильтрует по `include_inactive`.
+### W2.4 `GET /api/v1/teams/{team_id}/roles`: include_inactive semantics + `team_role_id`
+- Факт:
+  - `RoleDTO` сейчас не содержит `team_role_id` (`entities.py`);
+  - `list_roles_for_team(..., include_inactive=True)` в storage фильтрует `WHERE tr.is_active = 1`, поэтому неактивные bindings не попадают;
+  - `is_active` вычисляется комбинированно (`tr.is_active && tr.enabled && master.is_active`), что не соответствует требованию брать `team_roles.is_active`.
 - Пробел:
-  - Текущий shape не совпадает с новым master-role-only контрактом.
-  - `role_id` отсутствует в `RoleCatalogItemDTO` и в `RoleCatalogItem` модели.
+  - `include_inactive=true` не возвращает реальные inactive bindings;
+  - нет обязательного `team_role_id` в response;
+  - `is_active` semantics не совпадает с требованием.
 - Точки врезки:
-  - Domain model: `app/models.py` (`RoleCatalogItem`)
-  - Read use-case: `app/application/use_cases/read_api.py` (`list_roles_catalog_result`)
-  - DTO/adapters: `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`
-  - Router behavior: `app/interfaces/api/routers/read_only_v1.py` (`include_inactive` оставить как ignore-compatible)
-  - Тесты/gates: `tests/test_ltc69_read_only_fastapi_contract.py`, `tests/test_ltc70_openapi_snapshot.py`, `scripts/stage5_qa_api_gates.sh`
+  - storage query/modeling: `app/storage.py::list_roles_for_team`;
+  - role model/DTO/adapters: `app/models.py`, `app/interfaces/api/schemas/entities.py`, `adapters.py`;
+  - read use-case enrichment: `app/application/use_cases/read_api.py`.
+- Тесты/гейты:
+  - `tests/test_ltc69_read_only_fastapi_contract.py`
+  - `tests/test_ltc78_stage5_fastapi_contract.py`
+  - `tests/test_ltc85_stage5_api_parity_use_cases.py`
 
-### R5. Новый `PATCH /api/v1/roles/{role_id}` (master-role mutation)
-- Текущее состояние:
-  - Есть только patch team binding: `PATCH /api/v1/teams/{team_id}/roles/{role_id}`.
-  - В storage есть примитивы для master-role:
-    - `get_role_by_id(...)`
-    - `update_role_name(...)`
-    - `upsert_role(...)` (upsert по `role_name`).
+### W2.5 `GET /api/v1/teams/{team_id}/runtime-status`: только активные роли + сортировка по `team_role_id`
+- Факт:
+  - active filtering уже есть (`tr.is_active = 1`) в `list_team_role_runtime_statuses(..., active_only=True)`;
+  - сортировка сейчас по `tr.role_id`, не по `team_role_id` (`app/storage.py`).
 - Пробел:
-  - Нет write use-case и DTO для patch master-role.
-  - Нет явного маппинга конфликта имени `409` для rename.
-  - Нет отдельного router endpoint с контрактом `200/401/403/404/409/422`.
+  - нужно сменить порядок выдачи на `ORDER BY tr.team_role_id`.
 - Точки врезки:
-  - Write use-case: `app/application/use_cases/write_api.py`
-  - Storage checks/update: `app/storage.py`
-  - Router + error mapping: `app/interfaces/api/routers/read_only_v1.py`, `app/interfaces/api/error_mapping.py`
-  - DTO/adapters: `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`, `app/interfaces/api/schemas/__init__.py`
-  - Tests/gates: `tests/test_ltc74_write_fastapi_contract.py`, `tests/test_ltc70_openapi_snapshot.py`, `scripts/stage5_qa_api_gates.sh`
+  - `app/storage.py::list_team_role_runtime_statuses`;
+  - при необходимости тест-контракт.
+- Тесты/гейты:
+  - `tests/test_ltc69_read_only_fastapi_contract.py`
+  - `tests/test_ltc70_openapi_snapshot.py` (если меняются schema/params — не ожидается).
 
-### R6. `GET /api/v1/qa-journal` добавить `answer_id` (nullable)
-- Текущее состояние:
-  - Endpoint есть, но отдаёт `QaQuestionDTO` через `qa_question_to_dto(...)`.
-  - `QaQuestionDTO` не содержит `answer_id`.
-  - В storage уже есть `get_latest_answer_for_question(...)`, ответы хранятся в `answers`.
+### W2.6 `POST /api/v1/questions`: убрать публичный `created_by_user_id`, использовать owner context
+- Факт:
+  - `QaCreateQuestionRequestDTO` сейчас требует `created_by_user_id` (`entities.py`);
+  - router прокидывает `payload.created_by_user_id` в use-case (`read_only_v1.py`);
+  - use-case/fingerprint/storage завязаны на `created_by_user_id` (`qa_api.py`, `storage.py`).
 - Пробел:
-  - Нет enrichment шага question->answer_id в journal view.
-  - Нет DTO поля `answer_id`.
+  - публичный input не соответствует новому контракту;
+  - нет tolerant-ignore legacy поля в payload.
 - Точки врезки:
-  - Use-case (журнал): `app/application/use_cases/qa_api.py` (или отдельный read adapter слой для journal item view)
-  - Storage access: `app/storage.py` (reuse get_latest_answer_for_question / query optimization при необходимости)
-  - DTO/adapters/router: `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`, `app/interfaces/api/routers/read_only_v1.py`
-  - Tests/gates: `tests/test_ltc78_stage5_fastapi_contract.py`, `tests/test_ltc79_stage5_api_e2e_smoke.py`, `tests/test_ltc70_openapi_snapshot.py`
+  - request DTO+parsing: `app/interfaces/api/schemas/entities.py`, `read_only_v1.py`;
+  - use-case contract/fingerprint: `app/application/use_cases/qa_api.py`;
+  - tests using request payload.
+- Совместимость/миграция:
+  - требуется мягкий parser на boundary (legacy поле допускается и игнорируется), при этом OpenAPI без поля;
+  - idempotency fingerprint должен оставаться детерминированным и не зависеть от legacy поля.
+- Тесты/гейты:
+  - `tests/test_ltc78_stage5_fastapi_contract.py`
+  - bridge suites `ltc80/81/82` (чтобы не сломать runtime path).
 
-### R7. В `roles/catalog` добавить обязательный `role_id`
-- Текущее состояние:
-  - В текущем контракте `role_id` отсутствует.
+### W2.7 `GET /questions/{id}` и `/status`: добавить `answer_id`
+- Факт:
+  - `QaQuestionDTO` уже содержит `answer_id`;
+  - `QaQuestionStatusDTO` не содержит `answer_id`;
+  - `get_question_result` возвращает вопрос без enrichment answer_id;
+  - `get_question_status_result` тоже без answer lookup.
 - Пробел:
-  - Нет прямого маппинга от catalog role name к master role id в API payload.
+  - field отсутствует в `/status`;
+  - в `/questions/{id}` `answer_id` может оставаться `null` даже для answered, если не обогащать.
 - Точки врезки:
-  - Read use-case `list_roles_catalog_result(...)`: резолюция `role_name -> role_id` через storage roles.
-  - Models/DTO/adapters: `app/models.py`, `app/interfaces/api/schemas/entities.py`, `app/interfaces/api/schemas/adapters.py`
-  - Tests/OpenAPI: `tests/test_ltc69_read_only_fastapi_contract.py`, `tests/test_ltc70_openapi_snapshot.py`
+  - `app/application/use_cases/qa_api.py` (`get_question_result`, `get_question_status_result`, `QaQuestionStatus`);
+  - `app/interfaces/api/schemas/entities.py` (`QaQuestionStatusDTO`);
+  - adapters mapping.
+- Тесты/гейты:
+  - `tests/test_ltc78_stage5_fastapi_contract.py`
+  - `tests/test_ltc79_stage5_api_e2e_smoke.py`.
 
-### Owner-only/additive-only инварианты
-- Текущее состояние:
-  - Owner-only guard централизован в router (`_owner_guard`).
-  - Единый error envelope есть.
-  - Stage5 bridge path зависит от `POST /questions` + worker; текущие требования его не затрагивают.
-- Риск-регрессии:
-  - Изменение существующих DTO `RoleDTO`/`QaQuestionDTO` может затронуть существующие контракты.
-- Контроль:
-  - Изменения вводить additive/совместимо, а breaking shape в `roles/catalog` оформить только в пределах согласованного baseline.
-  - Обязательный прогон `scripts/stage5_qa_api_gates.sh`; при затрагивании общих Stage5 путей — дополнительно `scripts/stage5_execution_bridge_gates.sh`.
+### W2.8 Новый bind endpoint `POST /api/v1/teams/{team_id}/roles/{role_id}`
+- Факт:
+  - storage уже поддерживает идемпотентный bind: `bind_master_role_to_team(team_id, role_id) -> (TeamRole, created)` (`app/storage.py`);
+  - HTTP route/use-case для этой операции отсутствуют.
+- Пробел:
+  - нет API boundary, DTO response, status/error mapping и тестов.
+- Точки врезки:
+  - write use-case: `app/application/use_cases/write_api.py`;
+  - router: `app/interfaces/api/routers/read_only_v1.py` (owner-only + runtime_write_guard + envelope);
+  - DTO/adapters: `app/interfaces/api/schemas/entities.py`, `adapters.py`, `__init__.py`.
+- Совместимость/миграция:
+  - операция additive; можно вводить без влияния на существующие маршруты.
+- Тесты/гейты:
+  - расширить `tests/test_ltc74_write_fastapi_contract.py` и/или `tests/test_ltc69_read_only_fastapi_contract.py`;
+  - `tests/test_ltc70_openapi_snapshot.py`.
+
+### Совместимость и миграция со старых endpoint-ов
+- `/pre_processing_tools` и `/post_processing_tools`:
+  - будут удалены из роутера/OpenAPI в пользу `/prepost_processing_tools`;
+  - миграция клиентов: прямой switch на новый endpoint в одном релизе (без grace-alias).
+- `POST /questions.created_by_user_id`:
+  - поле исчезает из OpenAPI, но legacy payload принимается и игнорируется для soft compatibility.
+- `roles/catalog.include_inactive`:
+  - удаляется из сигнатуры; лишний query param безопасно игнорируется FastAPI.
+
+### Инварианты и контроль регрессий
+- Owner-only/authz и единый error envelope сохраняются на всех изменённых/new endpoints.
+- Обязательные прогоны:
+  - `scripts/stage5_qa_api_gates.sh`
+  - `scripts/stage5_execution_bridge_gates.sh` (если затронут `POST /questions`/bridge path).

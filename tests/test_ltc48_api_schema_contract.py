@@ -39,6 +39,7 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
             dto.model_dump(mode="json"),
             {
                 "role_id": 1,
+                "team_role_id": None,
                 "role_name": "dev",
                 "description": "Developer",
                 "base_system_prompt": "sys",
@@ -154,7 +155,6 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
     def test_qa_create_question_contract_requires_team_id_and_uses_team_role_id(self) -> None:
         dto = QaCreateQuestionRequestDTO(
             team_id=1,
-            created_by_user_id=10,
             text="hello",
             team_role_id=7,
         )
@@ -162,7 +162,6 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
             dto.model_dump(mode="json"),
             {
                 "team_id": 1,
-                "created_by_user_id": 10,
                 "text": "hello",
                 "team_role_id": 7,
                 "origin_type": "user",
@@ -174,13 +173,11 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
         )
         with self.assertRaises(ValidationError):
             QaCreateQuestionRequestDTO(
-                created_by_user_id=10,
                 text="hello",
             )
         with self.assertRaises(ValidationError):
             QaCreateQuestionRequestDTO(
                 team_id=1,
-                created_by_user_id=10,
                 text="hello",
                 target_team_role_id=7,
             )

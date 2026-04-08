@@ -62,8 +62,7 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
         managed_routes: dict[str, tuple[str, ...]] = {
             "/api/v1/answers/{answer_id}": ("get",),
             "/api/v1/orchestrator/feed": ("get",),
-            "/api/v1/post_processing_tools": ("get",),
-            "/api/v1/pre_processing_tools": ("get",),
+            "/api/v1/prepost_processing_tools": ("get",),
             "/api/v1/questions": ("post",),
             "/api/v1/questions/{question_id}": ("get",),
             "/api/v1/questions/{question_id}/answer": ("get",),
@@ -76,7 +75,7 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
             "/api/v1/threads/{thread_id}": ("get",),
             "/api/v1/teams": ("get",),
             "/api/v1/teams/{team_id}/roles": ("get",),
-            "/api/v1/teams/{team_id}/roles/{role_id}": ("patch", "delete"),
+            "/api/v1/teams/{team_id}/roles/{role_id}": ("post", "patch", "delete"),
             "/api/v1/teams/{team_id}/roles/{role_id}/reset-session": ("post",),
             "/api/v1/teams/{team_id}/runtime-status": ("get",),
             "/api/v1/teams/{team_id}/sessions": ("get",),

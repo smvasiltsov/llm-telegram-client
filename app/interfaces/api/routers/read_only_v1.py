@@ -8,8 +8,7 @@ from app.application.contracts import ErrorCode
 from app.application.observability import ensure_correlation_id, get_correlation_id
 from app.application.use_cases.read_api import (
     list_master_roles_catalog_result,
-    list_post_processing_tools_result,
-    list_pre_processing_tools_result,
+    list_prepost_processing_tools_result,
     list_roles_catalog_errors_result,
     list_skills_result,
     list_team_roles_result,
@@ -30,6 +29,7 @@ from app.application.use_cases.qa_api import (
 )
 from app.application.use_cases.write_api import (
     MasterRolePatchRequest,
+    bind_master_role_to_team_result,
     TeamRolePatchRequest,
     TeamRolePrepostPutRequest,
     TeamRoleSkillPutRequest,
@@ -58,8 +58,7 @@ from app.interfaces.api.schemas import (
     MasterRolePatchOutcomeDTO,
     MasterRolePatchRequestDTO,
     MutationAckDTO,
-    PostProcessingToolDTO,
-    PreProcessingToolDTO,
+    PrePostProcessingToolDTO,
     QaAnswerDTO,
     QaCreateQuestionRequestDTO,
     QaCreateQuestionResponseDTO,
@@ -82,8 +81,7 @@ from app.interfaces.api.schemas import (
     master_role_catalog_item_to_dto,
     master_role_patch_outcome_to_dto,
     mutation_ack_to_dto,
-    post_processing_tool_to_dto,
-    pre_processing_tool_to_dto,
+    prepost_processing_tool_to_dto,
     qa_answer_to_dto,
     qa_create_question_outcome_to_dto,
     qa_orchestrator_feed_item_to_dto,
@@ -93,6 +91,7 @@ from app.interfaces.api.schemas import (
     role_to_dto,
     skill_to_dto,
     team_role_patch_outcome_to_dto,
+    team_role_bind_outcome_to_dto,
     team_role_prepost_outcome_to_dto,
     team_role_skill_outcome_to_dto,
     team_session_to_dto,
@@ -219,48 +218,26 @@ def build_read_only_v1_router(*, app_state: Any):
         return _ok_list(result.value, skill_to_dto)
 
     @router.get(
-        "/pre_processing_tools",
-        response_model=list[PreProcessingToolDTO],
+        "/prepost_processing_tools",
+        response_model=list[PrePostProcessingToolDTO],
         responses={
             401: {"model": ApiErrorResponse},
             403: {"model": ApiErrorResponse},
             500: {"model": ApiErrorResponse},
         },
     )
-    def get_pre_processing_tools(
+    def get_prepost_processing_tools(
         x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
         owner_user_id: int | None = Query(default=None),
     ):
         denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
         if denied is not None:
             return denied
-        result = list_pre_processing_tools_result(app_state.runtime)
+        result = list_prepost_processing_tools_result(app_state.runtime)
         if result.is_error or result.value is None:
             mapped = map_result_error_to_api(result)
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
-        return _ok_list(result.value, pre_processing_tool_to_dto)
-
-    @router.get(
-        "/post_processing_tools",
-        response_model=list[PostProcessingToolDTO],
-        responses={
-            401: {"model": ApiErrorResponse},
-            403: {"model": ApiErrorResponse},
-            500: {"model": ApiErrorResponse},
-        },
-    )
-    def get_post_processing_tools(
-        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
-        owner_user_id: int | None = Query(default=None),
-    ):
-        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
-        if denied is not None:
-            return denied
-        result = list_post_processing_tools_result(app_state.runtime)
-        if result.is_error or result.value is None:
-            mapped = map_result_error_to_api(result)
-            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
-        return _ok_list(result.value, post_processing_tool_to_dto)
+        return _ok_list(result.value, prepost_processing_tool_to_dto)
 
     @router.get(
         "/teams",
@@ -339,7 +316,6 @@ def build_read_only_v1_router(*, app_state: Any):
         },
     )
     def get_roles_catalog(
-        include_inactive: bool = Query(default=False),
         limit: int = Query(default=50, ge=1, le=200),
         offset: int = Query(default=0, ge=0),
         x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
@@ -356,7 +332,6 @@ def build_read_only_v1_router(*, app_state: Any):
         catalog_result = list_master_roles_catalog_result(
             app_state.runtime,
             deps_result.value.storage,
-            include_inactive=include_inactive,
             limit=limit,
             offset=offset,
         )
@@ -511,14 +486,41 @@ def build_read_only_v1_router(*, app_state: Any):
         },
     )
     def create_question(
-        payload: QaCreateQuestionRequestDTO = Body(...),
+        payload_raw: dict[str, Any] = Body(
+            ...,
+            example={
+                "team_id": 101,
+                "text": "@dev проверь последние изменения в спецификации",
+                "team_role_id": 12,
+                "thread_id": "018f6f9a-4a62-7df1-bb44-a0f71e6a1c11",
+                "question_id": "018f6f9a-4a63-7a91-bbf5-4f81d9d6f9c2",
+                "origin_type": "user",
+                "source_question_id": None,
+                "parent_answer_id": None,
+            },
+        ),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
         owner_user_id: int | None = Query(default=None),
     ):
-        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        effective_owner_user_id = owner_user_id if owner_user_id is not None else x_owner_user_id
+        denied = _owner_guard(effective_owner_user_id)
         if denied is not None:
             return denied
+        payload_data = dict(payload_raw or {})
+        payload_data.pop("created_by_user_id", None)
+        try:
+            payload = QaCreateQuestionRequestDTO.model_validate(payload_data)
+        except Exception:
+            return _error_json(
+                status_code=422,
+                payload={
+                    "code": ErrorCode.VALIDATION_INVALID_INPUT.value,
+                    "message": "Invalid question payload",
+                    "details": {"entity": "question", "cause": "invalid_payload"},
+                    "retryable": False,
+                },
+            )
         deps_result = provide_storage_uow_dependencies(app_state)
         if deps_result.is_error or deps_result.value is None:
             mapped = map_result_error_to_api(deps_result)
@@ -527,7 +529,7 @@ def build_read_only_v1_router(*, app_state: Any):
             deps_result.value.storage,
             request=QaCreateQuestionRequest(
                 team_id=payload.team_id,
-                created_by_user_id=payload.created_by_user_id,
+                created_by_user_id=int(effective_owner_user_id),
                 text=payload.text,
                 team_role_id=payload.team_role_id,
                 origin_type=payload.origin_type,
@@ -841,6 +843,44 @@ def build_read_only_v1_router(*, app_state: Any):
             mapped = map_result_error_to_api(result)
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
         return master_role_patch_outcome_to_dto(result.value).model_dump(mode="json")
+
+    @router.post(
+        "/teams/{team_id}/roles/{role_id}",
+        response_model=TeamRolePatchOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def bind_master_role_to_team(
+        team_id: int,
+        role_id: int,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = bind_master_role_to_team_result(
+            deps_result.value.storage,
+            team_id=team_id,
+            role_id=role_id,
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return team_role_bind_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.patch(
         "/teams/{team_id}/roles/{role_id}",

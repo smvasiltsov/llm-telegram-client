@@ -6,6 +6,7 @@ from app.application.contracts.result import Result
 from app.application.use_cases.write_api import (
     MasterRolePatchOutcome,
     MutationAck,
+    TeamRoleBindOutcome,
     TeamRolePatchOutcome,
     TeamRolePrepostOutcome,
     TeamRoleSkillOutcome,
@@ -41,8 +42,7 @@ from .entities import (
     MutationAckDTO,
     MasterRoleCatalogItemDTO,
     MasterRolePatchOutcomeDTO,
-    PostProcessingToolDTO,
-    PreProcessingToolDTO,
+    PrePostProcessingToolDTO,
     TeamBindingDTO,
     RoleLinkedItemDTO,
     SkillDTO,
@@ -68,6 +68,7 @@ from .operations import (
 def role_to_dto(value: Role) -> RoleDTO:
     return RoleDTO(
         role_id=value.role_id,
+        team_role_id=value.team_role_id,
         role_name=value.role_name,
         description=value.description,
         base_system_prompt=value.base_system_prompt,
@@ -120,6 +121,24 @@ def team_session_to_dto(value: TeamSessionView) -> TeamSessionDTO:
 
 def team_role_patch_outcome_to_dto(value: TeamRolePatchOutcome) -> TeamRolePatchOutcomeDTO:
     return TeamRolePatchOutcomeDTO.model_validate(value)
+
+
+def team_role_bind_outcome_to_dto(value: TeamRoleBindOutcome) -> TeamRolePatchOutcomeDTO:
+    return TeamRolePatchOutcomeDTO(
+        team_id=value.team_id,
+        role_id=value.role_id,
+        team_role_id=value.team_role_id,
+        enabled=value.enabled,
+        is_active=value.is_active,
+        mode=value.mode,
+        is_orchestrator=value.is_orchestrator,
+        model_override=value.model_override,
+        display_name=value.display_name,
+        system_prompt_override=value.system_prompt_override,
+        extra_instruction_override=value.extra_instruction_override,
+        user_prompt_suffix=value.user_prompt_suffix,
+        user_reply_prefix=value.user_reply_prefix,
+    )
 
 
 def master_role_patch_outcome_to_dto(value: MasterRolePatchOutcome) -> MasterRolePatchOutcomeDTO:
@@ -187,17 +206,8 @@ def skill_to_dto(value: RegistryItem) -> SkillDTO:
     )
 
 
-def pre_processing_tool_to_dto(value: RegistryItem) -> PreProcessingToolDTO:
-    return PreProcessingToolDTO(
-        tool_id=value.id,
-        name=value.name,
-        description=value.description,
-        source=value.source,
-    )
-
-
-def post_processing_tool_to_dto(value: RegistryItem) -> PostProcessingToolDTO:
-    return PostProcessingToolDTO(
+def prepost_processing_tool_to_dto(value: RegistryItem) -> PrePostProcessingToolDTO:
+    return PrePostProcessingToolDTO(
         tool_id=value.id,
         name=value.name,
         description=value.description,

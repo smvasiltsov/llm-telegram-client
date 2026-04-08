@@ -7,6 +7,7 @@ Addendum (contract patch): **2026-04-06T00:00:00Z** (`team_id/team_role_id` rout
 Addendum (contract patch): **2026-04-06T01:00:00Z** (orchestrator fallback routing для `POST /questions`, additive-only, без Telegram UX-регрессий).
 Addendum (dispatch bridge v1): **2026-04-06T09:00:00Z** (execution bridge, retry/timeout semantics, observability и blocking gate `stage5_execution_bridge_gates`).
 Addendum (API parity extension): **2026-04-06T14:30:00Z** (`skills/prepost`, `roles/catalog` master-role shape, `PATCH /roles/{role_id}`, `qa-journal.answer_id`; additive-only).
+Addendum (API parity extension Wave 2): **2026-04-08T00:00:00Z** (unified `prepost_processing_tools`, roles/runtime-status filtering fixes, `POST /questions` input cleanup, idempotent bind endpoint).
 
 ## 1. Решение
 - Stage 5 v1 Q/A API orchestration: **GO**.
@@ -135,6 +136,8 @@ Addendum (API parity extension): **2026-04-06T14:30:00Z** (`skills/prepost`, `ro
   - общий Stage 5 статус остаётся **GO**.
 
 ## 11. Addendum (2026-04-06, API parity extension)
+- Статус addendum:
+  - superseded по части pre/post endpoint-ов и части контрактов последующим Wave 2 addendum (раздел 12).
 - Что изменено:
   - добавлены endpoint-ы:
     - `GET /api/v1/skills`;
@@ -157,4 +160,31 @@ Addendum (API parity extension): **2026-04-06T14:30:00Z** (`skills/prepost`, `ro
   - ограничение single-instance bridge/runtime остаётся (известный риск Stage 5).
 - Итоговый статус:
   - API parity extension — **GO**;
+  - общий Stage 5 статус остаётся **GO**.
+
+## 12. Addendum (2026-04-08, API parity extension Wave 2)
+- Что изменено:
+  - введён unified endpoint `GET /api/v1/prepost_processing_tools`, legacy `/pre_processing_tools` и `/post_processing_tools` удалены из роутера/OpenAPI;
+  - `GET /api/v1/skills` и `GET /api/v1/prepost_processing_tools` возвращают `source` как repo-relative POSIX path или `null`;
+  - `GET /api/v1/roles/catalog` очищен от `include_inactive` в контракте;
+  - `GET /api/v1/teams/{team_id}/roles` стабилизирован:
+    - `team_role_id` обязателен в response;
+    - `is_active` берётся из `team_roles.is_active`;
+    - `include_inactive` работает как `false -> active only`, `true -> active+inactive`;
+  - `GET /api/v1/teams/{team_id}/runtime-status` возвращает только active роли и стабильно отсортирован по `team_role_id`;
+  - `POST /api/v1/questions`:
+    - `created_by_user_id` удалён из публичного input/OpenAPI;
+    - owner context используется как внутренний источник автора;
+    - legacy `created_by_user_id` в payload принимается и игнорируется;
+  - `GET /api/v1/questions/{question_id}` и `/status` возвращают `answer_id` (`nullable`);
+  - добавлен `POST /api/v1/teams/{team_id}/roles/{role_id}` (идемпотентный bind).
+- Валидация/gates:
+  - `scripts/stage5_qa_api_gates.sh` — **PASS** (2026-04-08);
+  - `scripts/stage5_execution_bridge_gates.sh` — **PASS** (2026-04-08);
+  - OpenAPI snapshot (blocking) — **PASS**.
+- Риски:
+  - регрессионный риск для внешних клиентов, использовавших legacy pre/post endpoint-ы;
+  - архитектурное ограничение single-instance bridge/runtime сохраняется (известный риск Stage 5).
+- Итоговый статус:
+  - API parity extension Wave 2 — **GO**;
   - общий Stage 5 статус остаётся **GO**.

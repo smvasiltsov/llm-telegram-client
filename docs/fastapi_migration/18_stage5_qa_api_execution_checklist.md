@@ -287,3 +287,27 @@
   - `stage5_execution_bridge_gates` — **PASS**.
 - Артефакт:
   - `docs/fastapi_migration/26_stage5_api_parity_extension_checklist.md`.
+
+## 12. Addendum: API parity extension Wave 2 (closeout, 2026-04-08)
+- Scope reference:
+  - `docs/fastapi_migration/26_stage5_api_parity_extension_checklist.md`
+- Обязательные изменения контракта:
+  - `GET /api/v1/prepost_processing_tools` (консолидация pre/post);
+  - `GET /api/v1/skills` и `GET /api/v1/prepost_processing_tools`: `source` как repo-relative POSIX path или `null`;
+  - `GET /api/v1/roles/catalog`: удалить `include_inactive` из контракта/документации;
+  - `GET /api/v1/teams/{team_id}/roles`: обязательный `team_role_id`, корректный `is_active` и include_inactive semantics;
+  - `GET /api/v1/teams/{team_id}/runtime-status`: только active роли, сортировка по `team_role_id`;
+  - `POST /api/v1/questions`: `created_by_user_id` убрать из публичного input, использовать owner context, legacy-поле игнорировать;
+  - `GET /api/v1/questions/{question_id}` и `/status`: добавить `answer_id`;
+  - `POST /api/v1/teams/{team_id}/roles/{role_id}`: idempotent bind endpoint.
+- Quality gates (blocking):
+  - `stage5_qa_api_gates`;
+  - `stage5_execution_bridge_gates` при затрагивании bridge/runtime совместимости;
+  - blocking OpenAPI snapshot.
+- Acceptance status:
+  - [x] Wave 2 implementation completed.
+  - [x] Wave 2 tests/gates PASS.
+  - [x] Stage5 artifacts/sign-off addendum updated.
+- Gate evidence:
+  - `scripts/stage5_qa_api_gates.sh` — PASS (2026-04-08).
+  - `scripts/stage5_execution_bridge_gates.sh` — PASS (2026-04-08).

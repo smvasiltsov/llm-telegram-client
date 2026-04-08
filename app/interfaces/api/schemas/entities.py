@@ -9,6 +9,7 @@ from .common import ApiCursorResponse, ApiSchema
 
 class RoleDTO(ApiSchema):
     role_id: int
+    team_role_id: int | None
     role_name: str
     description: str
     base_system_prompt: str
@@ -131,21 +132,14 @@ class SkillDTO(ApiSchema):
     skill_id: str
     name: str
     description: str
-    source: str
+    source: str | None
 
 
-class PreProcessingToolDTO(ApiSchema):
+class PrePostProcessingToolDTO(ApiSchema):
     tool_id: str
     name: str
     description: str
-    source: str
-
-
-class PostProcessingToolDTO(ApiSchema):
-    tool_id: str
-    name: str
-    description: str
-    source: str
+    source: str | None
 
 
 class TeamRolePatchRequestDTO(ApiSchema):
@@ -229,7 +223,6 @@ class TeamRolePrepostOutcomeDTO(ApiSchema):
 
 class QaCreateQuestionRequestDTO(ApiSchema):
     team_id: int
-    created_by_user_id: int
     text: str
     team_role_id: int | None = None
     origin_type: Literal["user", "role_dispatch", "orchestrator"] = "user"
@@ -270,6 +263,7 @@ class QaQuestionStatusDTO(ApiSchema):
     error_message: str | None
     updated_at: str
     answered_at: str | None
+    answer_id: str | None = None
 
 
 class QaAnswerDTO(ApiSchema):

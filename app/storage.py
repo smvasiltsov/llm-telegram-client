@@ -2128,6 +2128,7 @@ class Storage:
             is_active=bool(catalog_role.is_active),
             mention_name=role.mention_name,
             is_orchestrator=role.is_orchestrator,
+            team_role_id=role.team_role_id,
         )
 
     @staticmethod
@@ -2154,6 +2155,7 @@ class Storage:
             is_active=bool(row["is_active"] if "is_active" in row.keys() else True),
             mention_name=mention_name if mention_name is not None else (row["mention_name"] if "mention_name" in row.keys() else None),
             is_orchestrator=(str(row["mode"]).strip().lower() == "orchestrator") if "mode" in row.keys() and row["mode"] is not None else False,
+            team_role_id=(int(row["team_role_id"]) if "team_role_id" in row.keys() and row["team_role_id"] is not None else None),
         )
 
     def get_role_by_name(self, role_name: str) -> Role:
@@ -2454,17 +2456,18 @@ class Storage:
                 """
                 SELECT
                     tr.role_id,
+                    tr.team_role_id,
                     COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
                     r.description,
                     r.base_system_prompt,
                     r.extra_instruction,
                     r.llm_model,
                     tr.mode,
-                    CASE WHEN tr.is_active = 1 AND tr.enabled = 1 AND COALESCE(r.is_active, 1) = 1 THEN 1 ELSE 0 END AS is_active,
+                    CASE WHEN tr.is_active = 1 THEN 1 ELSE 0 END AS is_active,
                     COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
                 FROM team_roles tr
                 LEFT JOIN roles r ON r.role_id = tr.role_id
-                WHERE tr.team_id = ? AND tr.is_active = 1
+                WHERE tr.team_id = ?
                 ORDER BY lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name))
                 """,
                 (team_id,),
@@ -2474,17 +2477,18 @@ class Storage:
                 """
                 SELECT
                     tr.role_id,
+                    tr.team_role_id,
                     COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
                     r.description,
                     r.base_system_prompt,
                     r.extra_instruction,
                     r.llm_model,
                     tr.mode,
-                    CASE WHEN tr.is_active = 1 AND tr.enabled = 1 AND COALESCE(r.is_active, 1) = 1 THEN 1 ELSE 0 END AS is_active,
+                    CASE WHEN tr.is_active = 1 THEN 1 ELSE 0 END AS is_active,
                     COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name) AS mention_name
                 FROM team_roles tr
                 LEFT JOIN roles r ON r.role_id = tr.role_id
-                WHERE tr.team_id = ? AND tr.is_active = 1 AND tr.enabled = 1
+                WHERE tr.team_id = ? AND tr.is_active = 1
                 ORDER BY lower(COALESCE(NULLIF(tr.display_name, ''), NULLIF(tr.role_name, ''), r.role_name))
                 """,
                 (team_id,),
@@ -2497,6 +2501,7 @@ class Storage:
                 continue
             role = self._apply_catalog_master_fields(self._role_from_row(row))
             role.mention_name = row["mention_name"]
+            role.is_active = bool(row["is_active"])
             if include_inactive or role.is_active:
                 roles.append(role)
         return roles
@@ -2637,7 +2642,7 @@ class Storage:
                 FROM team_role_runtime_status rs
                 JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
                 WHERE tr.team_id = ? AND tr.is_active = 1
-                ORDER BY tr.role_id
+                ORDER BY tr.team_role_id
                 """,
                 (team_id,),
             )
@@ -2652,7 +2657,7 @@ class Storage:
                 FROM team_role_runtime_status rs
                 JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
                 WHERE tr.team_id = ?
-                ORDER BY tr.role_id
+                ORDER BY tr.team_role_id
                 """,
                 (team_id,),
             )

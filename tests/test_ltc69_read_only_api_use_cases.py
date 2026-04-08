@@ -69,7 +69,7 @@ class LTC69ReadOnlyApiUseCasesTests(unittest.TestCase):
                 is_active=True,
             )
             storage.bind_master_role_to_team(team_id, role.role_id)
-            storage.set_team_role_enabled(team_id, role.role_id, False)
+            storage.deactivate_team_role(team_id, role.role_id)
         active_only = list_team_roles_result(storage, team_id=team_id, include_inactive=False)
         include_inactive = list_team_roles_result(storage, team_id=team_id, include_inactive=True)
         self.assertTrue(active_only.is_ok)

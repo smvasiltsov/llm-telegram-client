@@ -25,7 +25,7 @@ class RegistryItem:
     id: str
     name: str
     description: str
-    source: str
+    source: str | None
 
 
 def list_teams_result(storage: Storage) -> Result[list]:
@@ -93,6 +93,7 @@ def list_team_roles_result(
                     is_active=role.is_active,
                     mention_name=role.mention_name,
                     is_orchestrator=role.is_orchestrator,
+                    team_role_id=role.team_role_id,
                     skills=tuple(skills),
                     pre_processing_tools=tuple(prepost),
                     post_processing_tools=tuple(prepost),
@@ -235,7 +236,7 @@ def list_skills_result(runtime: Any) -> Result[list[RegistryItem]]:
                     id=str(spec.skill_id),
                     name=str(spec.name),
                     description=str(getattr(spec, "description", "") or ""),
-                    source=_registry_source(registry, str(spec.skill_id), default_source="skills_registry"),
+                    source=_registry_source(registry, str(spec.skill_id), root_package="skills"),
                 )
                 for spec in specs
             ),
@@ -252,11 +253,15 @@ def list_skills_result(runtime: Any) -> Result[list[RegistryItem]]:
 
 
 def list_pre_processing_tools_result(runtime: Any) -> Result[list[RegistryItem]]:
-    return _list_prepost_tools_result(runtime, source_default="prepost_registry")
+    return list_prepost_processing_tools_result(runtime)
 
 
 def list_post_processing_tools_result(runtime: Any) -> Result[list[RegistryItem]]:
-    return _list_prepost_tools_result(runtime, source_default="prepost_registry")
+    return list_prepost_processing_tools_result(runtime)
+
+
+def list_prepost_processing_tools_result(runtime: Any) -> Result[list[RegistryItem]]:
+    return _list_prepost_tools_result(runtime)
 
 
 def list_roles_catalog_errors_result(runtime: Any, storage: Storage) -> Result[list[RoleCatalogError]]:
@@ -369,7 +374,7 @@ def _prepost_names_by_id(runtime: Any) -> dict[str, str]:
     return {str(spec.prepost_processing_id): str(spec.name) for spec in specs}
 
 
-def _list_prepost_tools_result(runtime: Any, *, source_default: str) -> Result[list[RegistryItem]]:
+def _list_prepost_tools_result(runtime: Any) -> Result[list[RegistryItem]]:
     try:
         registry = getattr(runtime, "prepost_processing_registry", None)
         specs = list(getattr(registry, "list_specs", lambda: [])())
@@ -379,7 +384,11 @@ def _list_prepost_tools_result(runtime: Any, *, source_default: str) -> Result[l
                     id=str(spec.prepost_processing_id),
                     name=str(spec.name),
                     description=str(getattr(spec, "description", "") or ""),
-                    source=_registry_source(registry, str(spec.prepost_processing_id), default_source=source_default),
+                    source=_registry_source(
+                        registry,
+                        str(spec.prepost_processing_id),
+                        root_package="prepost_processing",
+                    ),
                 )
                 for spec in specs
             ),
@@ -395,14 +404,28 @@ def _list_prepost_tools_result(runtime: Any, *, source_default: str) -> Result[l
         )
 
 
-def _registry_source(registry: Any, item_id: str, *, default_source: str) -> str:
+def _registry_source(registry: Any, item_id: str, *, root_package: str) -> str | None:
     if registry is None:
-        return default_source
+        return None
     record = getattr(registry, "get", lambda _id: None)(item_id)
     if record is None:
-        return default_source
-    manifest = getattr(record, "manifest", {}) or {}
-    entrypoint = str(manifest.get("entrypoint", "") or "").strip()
-    if entrypoint:
-        return entrypoint
-    return default_source
+        return None
+    module_name = str(getattr(getattr(record, "instance", None), "__class__", object).__module__ or "").strip()
+    prefix = f"{root_package}."
+    if not module_name.startswith(prefix):
+        return None
+    parts = module_name.split(".")
+    if len(parts) < 2:
+        return None
+    folder_name = str(parts[1]).strip()
+    if not folder_name:
+        return None
+    root = Path(__file__).resolve().parents[3]
+    candidate = (root / root_package / folder_name).resolve()
+    try:
+        rel = candidate.relative_to(root)
+    except ValueError:
+        return None
+    if not candidate.exists() or not candidate.is_dir():
+        return None
+    return rel.as_posix()

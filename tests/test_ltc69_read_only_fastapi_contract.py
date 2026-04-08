@@ -177,6 +177,7 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
         self.assertTrue(any(item["role_name"] == "dev" for item in payload))
         self.assertTrue(any(item.get("is_orchestrator") is True for item in payload))
         dev = next(item for item in payload if item["role_name"] == "dev")
+        self.assertIsInstance(dev.get("team_role_id"), int)
         self.assertEqual([item["id"] for item in dev["skills"]], ["s1", "s2"])
         self.assertEqual([item["id"] for item in dev["pre_processing_tools"]], ["p1", "p2"])
         self.assertEqual([item["id"] for item in dev["post_processing_tools"]], ["p1", "p2"])
@@ -196,7 +197,7 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
                 is_active=True,
             )
             client.app.state.runtime.storage.bind_master_role_to_team(team.team_id, ops.role_id)
-            client.app.state.runtime.storage.set_team_role_enabled(team.team_id, ops.role_id, False)
+            client.app.state.runtime.storage.deactivate_team_role(team.team_id, ops.role_id)
         response = client.get(
             f"/api/v1/teams/{team_id}/roles?include_inactive=true",
             headers={"X-Owner-User-Id": "700"},
@@ -204,6 +205,22 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(any(item["role_name"] == "ops" and item["is_active"] is False for item in payload))
+
+    def test_get_team_runtime_status_filters_inactive_team_roles(self) -> None:
+        client = self._client()
+        teams = client.get("/api/v1/teams", headers={"X-Owner-User-Id": "700"}).json()
+        team_id = int(teams["items"][0]["team_id"])
+        with client.app.state.runtime.storage.transaction(immediate=True):
+            ops = client.app.state.runtime.storage.get_role_by_name("ops")
+            client.app.state.runtime.storage.bind_master_role_to_team(team_id, ops.role_id)
+            ops_team_role_id = int(client.app.state.runtime.storage.resolve_team_role_id(team_id, ops.role_id, ensure_exists=True) or 0)
+            client.app.state.runtime.storage.ensure_team_role_runtime_status(ops_team_role_id)
+            client.app.state.runtime.storage.deactivate_team_role(team_id, ops.role_id)
+        response = client.get(f"/api/v1/teams/{team_id}/runtime-status", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload)
+        self.assertFalse(any(int(item["team_role_id"]) == ops_team_role_id for item in payload))
 
     def test_get_team_runtime_status_returns_status_list(self) -> None:
         client = self._client()
@@ -300,17 +317,22 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
     def test_get_skills_and_prepost_tools_return_registry_items(self) -> None:
         client = self._client()
         skills = client.get("/api/v1/skills", headers={"X-Owner-User-Id": "700"})
+        prepost = client.get("/api/v1/prepost_processing_tools", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(skills.status_code, 200)
+        self.assertEqual(prepost.status_code, 200)
+        skills_payload = skills.json()
+        prepost_payload = prepost.json()
+        self.assertEqual([item["skill_id"] for item in skills_payload], ["s1", "s2", "s3"])
+        self.assertEqual([item["tool_id"] for item in prepost_payload], ["p1", "p2", "p3"])
+        self.assertTrue(all(item.get("source") is None for item in skills_payload))
+        self.assertTrue(all(item.get("source") is None for item in prepost_payload))
+
+    def test_legacy_prepost_endpoints_removed_in_favor_of_unified_endpoint(self) -> None:
+        client = self._client()
         pre = client.get("/api/v1/pre_processing_tools", headers={"X-Owner-User-Id": "700"})
         post = client.get("/api/v1/post_processing_tools", headers={"X-Owner-User-Id": "700"})
-        self.assertEqual(skills.status_code, 200)
-        self.assertEqual(pre.status_code, 200)
-        self.assertEqual(post.status_code, 200)
-        skills_payload = skills.json()
-        pre_payload = pre.json()
-        post_payload = post.json()
-        self.assertEqual([item["skill_id"] for item in skills_payload], ["s1", "s2", "s3"])
-        self.assertEqual([item["tool_id"] for item in pre_payload], ["p1", "p2", "p3"])
-        self.assertEqual([item["tool_id"] for item in post_payload], ["p1", "p2", "p3"])
+        self.assertEqual(pre.status_code, 404)
+        self.assertEqual(post.status_code, 404)
 
     def test_patch_master_role_conflict_returns_409(self) -> None:
         client = self._client()
@@ -332,8 +354,7 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
             "/api/v1/roles/catalog",
             "/api/v1/roles/catalog/errors",
             "/api/v1/skills",
-            "/api/v1/pre_processing_tools",
-            "/api/v1/post_processing_tools",
+            "/api/v1/prepost_processing_tools",
             "/api/v1/teams/1/sessions",
         )
         for path in endpoints:
@@ -349,8 +370,7 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
             "/api/v1/roles/catalog",
             "/api/v1/roles/catalog/errors",
             "/api/v1/skills",
-            "/api/v1/pre_processing_tools",
-            "/api/v1/post_processing_tools",
+            "/api/v1/prepost_processing_tools",
             "/api/v1/teams/1/sessions",
         )
         for path in endpoints:
@@ -359,6 +379,19 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
             payload = response.json()
             self.assertEqual(payload["error"]["code"], "auth.unauthorized")
             self.assertIn("message", payload["error"])
+
+    def test_bind_master_role_to_team_is_idempotent(self) -> None:
+        client = self._client()
+        teams = client.get("/api/v1/teams", headers={"X-Owner-User-Id": "700"}).json()
+        team_id = int(teams["items"][0]["team_id"])
+        catalog = client.get("/api/v1/roles/catalog?limit=50&offset=0", headers={"X-Owner-User-Id": "700"}).json()
+        dev = next(item for item in catalog["items"] if item["role_name"] == "dev")
+        role_id = int(dev["role_id"])
+        first = client.post(f"/api/v1/teams/{team_id}/roles/{role_id}", headers={"X-Owner-User-Id": "700"})
+        second = client.post(f"/api/v1/teams/{team_id}/roles/{role_id}", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.json()["team_role_id"], second.json()["team_role_id"])
 
     def test_team_sessions_missing_team_returns_unified_error_shape(self) -> None:
         client = self._client()

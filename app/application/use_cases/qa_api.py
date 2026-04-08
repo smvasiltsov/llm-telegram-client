@@ -68,6 +68,7 @@ class QaQuestionStatus:
     error_message: str | None
     updated_at: str
     answered_at: str | None
+    answer_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -257,7 +258,7 @@ def transition_question_status_result(
                 f"Question not found: {question_id}",
                 details={"entity": "question", "id": question_id, "cause": "not_found"},
             )
-        return Result.ok(_to_status(updated))
+        return Result.ok(_to_status(storage, updated))
     except Exception as exc:
         return Result.fail_from_exception(
             exc,
@@ -276,7 +277,7 @@ def get_question_status_result(storage: Storage, *, question_id: str) -> Result[
                 f"Question not found: {question_id}",
                 details={"entity": "question", "id": question_id, "cause": "not_found"},
             )
-        return Result.ok(_to_status(question))
+        return Result.ok(_to_status(storage, question))
     except Exception as exc:
         return Result.fail_from_exception(
             exc,
@@ -295,7 +296,7 @@ def get_question_result(storage: Storage, *, question_id: str) -> Result[QaQuest
                 f"Question not found: {question_id}",
                 details={"entity": "question", "id": question_id, "cause": "not_found"},
             )
-        return Result.ok(question)
+        return Result.ok(_with_answer_id(storage, question))
     except Exception as exc:
         return Result.fail_from_exception(
             exc,
@@ -477,7 +478,7 @@ def list_orchestrator_feed_result(
         )
 
 
-def _to_status(question: QaQuestion) -> QaQuestionStatus:
+def _to_status(storage: Storage, question: QaQuestion) -> QaQuestionStatus:
     return QaQuestionStatus(
         question_id=question.question_id,
         status=question.status,
@@ -485,7 +486,36 @@ def _to_status(question: QaQuestion) -> QaQuestionStatus:
         error_message=question.error_message,
         updated_at=question.updated_at,
         answered_at=question.answered_at,
+        answer_id=_resolve_answer_id_if_answered(storage, question),
     )
+
+
+def _with_answer_id(storage: Storage, question: QaQuestion) -> QaQuestion:
+    return QaQuestion(
+        question_id=question.question_id,
+        thread_id=question.thread_id,
+        team_id=question.team_id,
+        created_by_user_id=question.created_by_user_id,
+        target_team_role_id=question.target_team_role_id,
+        source_question_id=question.source_question_id,
+        parent_answer_id=question.parent_answer_id,
+        origin_type=question.origin_type,
+        status=question.status,
+        text=question.text,
+        error_code=question.error_code,
+        error_message=question.error_message,
+        created_at=question.created_at,
+        updated_at=question.updated_at,
+        answered_at=question.answered_at,
+        answer_id=_resolve_answer_id_if_answered(storage, question),
+    )
+
+
+def _resolve_answer_id_if_answered(storage: Storage, question: QaQuestion) -> str | None:
+    if str(question.status) != "answered":
+        return None
+    answer = storage.get_latest_answer_for_question(question.question_id)
+    return answer.answer_id if answer is not None else None
 
 
 def _new_id() -> str:
