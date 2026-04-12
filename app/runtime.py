@@ -84,6 +84,9 @@ class RuntimeContext:
     role_catalog: RoleCatalog
     dispatch_mode: str = "single-instance"
     dispatch_is_runner: bool = True
+    telegram_thin_client_enabled: bool = True
+    telegram_api_base_url: str = "http://127.0.0.1:8080"
+    telegram_api_timeout_sec: int = 30
     queue_backend: str = "in-memory"
     started_at: str | None = None
     dependency_provider: "RuntimeDependencyProvider | None" = None
@@ -95,6 +98,8 @@ class RuntimeContext:
                 "mode": self.dispatch_mode,
                 "is_runner": bool(self.dispatch_is_runner),
             },
+            "telegram_runtime_thin_client_enabled": bool(self.telegram_thin_client_enabled),
+            "telegram_runtime_api_base_url": self.telegram_api_base_url,
         }
         if self.dependency_provider is not None:
             data["runtime_dependencies"] = self.dependency_provider

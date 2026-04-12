@@ -264,6 +264,19 @@ class _FakeBuffer:
 
 class GroupHandlerSmokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_flush_buffered_hint_text_contract(self) -> None:
+        class _Client:
+            async def execute_run_chain(self, **kwargs):  # noqa: ANN003
+                _ = kwargs
+                return Result.ok(None)
+
+            def prepare_group_buffer(self, **kwargs):  # noqa: ANN003
+                return Result.ok(GroupBufferPlan(should_process=True, should_start=True, team_id=1, role_names=("dev",), orchestrator_role_name=None))
+
+            async def flush_group_buffered(self, **kwargs):  # noqa: ANN003
+                context = kwargs["context"]
+                chat_id = kwargs["chat_id"]
+                await context.bot.send_message(chat_id=chat_id, text="Напиши сообщение после роли.")
+
         runtime = SimpleNamespace(
             message_buffer=_FakeBuffer([_FakeMessage(100, "@mybot @dev")]),
             storage=SimpleNamespace(),
@@ -273,13 +286,8 @@ class GroupHandlerSmokeTests(unittest.IsolatedAsyncioTestCase):
             require_bot_mention=True,
             cipher=_FakeCipher(),
         )
-        context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=_FakeBot())
-
-        with patch(
-            "app.handlers.messages_group.build_group_flush_plan",
-            return_value=Result.ok(GroupFlushPlan(action="send_hint", team_id=1)),
-        ):
-            await messages_group._flush_buffered(-11001, 1, context)  # type: ignore[arg-type]
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime, "runtime_client": _Client()}), bot=_FakeBot())
+        await messages_group._flush_buffered(-11001, 1, context)  # type: ignore[arg-type]
 
         self.assertEqual(context.bot.sent, [(-11001, "Напиши сообщение после роли.")])
 
@@ -315,11 +323,9 @@ class GroupHandlerSmokeTests(unittest.IsolatedAsyncioTestCase):
             require_bot_mention=True,
         )
         update = SimpleNamespace(effective_chat=_Chat(), effective_user=_User(), message=_Msg())
-        context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=_FakeBot())
-
-        with patch(
-            "app.handlers.messages_group.prepare_group_buffer_plan",
-            return_value=Result.ok(
+        runtime_client = SimpleNamespace(
+            execute_run_chain=lambda **kwargs: Result.ok(None),
+            prepare_group_buffer=lambda **kwargs: Result.ok(
                 GroupBufferPlan(
                     should_process=True,
                     should_start=False,
@@ -328,8 +334,10 @@ class GroupHandlerSmokeTests(unittest.IsolatedAsyncioTestCase):
                     orchestrator_role_name=None,
                 )
             ),
-        ):
-            await messages_group.handle_group_buffered(update, context)  # type: ignore[arg-type]
+            flush_group_buffered=lambda **kwargs: None,
+        )
+        context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime, "runtime_client": runtime_client}), bot=_FakeBot())
+        await messages_group.handle_group_buffered(update, context)  # type: ignore[arg-type]
 
         self.assertEqual(runtime.message_buffer.start_values, [False])
 

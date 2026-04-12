@@ -229,14 +229,18 @@ class LLMRouter:
             return value
 
         scoped_role_id = role_id
-        if team_role_id is None and scoped_role_id is None:
+        if team_role_id is None:
             raise MissingUserField(provider.provider_id, field, role_id)
-        value = self._storage.get_provider_user_value_by_team_role_or_role(
-            provider.provider_id,
-            key,
-            team_role_id=team_role_id,
-            role_id=scoped_role_id,
-        )
+        if key == "working_dir":
+            value = self._storage.get_team_role_working_dir_by_id(int(team_role_id))
+        elif key == "root_dir":
+            value = self._storage.get_team_role_root_dir_by_id(int(team_role_id))
+        else:
+            value = self._storage.get_provider_user_value_by_team_role(
+                provider.provider_id,
+                key,
+                int(team_role_id),
+            )
         if value is None:
             raise MissingUserField(provider.provider_id, field, scoped_role_id if scoped_role_id is not None else role_id)
         return value

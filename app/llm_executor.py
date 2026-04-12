@@ -22,6 +22,7 @@ class LLMExecutor:
         content: str,
         role: Role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
         attempt = 0
@@ -45,6 +46,7 @@ class LLMExecutor:
                     content=content,
                     model_override=model_override or role.llm_model,
                     role_id=role.role_id,
+                    team_role_id=team_role_id,
                 )
                 self._logger.info(
                     "LLM response received provider=%s role=%s session_id=%s attempt=%s/%s chars=%s elapsed_ms=%s",

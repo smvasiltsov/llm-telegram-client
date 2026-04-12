@@ -27,10 +27,11 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
     def test_role_dto_json_shape_contract(self) -> None:
         dto = RoleDTO(
             role_id=1,
+            team_role_id=None,
             role_name="dev",
             description="Developer",
-            base_system_prompt="sys",
-            extra_instruction="extra",
+            system_prompt="sys",
+            extra_instructions="extra",
             llm_model=None,
             is_active=True,
             mention_name=None,
@@ -42,12 +43,17 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
                 "team_role_id": None,
                 "role_name": "dev",
                 "description": "Developer",
-                "base_system_prompt": "sys",
-                "extra_instruction": "extra",
+                "system_prompt": "sys",
+                "extra_instructions": "extra",
                 "llm_model": None,
+                "working_dir": None,
+                "root_dir": None,
                 "is_active": True,
                 "is_orchestrator": False,
                 "mention_name": None,
+                "skills": [],
+                "pre_processing_tools": [],
+                "post_processing_tools": [],
             },
         )
 
@@ -142,10 +148,11 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             RoleDTO(
                 role_id=1,
+                team_role_id=None,
                 role_name="dev",
                 description="Developer",
-                base_system_prompt="sys",
-                extra_instruction="extra",
+                system_prompt="sys",
+                extra_instructions="extra",
                 llm_model=None,
                 is_active=True,
                 mention_name=None,

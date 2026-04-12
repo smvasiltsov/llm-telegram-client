@@ -695,6 +695,7 @@ async def execute_role_request(
                     content=content,
                     role=role,
                     model_override=current_model_override,
+                    team_role_id=int(team_role_id),
                 )
                 return SkillStepSendResult(response_text=response_text, session_id=current_session_id)
             except Exception as exc:
@@ -819,6 +820,7 @@ async def execute_role_request(
             content=content,
             role=role,
             model_override=model_override,
+            team_role_id=int(team_role_id),
         )
     except Exception as exc:
         recovery = await _recover_stale_session_and_resend(
@@ -970,7 +972,7 @@ async def send_orchestrator_post_event(
     corr_id = ensure_correlation_id(correlation_id)
     storage: Storage = _runtime(context).storage
     group_role = storage.get_team_role(team_id, orchestrator_role.role_id)
-    if not group_role.enabled:
+    if not group_role.is_active:
         return
     queue_team_role_id = _resolve_team_role_id_for_dispatch(
         context=context,

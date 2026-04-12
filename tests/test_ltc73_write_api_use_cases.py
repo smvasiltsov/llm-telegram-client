@@ -10,11 +10,15 @@ from app.application.use_cases.transaction_boundaries import MANDATORY_STAGE3_TR
 from app.application.use_cases.write_api import (
     TeamRolePatchRequest,
     TeamRolePrepostPutRequest,
+    TeamRoleRootDirPutRequest,
     TeamRoleSkillPutRequest,
+    TeamRoleWorkingDirPutRequest,
     deactivate_team_role_binding_write_result,
     patch_team_role_result,
     put_team_role_prepost_result,
+    put_team_role_root_dir_result,
     put_team_role_skill_result,
+    put_team_role_working_dir_result,
     reset_team_role_session_write_result,
 )
 from app.storage import Storage
@@ -69,7 +73,7 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
     def test_patch_team_role_result_updates_target_state(self) -> None:
-        storage, team_id, role_id, _ = self._bootstrap()
+        storage, _, _, team_role_id = self._bootstrap()
         storage.enable_write_uow_guard()
         observed_tx_depths: list[int] = []
         original_set_enabled = storage.set_team_role_enabled
@@ -81,8 +85,7 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
         with patch.object(storage, "set_team_role_enabled", side_effect=_wrapped_set_enabled):
             result = patch_team_role_result(
                 storage,
-                team_id=team_id,
-                role_id=role_id,
+                team_role_id=team_role_id,
                 patch=TeamRolePatchRequest(enabled=False, is_orchestrator=False, display_name="Dev Team"),
             )
 
@@ -93,30 +96,40 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
         self.assertFalse(result.value.enabled)
         self.assertEqual(result.value.display_name, "Dev Team")
 
+    def test_patch_team_role_rejects_conflicting_enabled_and_is_active(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        result = patch_team_role_result(
+            storage,
+            team_role_id=team_role_id,
+            patch=TeamRolePatchRequest(enabled=True, is_active=False),
+        )
+        self.assertTrue(result.is_error)
+        self.assertEqual((result.error.code if result.error else None), "validation.invalid_input")
+
     def test_reset_session_write_is_idempotent_and_rejects_payload_mismatch(self) -> None:
-        storage, team_id, role_id, _ = self._bootstrap()
+        storage, team_id, role_id, team_role_id = self._bootstrap()
+        with storage.transaction(immediate=True):
+            storage.set_team_role_working_dir_by_id(team_role_id, "/tmp/work")
+            storage.set_team_role_root_dir_by_id(team_role_id, "/tmp/root")
         runtime = SimpleNamespace(provider_registry={})
         first = reset_team_role_session_write_result(
             runtime,
             storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=42,
             idempotency_key="k-reset-1",
         )
         second = reset_team_role_session_write_result(
             runtime,
             storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=42,
             idempotency_key="k-reset-1",
         )
         mismatch = reset_team_role_session_write_result(
             runtime,
             storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=43,
             idempotency_key="k-reset-1",
         )
@@ -124,24 +137,40 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
         self.assertTrue(second.is_ok)
         self.assertTrue(mismatch.is_error)
         self.assertEqual((mismatch.error.code if mismatch.error else None), "validation.invalid_input")
+        state = storage.get_team_role(team_id, role_id)
+        self.assertIsNone(state.working_dir)
+        self.assertIsNone(state.root_dir)
+
+    def test_reset_session_write_returns_not_found_for_invalid_telegram_user_id(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        runtime = SimpleNamespace(provider_registry={})
+        result = reset_team_role_session_write_result(
+            runtime,
+            storage,
+            team_role_id=team_role_id,
+            telegram_user_id=999999,
+            idempotency_key="k-reset-missing-user",
+        )
+        self.assertTrue(result.is_error)
+        self.assertEqual((result.error.code if result.error else None), "storage.not_found")
+        self.assertEqual((result.error.http_status if result.error else None), 404)
 
     def test_deactivate_binding_write_runs_inside_transaction(self) -> None:
-        storage, team_id, role_id, _ = self._bootstrap()
+        storage, team_id, role_id, team_role_id = self._bootstrap()
         runtime = SimpleNamespace(provider_registry={})
         storage.enable_write_uow_guard()
         observed_tx_depths: list[int] = []
-        original = storage.list_provider_user_legacy_keys_for_role
+        original = storage.get_team_role_by_id
 
-        def _wrapped_legacy(*args, **kwargs):
+        def _wrapped_get_team_role_by_id(*args, **kwargs):
             observed_tx_depths.append(storage._tx_depth)
             return original(*args, **kwargs)
 
-        with patch.object(storage, "list_provider_user_legacy_keys_for_role", side_effect=_wrapped_legacy):
+        with patch.object(storage, "get_team_role_by_id", side_effect=_wrapped_get_team_role_by_id):
             result = deactivate_team_role_binding_write_result(
                 runtime,
                 storage,
-                team_id=team_id,
-                role_id=role_id,
+                team_role_id=team_role_id,
                 telegram_user_id=42,
                 idempotency_key="k-del-1",
             )
@@ -149,8 +178,8 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
         self.assertTrue(result.is_ok)
         self.assertTrue(observed_tx_depths)
         self.assertTrue(all(depth > 0 for depth in observed_tx_depths))
-        state = storage.get_team_role(team_id, role_id)
-        self.assertFalse(state.is_active)
+        with self.assertRaises(ValueError):
+            _ = storage.get_team_role(team_id, role_id)
 
     def test_put_skill_runs_inside_transaction_and_is_state_idempotent(self) -> None:
         storage, _, _, team_role_id = self._bootstrap()
@@ -230,6 +259,56 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
         assert second.value is not None
         self.assertFalse(second.value.enabled)
         self.assertEqual(second.value.config, {"x": 2})
+
+    def test_put_working_dir_requires_absolute_path_and_updates_team_role(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        runtime = SimpleNamespace()
+        ok = put_team_role_working_dir_result(
+            runtime,
+            storage,
+            request=TeamRoleWorkingDirPutRequest(
+                team_role_id=team_role_id,
+                working_dir="/tmp/work",
+            ),
+        )
+        bad = put_team_role_working_dir_result(
+            runtime,
+            storage,
+            request=TeamRoleWorkingDirPutRequest(
+                team_role_id=team_role_id,
+                working_dir="relative/path",
+            ),
+        )
+        self.assertTrue(ok.is_ok)
+        self.assertTrue(bad.is_error)
+        self.assertEqual((bad.error.code if bad.error else None), "validation.invalid_input")
+        assert ok.value is not None
+        self.assertEqual(ok.value.working_dir, "/tmp/work")
+
+    def test_put_root_dir_requires_absolute_path(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        runtime = SimpleNamespace()
+        ok = put_team_role_root_dir_result(
+            runtime,
+            storage,
+            request=TeamRoleRootDirPutRequest(
+                team_role_id=team_role_id,
+                root_dir="/tmp/root",
+            ),
+        )
+        bad = put_team_role_root_dir_result(
+            runtime,
+            storage,
+            request=TeamRoleRootDirPutRequest(
+                team_role_id=team_role_id,
+                root_dir="relative/path",
+            ),
+        )
+        self.assertTrue(ok.is_ok)
+        self.assertTrue(bad.is_error)
+        self.assertEqual((bad.error.code if bad.error else None), "validation.invalid_input")
+        assert ok.value is not None
+        self.assertEqual(ok.value.root_dir, "/tmp/root")
 
 
 if __name__ == "__main__":

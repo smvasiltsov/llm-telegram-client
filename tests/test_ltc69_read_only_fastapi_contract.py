@@ -170,6 +170,10 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
         client = self._client()
         teams = client.get("/api/v1/teams", headers={"X-Owner-User-Id": "700"}).json()
         team_id = int(teams["items"][0]["team_id"])
+        with client.app.state.runtime.storage.transaction(immediate=True):
+            dev = client.app.state.runtime.storage.get_role_by_name("dev")
+            client.app.state.runtime.storage.set_team_role_working_dir(team_id, int(dev.role_id), "/tmp/work")
+            client.app.state.runtime.storage.set_team_role_root_dir(team_id, int(dev.role_id), "/tmp/root")
         response = client.get(f"/api/v1/teams/{team_id}/roles", headers={"X-Owner-User-Id": "700"})
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -178,6 +182,10 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
         self.assertTrue(any(item.get("is_orchestrator") is True for item in payload))
         dev = next(item for item in payload if item["role_name"] == "dev")
         self.assertIsInstance(dev.get("team_role_id"), int)
+        self.assertIn("working_dir", dev)
+        self.assertIn("root_dir", dev)
+        self.assertEqual(dev["working_dir"], "/tmp/work")
+        self.assertEqual(dev["root_dir"], "/tmp/root")
         self.assertEqual([item["id"] for item in dev["skills"]], ["s1", "s2"])
         self.assertEqual([item["id"] for item in dev["pre_processing_tools"]], ["p1", "p2"])
         self.assertEqual([item["id"] for item in dev["post_processing_tools"]], ["p1", "p2"])
@@ -347,6 +355,29 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         payload = response.json()
         self.assertEqual(payload["error"]["code"], "conflict.already_exists")
+
+    def test_patch_master_role_system_prompt_updates_response_catalog_and_file(self) -> None:
+        client = self._client()
+        catalog = client.get("/api/v1/roles/catalog?limit=50&offset=0", headers={"X-Owner-User-Id": "700"}).json()
+        by_name = {item["role_name"]: item for item in catalog["items"]}
+        dev_role_id = int(by_name["dev"]["role_id"])
+
+        patched = client.patch(
+            f"/api/v1/roles/{dev_role_id}",
+            headers={"X-Owner-User-Id": "700"},
+            json={"system_prompt": "Новый системный промпт"},
+        )
+        self.assertEqual(patched.status_code, 200)
+        self.assertEqual(patched.json()["system_prompt"], "Новый системный промпт")
+
+        after = client.get("/api/v1/roles/catalog?limit=50&offset=0", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(after.status_code, 200)
+        after_items = {item["role_name"]: item for item in after.json()["items"]}
+        self.assertEqual(after_items["dev"]["system_prompt"], "Новый системный промпт")
+
+        role_file = Path(client.app.state.runtime.role_catalog.root_dir) / "dev.json"
+        self.assertTrue(role_file.exists())
+        self.assertIn('"base_system_prompt": "Новый системный промпт"', role_file.read_text(encoding="utf-8"))
 
     def test_new_endpoints_missing_owner_return_401_with_error_envelope(self) -> None:
         client = self._client()

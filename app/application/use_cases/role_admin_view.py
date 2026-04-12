@@ -36,9 +36,9 @@ def build_master_roles_view(*, runtime: Any, storage: Storage) -> Result[MasterR
         )
 
 
-def build_team_roles_view(*, storage: Storage, group_id: int) -> Result[TeamRolesView]:
+def build_team_roles_view(*, storage: Storage, group_id: int, include_inactive: bool = False) -> Result[TeamRolesView]:
     try:
-        rows = tuple(list_team_role_states(storage, group_id))
+        rows = tuple(list_team_role_states(storage, group_id, include_inactive=include_inactive))
         return Result.ok(TeamRolesView(group_id=group_id, roles=rows))
     except ValueError as exc:
         return Result.fail_from_exception(
@@ -53,4 +53,3 @@ def build_team_roles_view(*, storage: Storage, group_id: int) -> Result[TeamRole
             fallback_message="Failed to build team roles view",
             fallback_details={"entity": "role_admin_view", "id": group_id, "cause": "team_roles"},
         )
-

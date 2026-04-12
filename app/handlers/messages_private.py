@@ -5,6 +5,7 @@ import logging
 import re
 from typing import Any
 
+import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -14,8 +15,7 @@ from app.application.dependencies import (
     resolve_storage_uow_dependencies,
     resolve_tooling_dependencies,
 )
-from app.application.contracts import ErrorCode, Result, RuntimeOperation, log_structured_error, to_telegram_message
-from app.application.use_cases.runtime_orchestration import execute_run_chain_operation
+from app.application.contracts import ErrorCode, Result, log_structured_error, to_telegram_message
 from app.application.use_cases.private_pending_field import (
     build_pending_field_replay_plan,
     delete_provider_user_field_from_pending_state,
@@ -25,8 +25,7 @@ from app.application.use_cases.private_pending_field import (
     set_provider_user_field_from_pending_state,
     validate_pending_field_value,
 )
-from app.application.use_cases.private_pending_replay import build_pending_replay_dispatch_plan
-from app.application.use_cases.transaction_boundaries import pop_pending_replay_if_unchanged
+from app.interfaces.telegram_runtime_client import resolve_runtime_client
 from app.auth import AuthService
 from app.llm_providers import ProviderUserField, model_label
 from app.message_buffer import MessageBuffer
@@ -146,6 +145,42 @@ def _set_provider_user_field_from_pending_state(storage: Storage, state: dict[st
         set_provider_user_field_from_pending_state(storage, state, value)
 
 
+async def _set_provider_user_field_from_pending_state_via_api(
+    context: ContextTypes.DEFAULT_TYPE,
+    storage: Storage,
+    state: dict[str, object],
+    value: str,
+) -> bool:
+    runtime = _runtime(context)
+    if not bool(getattr(runtime, "telegram_thin_client_enabled", False)):
+        return False
+    key = str(state.get("key", "")).strip().lower()
+    if key not in {"working_dir", "root_dir"}:
+        return False
+    team_id = state.get("team_id")
+    role_id = state.get("role_id")
+    if not isinstance(team_id, int) or not isinstance(role_id, int):
+        return False
+    team_role_id = storage.resolve_team_role_id(team_id, role_id)
+    if team_role_id is None:
+        raise ValueError(f"team_role_id not found for team_id={team_id} role_id={role_id}")
+    payload_key = "working_dir" if key == "working_dir" else "root_dir"
+    endpoint = f"/api/v1/team-roles/{int(team_role_id)}/{'working-dir' if key == 'working_dir' else 'root-dir'}"
+    base_url = str(getattr(runtime, "telegram_api_base_url", "") or "").strip()
+    if not base_url:
+        raise ValueError("telegram_api_base_url is empty")
+    timeout_sec = max(1, int(getattr(runtime, "telegram_api_timeout_sec", 30) or 30))
+    headers = {
+        "X-Owner-User-Id": str(int(runtime.owner_user_id)),
+        "X-Correlation-Id": _ensure_runtime_correlation_id(),
+    }
+    async with httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=float(timeout_sec)) as client:
+        response = await client.put(endpoint, headers=headers, json={payload_key: value})
+    if response.status_code != 200:
+        raise ValueError(f"failed to save {payload_key} via api status={response.status_code} body={response.text[:200]}")
+    return True
+
+
 def _delete_provider_user_field_from_pending_state(storage: Storage, state: dict[str, object]) -> None:
     with storage.transaction(immediate=True):
         delete_provider_user_field_from_pending_state(storage, state)
@@ -225,6 +260,11 @@ def _increment_pending_replay_counter(
 
 def _is_root_dir_pending_field(state: dict[str, object]) -> bool:
     return is_root_dir_pending_field(state)
+
+
+def _is_working_or_root_pending_field(state: dict[str, object]) -> bool:
+    key = str(state.get("key", "")).strip().lower()
+    return key in {"working_dir", "root_dir"}
 
 
 def _validate_pending_field_value(state: dict[str, object], value: str) -> str | None:
@@ -357,7 +397,9 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
                 return
             pending_fields.delete(user.id)
             try:
-                _set_provider_user_field_from_pending_state(storage, state, value)
+                saved_via_api = await _set_provider_user_field_from_pending_state_via_api(context, storage, state, value)
+                if not saved_via_api:
+                    _set_provider_user_field_from_pending_state(storage, state, value)
             except Exception:
                 logger.exception(
                     "failed to save pending user field user_id=%s provider=%s key=%s role_id=%s team_id=%s",
@@ -394,6 +436,20 @@ async def handle_private_message(update: Update, context: ContextTypes.DEFAULT_T
             pending_msg = pending_store.peek(user.id)
             replay_pending_msg = pending_store.peek_record(user.id)
             attempts = 0
+            if (
+                replay_pending_state is None
+                and pending_msg
+                and _is_role_scoped_pending_field(state)
+                and _is_working_or_root_pending_field(state)
+            ):
+                pending_store.pop_record(user.id)
+                pending_fields.delete(user.id)
+                _clear_pending_replay_counters(context, user.id)
+                await update.message.reply_text(
+                    "Не удалось автоматически продолжить запрос. "
+                    "Отправь исходный запрос в группу ещё раз."
+                )
+                return
             if replay_pending_state and _is_role_scoped_pending_field(state) and _is_same_pending_field_state(replay_pending_state, state):
                 attempts = _increment_pending_replay_counter(context, user.id, state, replay_pending_msg)
             replay_plan = build_pending_field_replay_plan(
@@ -874,90 +930,11 @@ async def _process_pending_private_text(
 
 async def _process_pending_message_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
     correlation_id = _ensure_runtime_correlation_id()
-    pending: PendingStore = _resolve_pending_store(context)
-    pending_msg = pending.peek_record(user_id)
-    if not pending_msg:
-        _clear_pending_replay_counters(context, user_id)
-        logger.info("pending message not found user_id=%s", user_id)
-        return False
-    original_pending_msg = pending_msg
-    storage: Storage = _resolve_storage(context)
-    plan_result = build_pending_replay_dispatch_plan(
-        storage=storage,
-        runtime=_runtime(context),
-        user_id=user_id,
-        pending_msg=pending_msg,
-        roles_require_auth_fn=lambda **kwargs: roles_require_auth(context=context, **kwargs),
-        cipher=_resolve_cipher(context),
-    )
-    if plan_result.is_error or plan_result.value is None:
-        log_structured_error(
-            logger,
-            event="private_pending_replay_plan_failed",
-            error=plan_result.error,
-            extra={"user_id": user_id},
-        )
-        return False
-    plan = plan_result.value
-    if plan.action == "skip":
-        if plan.should_drop_pending:
-            pending.pop_record(user_id)
-        if plan.should_clear_counters:
-            _clear_pending_replay_counters(context, user_id)
-        if plan.reason == "missing_team_id" and plan.chat_id is not None:
-            logger.warning("pending message dropped (missing team_id) user_id=%s chat_id=%s", user_id, plan.chat_id)
-        elif plan.reason == "role_not_found":
-            logger.info("pending role not found user_id=%s role_name=%s", user_id, plan.role_name)
-        return False
-    if plan.action == "request_token":
-        if plan.chat_id is not None:
-            await _request_token_for_user(plan.chat_id, user_id, context)
-        return False
-
-    if (
-        plan.action != "dispatch"
-        or plan.chat_id is None
-        or plan.team_id is None
-        or plan.message_id is None
-        or plan.role_name is None
-        or plan.content is None
-    ):
-        return False
-    runtime_result = await execute_run_chain_operation(
+    runtime_client = resolve_runtime_client(context.application.bot_data)
+    return await runtime_client.process_pending_replay(
         context=context,
-        team_id=plan.team_id,
-        chat_id=plan.chat_id,
         user_id=user_id,
-        session_token=plan.session_token,
-        roles=list(plan.roles),
-        user_text=plan.content,
-        reply_text=plan.reply_text,
-        actor_username="user",
-        reply_to_message_id=plan.message_id,
-        is_all=plan.role_name == "__all__",
-        apply_plugins=False,
-        save_pending_on_unauthorized=False,
-        pending_role_name=plan.role_name,
-        allow_orchestrator_post_event=plan.chat_id < 0,
-        chain_origin="pending",
-        operation=RuntimeOperation.PENDING_REPLAY,
-        request_id=f"pending-{user_id}-{plan.message_id}",
         correlation_id=correlation_id,
+        clear_counters_fn=lambda uid: _clear_pending_replay_counters(context, uid),
+        request_token_fn=_request_token_for_user,
     )
-
-    if runtime_result.is_ok and runtime_result.value and runtime_result.value.completed:
-        _clear_pending_replay_counters(context, user_id)
-        removed, current_pending_msg = pop_pending_replay_if_unchanged(
-            pending_store=pending,
-            user_id=user_id,
-            original_pending_msg=original_pending_msg,
-        )
-        if (not removed) and current_pending_msg is not None:
-            logger.info(
-                "pending message preserved user_id=%s old_role=%s new_role=%s",
-                user_id,
-                original_pending_msg.get("role_name"),
-                current_pending_msg.get("role_name"),
-            )
-        return True
-    return False

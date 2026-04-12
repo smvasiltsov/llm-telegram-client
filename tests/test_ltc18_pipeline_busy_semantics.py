@@ -92,8 +92,10 @@ class _FakeLLMExecutor:
         content: str,
         role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
+        _ = team_role_id
         if not self._responses:
             raise AssertionError("No fake LLM responses left")
         return self._responses.pop(0)
@@ -115,8 +117,10 @@ class _DelayedFakeLLMExecutor(_FakeLLMExecutor):
         content: str,
         role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
+        _ = team_role_id
         self._calls += 1
         if self._calls == 1:
             await asyncio.sleep(self._first_delay_sec)
@@ -126,6 +130,7 @@ class _DelayedFakeLLMExecutor(_FakeLLMExecutor):
             content=content,
             role=role,
             model_override=model_override,
+            team_role_id=team_role_id,
             retries=retries,
         )
 
@@ -144,8 +149,10 @@ class _MissingFieldThenResponseLLMExecutor(_FakeLLMExecutor):
         content: str,
         role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
+        _ = team_role_id
         if self._first_call:
             self._first_call = False
             raise MissingUserField(
@@ -436,7 +443,7 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(status_after_missing.status if status_after_missing else None, "free")
             self.assertEqual(status_after_missing.last_release_reason if status_after_missing else None, "missing_user_field")
 
-            storage.set_provider_user_value("provider", "working_dir", role.role_id, "/opt/projects/demo")
+            storage.set_team_role_working_dir_by_id(team_role_id, "/opt/projects/demo")
             started = monotonic()
             processed = await asyncio.wait_for(_process_pending_message_for_user(42, context), timeout=2.0)
             elapsed = monotonic() - started
@@ -445,15 +452,8 @@ class LTC18PipelineBusySemanticsTests(unittest.IsolatedAsyncioTestCase):
             self.assertLess(elapsed, 2.0)
             self.assertIsNone(pending_store.peek_record(42))
             self.assertIn("replayed done", "\n".join(bot.sent))
-            team_scoped_value = storage.get_provider_user_value_by_team_role("provider", "working_dir", team_role_id)
-            self.assertIsNone(team_scoped_value)
-            fallback_value = storage.get_provider_user_value_by_team_role_or_role(
-                "provider",
-                "working_dir",
-                team_role_id=team_role_id,
-                role_id=role.role_id,
-            )
-            self.assertEqual(fallback_value, "/opt/projects/demo")
+            team_scoped_value = storage.get_team_role_working_dir_by_id(team_role_id)
+            self.assertEqual(team_scoped_value, "/opt/projects/demo")
 
     async def test_orchestrator_post_event_missing_user_field_releases_immediately(self) -> None:
         with TemporaryDirectory() as td:

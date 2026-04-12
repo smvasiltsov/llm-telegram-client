@@ -28,6 +28,7 @@ class UpdateRequestDTO(ApiSchema):
     group_id: int
     role_id: int
     enabled: bool | None = None
+    is_active: bool | None = None
     mode: Literal["normal", "orchestrator"] | None = None
     model_override: str | None = None
     system_prompt_override: str | None = None

@@ -143,7 +143,20 @@ class LTC85Stage5ApiParityUseCasesTests(unittest.TestCase):
 
     def test_patch_master_role_conflict_and_update(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            storage = Storage(Path(td) / "ltc85_patch.sqlite3")
+            root = Path(td)
+            catalog_dir = root / "roles"
+            catalog_dir.mkdir(parents=True, exist_ok=True)
+            (catalog_dir / "dev.json").write_text(
+                '{"schema_version":1,"role_name":"dev","description":"Developer","base_system_prompt":"sp","extra_instruction":"ei","llm_model":"gpt","is_active":true}\n',
+                encoding="utf-8",
+            )
+            (catalog_dir / "ops.json").write_text(
+                '{"schema_version":1,"role_name":"ops","description":"Ops","base_system_prompt":"sp2","extra_instruction":"ei2","llm_model":"gpt","is_active":true}\n',
+                encoding="utf-8",
+            )
+            storage = Storage(root / "ltc85_patch.sqlite3")
+            runtime = SimpleNamespace(role_catalog=RoleCatalog.load(catalog_dir))
+            storage.attach_role_catalog(runtime.role_catalog)
             with storage.transaction(immediate=True):
                 dev = storage.upsert_role("dev", "d", "sp", "ei", "gpt", True)
                 storage.upsert_role("ops", "d2", "sp2", "ei2", "gpt", True)
@@ -152,6 +165,7 @@ class LTC85Stage5ApiParityUseCasesTests(unittest.TestCase):
                 storage,
                 role_id=dev.role_id,
                 patch=MasterRolePatchRequest(role_name="ops"),
+                runtime=runtime,
             )
             self.assertTrue(conflict.is_error)
             self.assertEqual(conflict.error.code if conflict.error else "", ErrorCode.CONFLICT_ALREADY_EXISTS.value)
@@ -160,12 +174,22 @@ class LTC85Stage5ApiParityUseCasesTests(unittest.TestCase):
                 storage,
                 role_id=dev.role_id,
                 patch=MasterRolePatchRequest(system_prompt="new-sp", extra_instruction="new-ei", llm_model="new-model"),
+                runtime=runtime,
             )
             self.assertTrue(updated.is_ok and updated.value is not None)
             self.assertEqual(updated.value.role_id, dev.role_id)
             self.assertEqual(updated.value.system_prompt, "new-sp")
             self.assertEqual(updated.value.extra_instruction, "new-ei")
             self.assertEqual(updated.value.llm_model, "new-model")
+
+            role_file = catalog_dir / "dev.json"
+            self.assertTrue(role_file.exists())
+            payload = role_file.read_text(encoding="utf-8")
+            self.assertIn('"base_system_prompt": "new-sp"', payload)
+            refreshed = list_master_roles_catalog_result(runtime, storage, limit=50, offset=0)
+            self.assertTrue(refreshed.is_ok and refreshed.value is not None)
+            dev_item = next(item for item in refreshed.value.items if item.role_name == "dev")
+            self.assertEqual(dev_item.system_prompt, "new-sp")
 
     def test_qa_journal_includes_answer_id_only_for_answered(self) -> None:
         with tempfile.TemporaryDirectory() as td:

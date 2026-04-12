@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
+import hashlib
 from time import monotonic
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 from uuid import uuid4
 
 from app.application.contracts import ErrorCode, NoopMetricsPort
 from app.application.observability import correlation_scope, ensure_correlation_id
+from app.application.use_cases.qa_api import QaCreateQuestionRequest, create_question_result
 from app.application.use_cases.qa_dispatch_bridge import (
     claim_questions_for_dispatch_result,
     finalize_question_dispatch_attempt_failure_result,
@@ -24,11 +27,27 @@ from app.application.use_cases.qa_runtime_bridge_core import (
 )
 from app.interfaces.runtime.qa_runtime_execution_adapter import TelegramQaRuntimeExecutionAdapter
 from app.models import QaQuestion
+from app.utils import extract_role_mentions
 
 logger = logging.getLogger("api.qa_dispatch_bridge")
 
 
 _DEFAULT_RUNTIME_EXECUTION_ADAPTER = TelegramQaRuntimeExecutionAdapter()
+
+
+@dataclass(frozen=True)
+class QaPostAnswerDispatchItem:
+    target_team_role_id: int
+    text: str
+    reason: Literal["mention_tag", "orchestrator_user_event", "orchestrator_answer_event"]
+    origin_type: Literal["role_dispatch", "orchestrator"]
+    parent_question_id: str
+    parent_answer_id: str
+
+
+@dataclass(frozen=True)
+class QaPostAnswerDispatchPlan:
+    items: tuple[QaPostAnswerDispatchItem, ...]
 
 
 async def _default_execute_question(runtime, question: QaQuestion, correlation_id: str) -> BridgeExecutionResult:
@@ -84,6 +103,7 @@ class QaDispatchBridgeWorker:
         self._max_attempts = max(1, int(max_attempts))
         self._retry_delay_sec = max(0, int(retry_delay_sec))
         self._sweep_interval_sec = max(0.1, float(sweep_interval_sec))
+        self._lease_heartbeat_sec = max(0.2, min(self._sweep_interval_sec, float(self._lease_ttl_sec) / 3.0))
         self._execute_question = execute_question_fn or _default_execute_question
 
         self._metrics = self._resolve_metrics_port()
@@ -219,6 +239,193 @@ class QaDispatchBridgeWorker:
         self._inflight_by_question.pop(question_id, None)
         self._wake.set()
 
+    def _build_post_answer_dispatch_plan(
+        self,
+        *,
+        question: QaQuestion,
+        answer_id: str,
+        answer_text: str,
+    ) -> QaPostAnswerDispatchPlan:
+        team_id = int(question.team_id)
+        source_team_role_id = int(question.target_team_role_id or 0)
+        role_items = self._storage.list_roles_for_team(team_id)
+        role_map = {item.public_name().strip().lower(): item for item in role_items if item.public_name().strip()}
+        mention_names = extract_role_mentions(str(answer_text or ""), set(role_map.keys()))
+
+        planned: list[QaPostAnswerDispatchItem] = []
+        max_fanout = max(1, int(getattr(self._runtime, "qa_post_answer_max_fanout", 8) or 8))
+        seen_targets: set[int] = set()
+        for name in mention_names:
+            role = role_map.get(str(name).strip().lower())
+            if role is None:
+                continue
+            team_role_id = self._storage.resolve_team_role_id(team_id, int(role.role_id), ensure_exists=False)
+            if team_role_id is None:
+                continue
+            target_team_role_id = int(team_role_id)
+            if target_team_role_id <= 0 or target_team_role_id == source_team_role_id:
+                continue
+            if target_team_role_id in seen_targets:
+                continue
+            seen_targets.add(target_team_role_id)
+            planned.append(
+                QaPostAnswerDispatchItem(
+                    target_team_role_id=target_team_role_id,
+                    text=str(answer_text or ""),
+                    reason="mention_tag",
+                    origin_type="role_dispatch",
+                    parent_question_id=question.question_id,
+                    parent_answer_id=answer_id,
+                )
+            )
+            if len(planned) >= max_fanout:
+                break
+
+        orchestrator = self._storage.get_enabled_orchestrator_for_team(team_id)
+        if orchestrator is not None:
+            orchestrator_team_role_id = int(orchestrator.team_role_id or 0)
+            if orchestrator_team_role_id > 0 and orchestrator_team_role_id != source_team_role_id:
+                # For direct user -> role flow, orchestrator receives both user input and role answer.
+                if str(question.origin_type or "").strip().lower() == "user":
+                    planned.append(
+                        QaPostAnswerDispatchItem(
+                            target_team_role_id=orchestrator_team_role_id,
+                            text=str(question.text or ""),
+                            reason="orchestrator_user_event",
+                            origin_type="orchestrator",
+                            parent_question_id=question.question_id,
+                            parent_answer_id=answer_id,
+                        )
+                    )
+                planned.append(
+                    QaPostAnswerDispatchItem(
+                        target_team_role_id=orchestrator_team_role_id,
+                        text=str(answer_text or ""),
+                        reason="orchestrator_answer_event",
+                        origin_type="orchestrator",
+                        parent_question_id=question.question_id,
+                        parent_answer_id=answer_id,
+                    )
+                )
+
+        return QaPostAnswerDispatchPlan(items=tuple(planned))
+
+    def _question_lineage_depth(self, question: QaQuestion) -> int:
+        depth = 0
+        seen: set[str] = set()
+        current = question
+        while current.source_question_id:
+            parent_id = str(current.source_question_id).strip()
+            if not parent_id or parent_id in seen:
+                break
+            seen.add(parent_id)
+            parent = self._storage.get_question(parent_id)
+            if parent is None:
+                break
+            depth += 1
+            current = parent
+        return depth
+
+    def _on_answer_generated(
+        self,
+        *,
+        correlation_id: str,
+        question: QaQuestion,
+        answer_id: str,
+        answer_text: str,
+    ) -> QaPostAnswerDispatchPlan:
+        plan = self._build_post_answer_dispatch_plan(
+            question=question,
+            answer_id=answer_id,
+            answer_text=answer_text,
+        )
+        for item in plan.items:
+            logger.info(
+                "qa_bridge_post_answer_dispatch_planned correlation_id=%s parent_question_id=%s parent_answer_id=%s target_team_role_id=%s reason=%s origin_type=%s",
+                correlation_id,
+                item.parent_question_id,
+                item.parent_answer_id,
+                item.target_team_role_id,
+                item.reason,
+                item.origin_type,
+            )
+        return plan
+
+    @staticmethod
+    def _post_answer_dispatch_idempotency_key(item: QaPostAnswerDispatchItem) -> str:
+        text_hash = hashlib.sha256(str(item.text or "").encode("utf-8")).hexdigest()[:24]
+        return (
+            f"qa-post-answer:{item.reason}:"
+            f"{item.parent_question_id}:{item.parent_answer_id}:"
+            f"{int(item.target_team_role_id)}:{text_hash}"
+        )
+
+    def _dispatch_post_answer_plan(
+        self,
+        *,
+        correlation_id: str,
+        parent_question: QaQuestion,
+        plan: QaPostAnswerDispatchPlan,
+    ) -> None:
+        max_hops = max(0, int(getattr(self._runtime, "qa_post_answer_max_hops", 3) or 3))
+        depth = self._question_lineage_depth(parent_question)
+        if depth >= max_hops:
+            logger.info(
+                "qa_bridge_post_answer_dispatch_skipped_max_hops correlation_id=%s parent_question_id=%s depth=%s max_hops=%s",
+                correlation_id,
+                parent_question.question_id,
+                depth,
+                max_hops,
+            )
+            return
+        for item in plan.items:
+            if item.reason not in {"mention_tag", "orchestrator_user_event", "orchestrator_answer_event"}:
+                continue
+            text = str(item.text or "").strip()
+            if not text:
+                continue
+            idempotency_key = self._post_answer_dispatch_idempotency_key(item)
+            result = create_question_result(
+                self._storage,
+                request=QaCreateQuestionRequest(
+                    team_id=int(parent_question.team_id),
+                    created_by_user_id=int(parent_question.created_by_user_id),
+                    text=text,
+                    team_role_id=int(item.target_team_role_id),
+                    origin_type=item.origin_type,
+                    source_question_id=item.parent_question_id,
+                    parent_answer_id=item.parent_answer_id,
+                    thread_id=parent_question.thread_id,
+                ),
+                idempotency_key=idempotency_key,
+                provider_registry=dict(getattr(self._runtime, "provider_registry", {}) or {}),
+                provider_models=list(getattr(self._runtime, "provider_models", []) or []),
+                provider_model_map=dict(getattr(self._runtime, "provider_model_map", {}) or {}),
+                default_provider_id=str(getattr(self._runtime, "default_provider_id", "") or ""),
+                scope="qa.post_answer_dispatch",
+            )
+            if result.is_error or result.value is None:
+                logger.warning(
+                    "qa_bridge_post_answer_dispatch_failed correlation_id=%s parent_question_id=%s target_team_role_id=%s reason=%s error_code=%s",
+                    correlation_id,
+                    item.parent_question_id,
+                    item.target_team_role_id,
+                    item.reason,
+                    (result.error.code if result.error is not None else ErrorCode.INTERNAL_UNEXPECTED.value),
+                )
+                continue
+            child = result.value.question
+            logger.info(
+                "qa_bridge_post_answer_dispatch_created correlation_id=%s parent_question_id=%s child_question_id=%s target_team_role_id=%s idempotent_replay=%s",
+                correlation_id,
+                item.parent_question_id,
+                child.question_id,
+                item.target_team_role_id,
+                bool(result.value.idempotent_replay),
+            )
+            if not bool(result.value.idempotent_replay):
+                self.enqueue_question(child.question_id)
+
     async def _process_question(self, question_id: str) -> None:
         question = self._storage.get_question(question_id)
         if question is None:
@@ -272,6 +479,14 @@ class QaDispatchBridgeWorker:
                     started.value.target_team_role_id,
                     attempt,
                 )
+                heartbeat_stop = asyncio.Event()
+                heartbeat_task = asyncio.create_task(
+                    self._heartbeat_attempt(
+                        question_id=started.value.question_id,
+                        stop_event=heartbeat_stop,
+                    ),
+                    name=f"qa-dispatch-heartbeat-{started.value.question_id}",
+                )
                 try:
                     execution = await self._execute_question(self._runtime, started.value, corr_id)
                     outcome = persist_question_terminal_outcome_result(
@@ -302,6 +517,17 @@ class QaDispatchBridgeWorker:
                         final_q.target_team_role_id,
                         attempt,
                         (outcome.value.answer.answer_id if outcome.value.answer is not None else ""),
+                    )
+                    dispatch_plan = self._on_answer_generated(
+                        correlation_id=corr_id,
+                        question=final_q,
+                        answer_id=(outcome.value.answer.answer_id if outcome.value.answer is not None else ""),
+                        answer_text=str(execution.answer_text or ""),
+                    )
+                    self._dispatch_post_answer_plan(
+                        correlation_id=corr_id,
+                        parent_question=final_q,
+                        plan=dispatch_plan,
                     )
                 except Exception as exc:
                     error_code, message = _map_execution_failure(exc)
@@ -343,11 +569,36 @@ class QaDispatchBridgeWorker:
                         error_code,
                     )
                 finally:
+                    heartbeat_stop.set()
+                    try:
+                        await heartbeat_task
+                    except Exception:
+                        logger.exception("qa_bridge_heartbeat_stopped_with_error question_id=%s", started.value.question_id)
                     self._metrics.increment(
                         "runtime_inflight_operations",
                         labels={"operation": "qa_dispatch_bridge"},
                         value=-1,
                     )
+
+    async def _heartbeat_attempt(self, *, question_id: str, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), timeout=self._lease_heartbeat_sec)
+                continue
+            except TimeoutError:
+                pass
+            try:
+                with self._storage.transaction(immediate=True):
+                    alive = self._storage.heartbeat_question_dispatch_attempt(
+                        question_id=question_id,
+                        lease_ttl_sec=self._lease_ttl_sec,
+                    )
+            except Exception:
+                logger.exception("qa_bridge_heartbeat_failed question_id=%s", question_id)
+                continue
+            if not alive:
+                logger.warning("qa_bridge_heartbeat_stale_or_lost question_id=%s", question_id)
+                return
 
     def _emit_terminal_metric(self, *, status: str, error_code: str | None) -> None:
         self._metrics.increment(
@@ -378,6 +629,8 @@ class QaDispatchBridgeWorker:
 def _map_execution_failure(exc: Exception) -> tuple[str, str]:
     text = str(exc or "")
     lowered = text.lower()
+    if "execution attempt lease expired" in lowered or "lease expired" in lowered:
+        return "runtime_dispatch_timeout", text or "Dispatch lease expired"
     if "dispatch_rejected" in lowered:
         return "dispatch_rejected", text or "Dispatch rejected"
     if "runtime_busy_conflict" in lowered or "busy_conflict" in lowered:

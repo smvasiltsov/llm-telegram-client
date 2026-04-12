@@ -9,7 +9,9 @@ from app.application.use_cases.write_api import (
     TeamRoleBindOutcome,
     TeamRolePatchOutcome,
     TeamRolePrepostOutcome,
+    TeamRoleRootDirOutcome,
     TeamRoleSkillOutcome,
+    TeamRoleWorkingDirOutcome,
 )
 from app.application.use_cases.qa_api import QaCreateQuestionOutcome, QaQuestionStatus
 from app.application.use_cases.read_api import RegistryItem
@@ -49,9 +51,11 @@ from .entities import (
     TeamDTO,
     TeamRolePatchOutcomeDTO,
     TeamRolePrepostOutcomeDTO,
+    TeamRoleRootDirOutcomeDTO,
     TeamRoleSkillOutcomeDTO,
     TeamRoleDTO,
     TeamRoleRuntimeStatusDTO,
+    TeamRoleWorkingDirOutcomeDTO,
     TeamSessionDTO,
     UserRoleSessionDTO,
 )
@@ -71,9 +75,11 @@ def role_to_dto(value: Role) -> RoleDTO:
         team_role_id=value.team_role_id,
         role_name=value.role_name,
         description=value.description,
-        base_system_prompt=value.base_system_prompt,
-        extra_instruction=value.extra_instruction,
+        system_prompt=value.base_system_prompt,
+        extra_instructions=value.extra_instruction,
         llm_model=value.llm_model,
+        working_dir=value.working_dir,
+        root_dir=value.root_dir,
         is_active=value.is_active,
         is_orchestrator=value.is_orchestrator,
         mention_name=value.mention_name,
@@ -120,7 +126,23 @@ def team_session_to_dto(value: TeamSessionView) -> TeamSessionDTO:
 
 
 def team_role_patch_outcome_to_dto(value: TeamRolePatchOutcome) -> TeamRolePatchOutcomeDTO:
-    return TeamRolePatchOutcomeDTO.model_validate(value)
+    return TeamRolePatchOutcomeDTO(
+        team_id=value.team_id,
+        role_id=value.role_id,
+        team_role_id=value.team_role_id,
+        enabled=value.enabled,
+        is_active=value.is_active,
+        mode=value.mode,
+        is_orchestrator=value.is_orchestrator,
+        model_override=value.model_override,
+        display_name=value.display_name,
+        system_prompt=value.system_prompt_override,
+        extra_instructions=value.extra_instruction_override,
+        system_prompt_override=value.system_prompt_override,
+        extra_instruction_override=value.extra_instruction_override,
+        user_prompt_suffix=value.user_prompt_suffix,
+        user_reply_prefix=value.user_reply_prefix,
+    )
 
 
 def team_role_bind_outcome_to_dto(value: TeamRoleBindOutcome) -> TeamRolePatchOutcomeDTO:
@@ -134,6 +156,8 @@ def team_role_bind_outcome_to_dto(value: TeamRoleBindOutcome) -> TeamRolePatchOu
         is_orchestrator=value.is_orchestrator,
         model_override=value.model_override,
         display_name=value.display_name,
+        system_prompt=value.system_prompt_override,
+        extra_instructions=value.extra_instruction_override,
         system_prompt_override=value.system_prompt_override,
         extra_instruction_override=value.extra_instruction_override,
         user_prompt_suffix=value.user_prompt_suffix,
@@ -142,7 +166,14 @@ def team_role_bind_outcome_to_dto(value: TeamRoleBindOutcome) -> TeamRolePatchOu
 
 
 def master_role_patch_outcome_to_dto(value: MasterRolePatchOutcome) -> MasterRolePatchOutcomeDTO:
-    return MasterRolePatchOutcomeDTO.model_validate(value)
+    return MasterRolePatchOutcomeDTO(
+        role_id=value.role_id,
+        role_name=value.role_name,
+        llm_model=value.llm_model,
+        system_prompt=value.system_prompt,
+        extra_instructions=value.extra_instruction,
+        extra_instruction=value.extra_instruction,
+    )
 
 
 def mutation_ack_to_dto(value: MutationAck) -> MutationAckDTO:
@@ -155,6 +186,14 @@ def team_role_skill_outcome_to_dto(value: TeamRoleSkillOutcome) -> TeamRoleSkill
 
 def team_role_prepost_outcome_to_dto(value: TeamRolePrepostOutcome) -> TeamRolePrepostOutcomeDTO:
     return TeamRolePrepostOutcomeDTO.model_validate(value)
+
+
+def team_role_working_dir_outcome_to_dto(value: TeamRoleWorkingDirOutcome) -> TeamRoleWorkingDirOutcomeDTO:
+    return TeamRoleWorkingDirOutcomeDTO.model_validate(value)
+
+
+def team_role_root_dir_outcome_to_dto(value: TeamRoleRootDirOutcome) -> TeamRoleRootDirOutcomeDTO:
+    return TeamRoleRootDirOutcomeDTO.model_validate(value)
 
 
 def qa_question_to_dto(value: QaQuestion) -> QaQuestionDTO:

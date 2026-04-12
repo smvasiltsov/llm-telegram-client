@@ -147,7 +147,44 @@ class LTC80Stage5DispatchBridgeFoundationTests(unittest.TestCase):
         self.assertEqual(len(timed_out), 1)
         final = storage.get_question("q-bridge-3")
         self.assertEqual((final.status if final else None), "timeout")
-        self.assertEqual((final.error_code if final else None), "provider_timeout")
+        self.assertEqual((final.error_code if final else None), "runtime_dispatch_timeout")
+
+    def test_heartbeat_does_not_revive_expired_lease(self) -> None:
+        storage, team_id, team_role_id = self._bootstrap()
+        with storage.transaction(immediate=True):
+            storage.create_question(
+                question_id="q-bridge-hb-expired",
+                thread_id="t-bridge-hb-expired",
+                team_id=team_id,
+                created_by_user_id=100,
+                target_team_role_id=team_role_id,
+                text="hello",
+                status="accepted",
+            )
+            storage.claim_questions_for_dispatch(limit=1, max_attempts=3, now="2026-04-06T00:00:00+00:00")
+            storage.start_question_dispatch_attempt(
+                question_id="q-bridge-hb-expired",
+                lease_ttl_sec=10,
+                max_attempts=3,
+                now="2026-04-06T00:00:00+00:00",
+            )
+        with storage.transaction(immediate=True):
+            alive = storage.heartbeat_question_dispatch_attempt(
+                question_id="q-bridge-hb-expired",
+                lease_ttl_sec=10,
+                now="2026-04-06T00:00:20+00:00",
+            )
+        self.assertFalse(alive)
+
+        sweep = sweep_expired_question_dispatch_leases_result(
+            storage,
+            max_attempts=3,
+            attempt_ttl_sec=10,
+            now="2026-04-06T00:00:20+00:00",
+        )
+        self.assertTrue(sweep.is_ok)
+        item = storage.get_question("q-bridge-hb-expired")
+        self.assertEqual((item.status if item else None), "queued")
 
 
 if __name__ == "__main__":

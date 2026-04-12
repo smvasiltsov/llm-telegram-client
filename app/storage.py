@@ -398,6 +398,8 @@ class Storage:
                 model_override TEXT,
                 user_prompt_suffix TEXT,
                 user_reply_prefix TEXT,
+                working_dir TEXT,
+                root_dir TEXT,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 mode TEXT NOT NULL DEFAULT 'normal',
                 is_active INTEGER NOT NULL DEFAULT 1,
@@ -623,7 +625,177 @@ class Storage:
         self._migrate_provider_user_data_team_role_additive()
         self._migrate_role_runtime_status_additive()
         self._ensure_column("team_roles", "extra_instruction_override", "extra_instruction_override TEXT")
+        self._ensure_column("team_roles", "working_dir", "working_dir TEXT")
+        self._ensure_column("team_roles", "root_dir", "root_dir TEXT")
+        self._migrate_team_role_active_enabled_sync()
+        self._cleanup_orphan_team_roles()
         self._conn.commit()
+
+    def _migrate_team_role_active_enabled_sync(self) -> None:
+        if not self._table_exists("team_roles"):
+            return
+        if not self._table_has_column("team_roles", "enabled"):
+            return
+        if not self._table_has_column("team_roles", "is_active"):
+            return
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET enabled = CASE WHEN is_active = 1 THEN 1 ELSE 0 END
+            WHERE enabled IS NULL OR enabled != is_active
+            """
+        )
+
+    def _cleanup_orphan_team_roles(self) -> None:
+        if not self._table_exists("team_roles") or not self._table_exists("roles"):
+            return
+        cur = self._conn.cursor()
+        row = cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM team_roles tr
+            LEFT JOIN roles r ON r.role_id = tr.role_id
+            WHERE r.role_id IS NULL
+            """
+        ).fetchone()
+        orphan_count = int(row[0] if row is not None else 0)
+        if orphan_count <= 0:
+            return
+
+        if self._table_exists("provider_user_data_team_role"):
+            cur.execute(
+                """
+                DELETE FROM provider_user_data_team_role
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                """
+            )
+        if self._table_exists("provider_user_data_team_role_legacy_blocks"):
+            cur.execute(
+                """
+                DELETE FROM provider_user_data_team_role_legacy_blocks
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                """
+            )
+        if self._table_exists("team_role_runtime_status"):
+            cur.execute(
+                """
+                DELETE FROM team_role_runtime_status
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                """
+            )
+        if self._table_exists("role_lock_group_members"):
+            cur.execute(
+                """
+                DELETE FROM role_lock_group_members
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                """
+            )
+        if self._table_exists("role_prepost_processing"):
+            cur.execute(
+                """
+                DELETE FROM role_prepost_processing
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                   OR (team_id, role_id) IN (
+                    SELECT tr.team_id, tr.role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                )
+                """
+            )
+        if self._table_exists("role_skills_enabled"):
+            cur.execute(
+                """
+                DELETE FROM role_skills_enabled
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                   OR (team_id, role_id) IN (
+                    SELECT tr.team_id, tr.role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                )
+                """
+            )
+        if self._table_exists("user_role_sessions"):
+            cur.execute(
+                """
+                DELETE FROM user_role_sessions
+                WHERE team_role_id IN (
+                    SELECT tr.team_role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                      AND tr.team_role_id IS NOT NULL
+                )
+                   OR (team_id, role_id) IN (
+                    SELECT tr.team_id, tr.role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                )
+                """
+            )
+        if self._table_exists("pending_user_fields"):
+            cur.execute(
+                """
+                DELETE FROM pending_user_fields
+                WHERE (team_id, role_id) IN (
+                    SELECT tr.team_id, tr.role_id
+                    FROM team_roles tr
+                    LEFT JOIN roles r ON r.role_id = tr.role_id
+                    WHERE r.role_id IS NULL
+                )
+                """
+            )
+        cur.execute(
+            """
+            DELETE FROM team_roles
+            WHERE (team_id, role_id) IN (
+                SELECT tr.team_id, tr.role_id
+                FROM team_roles tr
+                LEFT JOIN roles r ON r.role_id = tr.role_id
+                WHERE r.role_id IS NULL
+            )
+            """
+        )
+        self._logger.warning("cleanup_orphan_team_roles removed=%s", orphan_count)
 
     def _migrate_provider_user_data_team_role_additive(self) -> None:
         cur = self._conn.cursor()
@@ -2129,6 +2301,8 @@ class Storage:
             mention_name=role.mention_name,
             is_orchestrator=role.is_orchestrator,
             team_role_id=role.team_role_id,
+            working_dir=role.working_dir,
+            root_dir=role.root_dir,
         )
 
     @staticmethod
@@ -2156,6 +2330,8 @@ class Storage:
             mention_name=mention_name if mention_name is not None else (row["mention_name"] if "mention_name" in row.keys() else None),
             is_orchestrator=(str(row["mode"]).strip().lower() == "orchestrator") if "mode" in row.keys() and row["mode"] is not None else False,
             team_role_id=(int(row["team_role_id"]) if "team_role_id" in row.keys() and row["team_role_id"] is not None else None),
+            working_dir=(str(row["working_dir"]) if "working_dir" in row.keys() and row["working_dir"] is not None else None),
+            root_dir=(str(row["root_dir"]) if "root_dir" in row.keys() and row["root_dir"] is not None else None),
         )
 
     def get_role_by_name(self, role_name: str) -> Role:
@@ -2186,7 +2362,7 @@ class Storage:
         row = cur.fetchone()
         if not row:
             raise ValueError(f"Role not found: {role_id}")
-        return self._apply_catalog_master_fields(self._role_from_row(row))
+        return self._role_from_row(row)
 
     def list_active_roles(self) -> list[Role]:
         cur = self._conn.cursor()
@@ -2241,6 +2417,8 @@ class Storage:
             enabled=bool(row["enabled"]),
             mode=str(row["mode"] or "normal"),
             is_active=bool(row["is_active"]),
+            working_dir=row["working_dir"] if "working_dir" in row.keys() else None,
+            root_dir=row["root_dir"] if "root_dir" in row.keys() else None,
         )
 
     @staticmethod
@@ -2373,7 +2551,7 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, working_dir, root_dir, enabled, mode, is_active
             FROM team_roles
             WHERE team_id = ? AND role_id = ?
             """,
@@ -2390,7 +2568,7 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, working_dir, root_dir, enabled, mode, is_active
             FROM team_roles
             WHERE team_role_id = ?
             LIMIT 1
@@ -2402,17 +2580,30 @@ class Storage:
             raise ValueError(f"Team role not found: team_role_id={team_role_id}")
         return self._row_to_team_role(row)
 
-    def list_team_roles(self, team_id: int) -> list[TeamRole]:
+    def list_team_roles(self, team_id: int, *, include_inactive: bool = False) -> list[TeamRole]:
         cur = self._conn.cursor()
-        cur.execute(
-            """
-            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
-            FROM team_roles
-            WHERE team_id = ? AND is_active = 1
-            ORDER BY role_id
-            """,
-            (team_id,),
-        )
+        if include_inactive:
+            cur.execute(
+                """
+                SELECT tr.team_id, tr.role_id, tr.team_role_id, tr.system_prompt_override, tr.extra_instruction_override, tr.display_name, tr.model_override, tr.user_prompt_suffix, tr.user_reply_prefix, tr.working_dir, tr.root_dir, tr.enabled, tr.mode, tr.is_active
+                FROM team_roles tr
+                JOIN roles r ON r.role_id = tr.role_id
+                WHERE tr.team_id = ?
+                ORDER BY tr.role_id
+                """,
+                (team_id,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT tr.team_id, tr.role_id, tr.team_role_id, tr.system_prompt_override, tr.extra_instruction_override, tr.display_name, tr.model_override, tr.user_prompt_suffix, tr.user_reply_prefix, tr.working_dir, tr.root_dir, tr.enabled, tr.mode, tr.is_active
+                FROM team_roles tr
+                JOIN roles r ON r.role_id = tr.role_id
+                WHERE tr.team_id = ? AND tr.is_active = 1
+                ORDER BY tr.role_id
+                """,
+                (team_id,),
+            )
         rows = cur.fetchall()
         return [self._row_to_team_role(row) for row in rows]
 
@@ -2420,9 +2611,9 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, working_dir, root_dir, enabled, mode, is_active
             FROM team_roles
-            WHERE team_id = ? AND is_active = 1 AND enabled = 1
+            WHERE team_id = ? AND is_active = 1
             ORDER BY role_id
             """,
             (team_id,),
@@ -2434,9 +2625,9 @@ class Storage:
         cur = self._conn.cursor()
         cur.execute(
             """
-            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+            SELECT team_id, role_id, team_role_id, system_prompt_override, extra_instruction_override, display_name, model_override, user_prompt_suffix, user_reply_prefix, working_dir, root_dir, enabled, mode, is_active
             FROM team_roles
-            WHERE team_id = ? AND is_active = 1 AND enabled = 1 AND mode = 'orchestrator'
+            WHERE team_id = ? AND is_active = 1 AND mode = 'orchestrator'
             ORDER BY role_id
             LIMIT 2
             """,
@@ -2457,6 +2648,10 @@ class Storage:
                 SELECT
                     tr.role_id,
                     tr.team_role_id,
+                    tr.working_dir,
+                    tr.root_dir,
+                    tr.system_prompt_override,
+                    tr.extra_instruction_override,
                     COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
                     r.description,
                     r.base_system_prompt,
@@ -2478,6 +2673,10 @@ class Storage:
                 SELECT
                     tr.role_id,
                     tr.team_role_id,
+                    tr.working_dir,
+                    tr.root_dir,
+                    tr.system_prompt_override,
+                    tr.extra_instruction_override,
                     COALESCE(NULLIF(tr.role_name, ''), r.role_name) AS role_name,
                     r.description,
                     r.base_system_prompt,
@@ -2499,7 +2698,13 @@ class Storage:
             raw_name = row["role_name"]
             if raw_name is None or str(raw_name).strip() == "":
                 continue
-            role = self._apply_catalog_master_fields(self._role_from_row(row))
+            role = self._role_from_row(row)
+            system_prompt_override = row["system_prompt_override"] if "system_prompt_override" in row.keys() else None
+            extra_instruction_override = row["extra_instruction_override"] if "extra_instruction_override" in row.keys() else None
+            if system_prompt_override is not None:
+                role.base_system_prompt = str(system_prompt_override)
+            if extra_instruction_override is not None:
+                role.extra_instruction = str(extra_instruction_override)
             role.mention_name = row["mention_name"]
             role.is_active = bool(row["is_active"])
             if include_inactive or role.is_active:
@@ -3430,17 +3635,81 @@ class Storage:
             (user_reply_prefix, team_id, role_id),
         )
 
+    def set_team_role_working_dir(self, team_id: int, role_id: int, working_dir: str | None) -> None:
+        self._require_write_transaction('set_team_role_working_dir')
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET working_dir = ?
+            WHERE team_id = ? AND role_id = ?
+            """,
+            (working_dir, team_id, role_id),
+        )
+
+    def set_team_role_root_dir(self, team_id: int, role_id: int, root_dir: str | None) -> None:
+        self._require_write_transaction('set_team_role_root_dir')
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET root_dir = ?
+            WHERE team_id = ? AND role_id = ?
+            """,
+            (root_dir, team_id, role_id),
+        )
+
+    def set_team_role_working_dir_by_id(self, team_role_id: int, working_dir: str | None) -> None:
+        self._require_write_transaction('set_team_role_working_dir_by_id')
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET working_dir = ?
+            WHERE team_role_id = ?
+            """,
+            (working_dir, team_role_id),
+        )
+
+    def set_team_role_root_dir_by_id(self, team_role_id: int, root_dir: str | None) -> None:
+        self._require_write_transaction('set_team_role_root_dir_by_id')
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE team_roles
+            SET root_dir = ?
+            WHERE team_role_id = ?
+            """,
+            (root_dir, team_role_id),
+        )
+
+    def get_team_role_working_dir(self, team_id: int, role_id: int) -> str | None:
+        return self.get_team_role(team_id, role_id).working_dir
+
+    def get_team_role_root_dir(self, team_id: int, role_id: int) -> str | None:
+        return self.get_team_role(team_id, role_id).root_dir
+
+    def get_team_role_working_dir_by_id(self, team_role_id: int) -> str | None:
+        return self.get_team_role_by_id(team_role_id).working_dir
+
+    def get_team_role_root_dir_by_id(self, team_role_id: int) -> str | None:
+        return self.get_team_role_by_id(team_role_id).root_dir
+
     def set_team_role_enabled(self, team_id: int, role_id: int, enabled: bool) -> None:
         self._require_write_transaction('set_team_role_enabled')
         cur = self._conn.cursor()
         cur.execute(
             """
             UPDATE team_roles
-            SET enabled = ?
+            SET enabled = ?, is_active = ?
             WHERE team_id = ? AND role_id = ?
             """,
-            (1 if enabled else 0, team_id, role_id),
+            (1 if enabled else 0, 1 if enabled else 0, team_id, role_id),
         )
+
+    def set_team_role_active(self, team_id: int, role_id: int, is_active: bool) -> None:
+        # Compatibility: keep enabled synchronized while ON/OFF migrates to is_active semantics.
+        self.set_team_role_enabled(team_id, role_id, is_active)
 
     def set_team_role_mode(self, team_id: int, role_id: int, mode: str) -> None:
         self._require_write_transaction('set_team_role_mode')
@@ -3511,7 +3780,6 @@ class Storage:
             SELECT DISTINCT lower(role_name) AS role_name
             FROM team_roles
             WHERE is_active = 1
-              AND enabled = 1
               AND mode = 'orchestrator'
               AND role_name IS NOT NULL
               AND trim(role_name) <> ''
@@ -5123,6 +5391,36 @@ class Storage:
             return None
         return self.get_question(question_id)
 
+    def heartbeat_question_dispatch_attempt(
+        self,
+        *,
+        question_id: str,
+        lease_ttl_sec: int = 120,
+        now: str | None = None,
+    ) -> bool:
+        self._require_write_transaction('heartbeat_question_dispatch_attempt')
+        ts = str(now or _utc_now())
+        lease_expires_at = _iso_plus_seconds(ts, max(1, int(lease_ttl_sec)))
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE qa_dispatch_bridge_state
+            SET lease_expires_at = ?,
+                updated_at = ?
+            WHERE question_id = ?
+              AND lease_expires_at IS NOT NULL
+              AND lease_expires_at > ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM questions q
+                  WHERE q.question_id = qa_dispatch_bridge_state.question_id
+                    AND q.status = 'in_progress'
+              )
+            """,
+            (lease_expires_at, ts, question_id, ts),
+        )
+        return bool(int(cur.rowcount or 0) > 0)
+
     def persist_question_terminal_outcome(
         self,
         *,
@@ -5242,7 +5540,7 @@ class Storage:
                 item = self.transition_question_status(
                     question_id=question_id,
                     status="timeout",
-                    error_code="provider_timeout",
+                    error_code="runtime_dispatch_timeout",
                     error_message="Execution attempt lease expired",
                 )
                 cur.execute(
@@ -5250,7 +5548,7 @@ class Storage:
                     UPDATE qa_dispatch_bridge_state
                     SET lease_expires_at = NULL,
                         retry_not_before = NULL,
-                        last_error_code = 'provider_timeout',
+                        last_error_code = 'runtime_dispatch_timeout',
                         last_error_message = 'Execution attempt lease expired',
                         updated_at = ?
                     WHERE question_id = ?

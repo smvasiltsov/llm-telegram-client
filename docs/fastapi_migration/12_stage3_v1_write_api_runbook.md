@@ -73,6 +73,24 @@ curl -i -X PUT \
   http://127.0.0.1:8080/api/v1/team-roles/<TEAM_ROLE_ID>/prepost/<PREPOST_ID>
 ```
 
+- PUT role `working_dir`:
+```bash
+curl -i -X PUT \
+  -H 'X-Owner-User-Id: <OWNER_ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"working_dir":"/tmp/work"}' \
+  http://127.0.0.1:8080/api/v1/team-roles/<TEAM_ROLE_ID>/working-dir
+```
+
+- PUT role `root_dir`:
+```bash
+curl -i -X PUT \
+  -H 'X-Owner-User-Id: <OWNER_ID>' \
+  -H 'Content-Type: application/json' \
+  -d '{"root_dir":"/tmp/root"}' \
+  http://127.0.0.1:8080/api/v1/team-roles/<TEAM_ROLE_ID>/root-dir
+```
+
 ## 6. Контрольные ожидания
 - Authz:
   - без owner header -> `401`;
@@ -84,6 +102,9 @@ curl -i -X PUT \
   - `404` not found;
   - `409` conflict;
   - `422` validation/invariant.
+- Для `working_dir` и `root_dir`:
+  - значение должно быть непустой строкой;
+  - путь должен быть абсолютным (`/tmp/...`).
 - Формат ошибки: единый envelope `{"error":{...}}`.
 
 ## 7. Idempotency semantics (операционные правила)

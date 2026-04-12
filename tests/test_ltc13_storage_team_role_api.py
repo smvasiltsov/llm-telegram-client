@@ -120,6 +120,34 @@ class LTC13StorageTeamRoleApiTests(unittest.TestCase):
                 "/legacy",
             )
 
+    def test_team_role_paths_are_stored_on_team_role(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "test.sqlite3"
+            storage = Storage(db_path)
+
+            group = storage.upsert_group(-1120, "g")
+            role = storage.upsert_role(
+                role_name="dev_team_role_paths",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            team_id = int(group.team_id or 0)
+            team_role = storage.ensure_team_role(team_id, role.role_id)
+            team_role_id = int(team_role.team_role_id or 0)
+
+            with storage.transaction(immediate=True):
+                storage.set_team_role_working_dir(team_id, role.role_id, "/abs/work")
+                storage.set_team_role_root_dir_by_id(team_role_id, "/abs/root")
+
+            updated = storage.get_team_role(team_id, role.role_id)
+            self.assertEqual(updated.working_dir, "/abs/work")
+            self.assertEqual(updated.root_dir, "/abs/root")
+            self.assertEqual(storage.get_team_role_working_dir_by_id(team_role_id), "/abs/work")
+            self.assertEqual(storage.get_team_role_root_dir(team_id, role.role_id), "/abs/root")
+
 
 if __name__ == "__main__":
     unittest.main()

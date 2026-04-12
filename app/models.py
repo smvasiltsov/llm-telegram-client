@@ -29,6 +29,8 @@ class Role:
     mention_name: str | None = None
     is_orchestrator: bool = False
     team_role_id: int | None = None
+    working_dir: str | None = None
+    root_dir: str | None = None
     skills: tuple[RoleLinkedItem, ...] = ()
     pre_processing_tools: tuple[RoleLinkedItem, ...] = ()
     post_processing_tools: tuple[RoleLinkedItem, ...] = ()
@@ -94,6 +96,8 @@ class TeamRole:
     enabled: bool
     mode: str
     is_active: bool
+    working_dir: str | None = None
+    root_dir: str | None = None
 
 
 @dataclass

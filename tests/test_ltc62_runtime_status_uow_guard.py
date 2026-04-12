@@ -80,8 +80,10 @@ class _FakeLLMExecutor:
         content: str,
         role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
+        _ = team_role_id
         if not self._responses:
             raise AssertionError("No fake LLM responses left")
         return self._responses.pop(0)

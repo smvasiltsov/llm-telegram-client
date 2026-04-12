@@ -510,6 +510,49 @@ class LTC78Stage5FastApiContractTests(unittest.TestCase):
         self.assertEqual(not_found_role.status_code, 404)
         self.assertEqual(not_found_role.json()["error"]["code"], "qa_not_found")
 
+    def test_post_questions_requires_working_and_root_dirs_for_fs_skills(self) -> None:
+        client = self._client()
+        team_id, role_id = self._team_id_and_role_id(client)
+        team_role_id = int(client.app.state.runtime.storage.resolve_team_role_id(team_id, role_id, ensure_exists=True) or 0)
+        with client.app.state.runtime.storage.transaction(immediate=True):
+            client.app.state.runtime.storage.upsert_role_skill_for_team_role(team_role_id, "fs.read_file", enabled=True, config={})
+
+        missing = client.post(
+            "/api/v1/questions",
+            headers={"X-Owner-User-Id": "700", "Idempotency-Key": "idem-fs-missing"},
+            json={
+                "team_id": team_id,
+                "created_by_user_id": 700,
+                "text": "fs question",
+                "team_role_id": team_role_id,
+                "question_id": "q-fs-missing",
+                "thread_id": "t-fs-missing",
+            },
+        )
+        self.assertEqual(missing.status_code, 422)
+        self.assertEqual(missing.json()["error"]["code"], "validation.invalid_input")
+        self.assertEqual(
+            missing.json()["error"].get("details", {}).get("missing_fields"),
+            ["root_dir"],
+        )
+
+        with client.app.state.runtime.storage.transaction(immediate=True):
+            client.app.state.runtime.storage.set_team_role_working_dir_by_id(team_role_id, "/abs/work")
+            client.app.state.runtime.storage.set_team_role_root_dir_by_id(team_role_id, "/abs/root")
+        ok = client.post(
+            "/api/v1/questions",
+            headers={"X-Owner-User-Id": "700", "Idempotency-Key": "idem-fs-ok"},
+            json={
+                "team_id": team_id,
+                "created_by_user_id": 700,
+                "text": "fs question",
+                "team_role_id": team_role_id,
+                "question_id": "q-fs-ok",
+                "thread_id": "t-fs-ok",
+            },
+        )
+        self.assertEqual(ok.status_code, 202)
+
 
 if __name__ == "__main__":
     unittest.main()

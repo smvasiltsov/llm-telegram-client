@@ -52,8 +52,8 @@ class LTC12RuntimeJsonSwitchTests(unittest.TestCase):
 
             from_team = storage.list_roles_for_group(group.group_id)
             self.assertEqual(len(from_team), 1)
-            self.assertEqual(from_team[0].description, "catalog desc")
-            self.assertEqual(from_team[0].base_system_prompt, "catalog prompt")
+            self.assertEqual(from_team[0].description, "db desc")
+            self.assertEqual(from_team[0].base_system_prompt, "db prompt")
 
 
 if __name__ == "__main__":

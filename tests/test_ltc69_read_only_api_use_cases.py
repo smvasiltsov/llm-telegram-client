@@ -43,10 +43,18 @@ class LTC69ReadOnlyApiUseCasesTests(unittest.TestCase):
 
     def test_list_team_roles_result_returns_roles_for_team(self) -> None:
         storage, team_id, _ = self._bootstrap()
+        with storage.transaction(immediate=True):
+            role = storage.get_role_by_name("dev")
+            storage.set_team_role_working_dir(team_id, role.role_id, "/abs/work")
+            storage.set_team_role_root_dir(team_id, role.role_id, "/abs/root")
         result = list_team_roles_result(storage, team_id=team_id)
         self.assertTrue(result.is_ok)
-        role_names = [role.role_name for role in (result.value or [])]
+        roles = list(result.value or [])
+        role_names = [role.role_name for role in roles]
         self.assertIn("dev", role_names)
+        dev = next(role for role in roles if role.role_name == "dev")
+        self.assertEqual(dev.working_dir, "/abs/work")
+        self.assertEqual(dev.root_dir, "/abs/root")
 
     def test_list_team_roles_result_includes_orchestrator_flag(self) -> None:
         storage, team_id, _ = self._bootstrap()

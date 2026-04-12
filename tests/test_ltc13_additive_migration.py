@@ -63,6 +63,94 @@ class LTC13AdditiveMigrationTests(unittest.TestCase):
                 self.assertIsNotNone(auto_assigned)
                 self.assertGreater(int(auto_assigned["team_role_id"]), team_role_id)
 
+    def test_stage1_syncs_enabled_with_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "legacy_team_sync.sqlite3"
+            self._create_legacy_team_schema_without_team_role_id(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    """
+                    UPDATE team_roles
+                    SET enabled = 0, is_active = 1
+                    WHERE team_id = 10 AND role_id = 1
+                    """
+                )
+                conn.commit()
+
+            _ = Storage(str(db_path))
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT enabled, is_active FROM team_roles WHERE team_id = 10 AND role_id = 1"
+                ).fetchone()
+                self.assertIsNotNone(row)
+                self.assertEqual(int(row["is_active"]), 1)
+                self.assertEqual(int(row["enabled"]), 1)
+
+    def test_stage1_cleans_up_orphan_team_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "legacy_team_orphan.sqlite3"
+            self._create_legacy_team_schema_without_team_role_id(db_path)
+            with sqlite3.connect(db_path) as conn:
+                conn.executescript(
+                    """
+                    INSERT INTO team_roles (
+                        team_id, role_id, system_prompt_override, display_name, model_override,
+                        user_prompt_suffix, user_reply_prefix, enabled, mode, is_active
+                    )
+                    VALUES (10, 999, NULL, 'ghost', NULL, NULL, NULL, 0, 'normal', 0);
+
+                    INSERT INTO user_role_sessions (
+                        telegram_user_id, team_id, role_id, session_id, created_at, last_used_at
+                    )
+                    VALUES (42, 10, 999, 'sess-ghost', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+
+                    INSERT INTO role_prepost_processing (
+                        team_id, role_id, prepost_processing_id, enabled, config_json, created_at, updated_at
+                    )
+                    VALUES (10, 999, 'ghost.pre', 1, NULL, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+
+                    INSERT INTO role_skills_enabled (
+                        team_id, role_id, skill_id, enabled, config_json, created_at, updated_at
+                    )
+                    VALUES (10, 999, 'ghost.skill', 1, NULL, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00');
+                    """
+                )
+                conn.commit()
+
+            _ = Storage(str(db_path))
+
+            with sqlite3.connect(db_path) as conn:
+                orphan_count = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM team_roles tr
+                        LEFT JOIN roles r ON r.role_id = tr.role_id
+                        WHERE r.role_id IS NULL
+                        """
+                    ).fetchone()[0]
+                )
+                self.assertEqual(orphan_count, 0)
+                ghost_sessions = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM user_role_sessions WHERE team_id = 10 AND role_id = 999"
+                    ).fetchone()[0]
+                )
+                self.assertEqual(ghost_sessions, 0)
+                ghost_prepost = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM role_prepost_processing WHERE team_id = 10 AND role_id = 999"
+                    ).fetchone()[0]
+                )
+                self.assertEqual(ghost_prepost, 0)
+                ghost_skills = int(
+                    conn.execute(
+                        "SELECT COUNT(*) FROM role_skills_enabled WHERE team_id = 10 AND role_id = 999"
+                    ).fetchone()[0]
+                )
+                self.assertEqual(ghost_skills, 0)
+
     @staticmethod
     def _create_legacy_team_schema_without_team_role_id(db_path: Path) -> None:
         with sqlite3.connect(db_path) as conn:

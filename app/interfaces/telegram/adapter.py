@@ -28,6 +28,7 @@ from app.handlers.membership import (
 )
 from app.handlers.messages_group import handle_group_buffered as msg_handle_group_buffered
 from app.handlers.messages_private import handle_private_message as msg_handle_private_message
+from app.interfaces.telegram_runtime_client import build_runtime_client
 from app.runtime import RuntimeContext
 from app.services.group_reconcile import (
     apply_reconcile_active_groups_writes,
@@ -91,6 +92,9 @@ def register_handlers(
 def build_telegram_application(token: str, runtime: RuntimeContext) -> Application:
     application = ApplicationBuilder().token(token).build()
     application.bot_data.update(runtime.to_bot_data())
+    application.bot_data["runtime_client"] = build_runtime_client(
+        thin_enabled=bool(getattr(runtime, "telegram_thin_client_enabled", True))
+    )
     register_handlers(
         application,
         tools_bash_enabled=_resolve_tools_bash_enabled(runtime),

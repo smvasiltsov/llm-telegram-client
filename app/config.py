@@ -75,6 +75,9 @@ class AppConfig:
     interface_runtime_mode: str
     dispatch_mode: str
     dispatch_is_runner: bool
+    telegram_thin_client_enabled: bool
+    telegram_api_base_url: str
+    telegram_api_timeout_sec: int
     free_transition_delay_sec: int
     skills_to_llm_delay_sec: int
 
@@ -142,6 +145,10 @@ def load_config(path: str | Path) -> AppConfig:
     dispatch_is_runner = bool(dispatch_raw.get("is_runner", DEFAULT_DISPATCH_IS_RUNNER))
     if dispatch_mode == "single-instance":
         dispatch_is_runner = True
+    telegram_interface_raw = interface_raw.get("telegram", {}) or {}
+    telegram_thin_client_enabled = bool(telegram_interface_raw.get("thin_client_enabled", True))
+    telegram_api_base_url = str(telegram_interface_raw.get("api_base_url", "http://127.0.0.1:8080")).strip() or "http://127.0.0.1:8080"
+    telegram_api_timeout_sec = max(1, int(telegram_interface_raw.get("api_timeout_sec", 30)))
 
     return AppConfig(
         telegram_bot_token=raw["telegram_bot_token"],
@@ -180,6 +187,9 @@ def load_config(path: str | Path) -> AppConfig:
         interface_runtime_mode=interface_runtime_mode,
         dispatch_mode=dispatch_mode,
         dispatch_is_runner=dispatch_is_runner,
+        telegram_thin_client_enabled=telegram_thin_client_enabled,
+        telegram_api_base_url=telegram_api_base_url,
+        telegram_api_timeout_sec=telegram_api_timeout_sec,
         free_transition_delay_sec=max(0, int(runtime_status_raw.get("free_transition_delay_sec", DEFAULT_FREE_TRANSITION_DELAY_SEC))),
         skills_to_llm_delay_sec=max(0, int(runtime_status_raw.get("skills_to_llm_delay_sec", DEFAULT_SKILLS_TO_LLM_DELAY_SEC))),
     )

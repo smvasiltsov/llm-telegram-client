@@ -7,6 +7,7 @@ from typing import Any, Generic, Literal, TypeVar
 from uuid import uuid4
 
 from app.application.contracts import ErrorCode, Result
+from app.services.prompt_builder import provider_id_from_model, resolve_provider_model
 from app.models import QaAnswer, QaOrchestratorFeedItem, QaQuestion
 from app.storage import QA_STATUSES, Storage
 from app.utils import extract_role_mentions
@@ -103,6 +104,10 @@ def create_question_result(
     *,
     request: QaCreateQuestionRequest,
     idempotency_key: str,
+    provider_registry: dict[str, Any] | None = None,
+    provider_models: list[Any] | None = None,
+    provider_model_map: dict[str, Any] | None = None,
+    default_provider_id: str | None = None,
     scope: str = "qa.create_question",
 ) -> Result[QaCreateQuestionOutcome]:
     key = str(idempotency_key or "").strip()
@@ -155,6 +160,16 @@ def create_question_result(
                 "Unable to resolve target team role",
                 details={"entity": "question", "cause": "routing_target_missing"},
             )
+        required_fields_error = _validate_required_team_role_fields_for_question(
+            storage,
+            team_role_id=int(target_team_role_id),
+            provider_registry=dict(provider_registry or {}),
+            provider_models=list(provider_models or []),
+            provider_model_map=dict(provider_model_map or {}),
+            default_provider_id=str(default_provider_id or ""),
+        )
+        if required_fields_error is not None:
+            return required_fields_error
 
         with storage.transaction(immediate=True):
             created = storage.create_question(
@@ -608,6 +623,82 @@ def _resolve_target_team_role_id(
             details={"entity": "team_role", "cause": "not_found_by_tag", "tag": mentions[0]},
         )
     return Result.ok(int(team_role_id))
+
+
+def _validate_required_team_role_fields_for_question(
+    storage: Storage,
+    *,
+    team_role_id: int,
+    provider_registry: dict[str, Any],
+    provider_models: list[Any],
+    provider_model_map: dict[str, Any],
+    default_provider_id: str,
+) -> Result[QaCreateQuestionOutcome] | None:
+    enabled_skills = storage.list_role_skills_for_team_role(int(team_role_id), enabled_only=True)
+    requires_root_dir = any(str(item.skill_id or "").startswith("fs.") for item in enabled_skills)
+    requires_working_dir = _team_role_requires_working_dir(
+        storage,
+        team_role_id=int(team_role_id),
+        provider_registry=provider_registry,
+        provider_models=provider_models,
+        provider_model_map=provider_model_map,
+        default_provider_id=default_provider_id,
+    )
+    missing_fields: list[str] = []
+    if requires_working_dir and not str(storage.get_team_role_working_dir_by_id(int(team_role_id)) or "").strip():
+        missing_fields.append("working_dir")
+    if requires_root_dir and not str(storage.get_team_role_root_dir_by_id(int(team_role_id)) or "").strip():
+        missing_fields.append("root_dir")
+    if not missing_fields:
+        return None
+    fields_csv = ", ".join(missing_fields)
+    return Result.fail(
+        ErrorCode.VALIDATION_INVALID_INPUT,
+        f"Missing required team role fields: {fields_csv}. Please set them before creating a question.",
+        details={
+            "entity": "question",
+            "cause": "missing_required_team_role_fields",
+            "team_role_id": int(team_role_id),
+            "missing_fields": list(missing_fields),
+        },
+    )
+
+
+def _team_role_requires_working_dir(
+    storage: Storage,
+    *,
+    team_role_id: int,
+    provider_registry: dict[str, Any],
+    provider_models: list[Any],
+    provider_model_map: dict[str, Any],
+    default_provider_id: str,
+) -> bool:
+    if not provider_registry:
+        return False
+    identity = storage.resolve_team_role_identity(int(team_role_id))
+    if identity is None:
+        return False
+    team_id, role_id = identity
+    role = storage.get_role_by_id(int(role_id))
+    team_role = storage.get_team_role(int(team_id), int(role_id))
+    selected_model = team_role.model_override or role.llm_model
+    model_override = selected_model
+    if provider_models:
+        try:
+            model_override = resolve_provider_model(
+                provider_models,
+                provider_model_map,
+                provider_registry,
+                selected_model,
+            )
+        except Exception:
+            model_override = selected_model
+    effective_default_provider_id = str(default_provider_id or next(iter(provider_registry.keys()), ""))
+    provider_id = provider_id_from_model(model_override, effective_default_provider_id, provider_registry)
+    provider = provider_registry.get(provider_id)
+    if provider is None:
+        return False
+    return bool((getattr(provider, "user_fields", {}) or {}).get("working_dir"))
 
 
 __all__ = [

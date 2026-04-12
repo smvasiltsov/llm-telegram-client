@@ -19,25 +19,43 @@ if "httpx" not in sys.modules:
     httpx_module.HTTPStatusError = _HTTPStatusError
     sys.modules["httpx"] = httpx_module
 
-if "telegram" not in sys.modules:
+telegram_module = sys.modules.get("telegram")
+if telegram_module is None:
     telegram_module = types.ModuleType("telegram")
-    telegram_ext_module = types.ModuleType("telegram.ext")
-    telegram_constants_module = types.ModuleType("telegram.constants")
-    telegram_error_module = types.ModuleType("telegram.error")
-    class _BadRequest(Exception):
-        pass
-    telegram_module.InlineKeyboardButton = object
-    telegram_module.InlineKeyboardMarkup = object
-    telegram_module.WebAppInfo = object
-    telegram_module.Update = object
-    telegram_ext_module.ContextTypes = SimpleNamespace(DEFAULT_TYPE=object)
-    telegram_constants_module.ParseMode = SimpleNamespace(HTML="HTML", MARKDOWN="MARKDOWN")
-    telegram_error_module.BadRequest = _BadRequest
-    telegram_module.ext = telegram_ext_module
     sys.modules["telegram"] = telegram_module
+telegram_ext_module = sys.modules.get("telegram.ext")
+if telegram_ext_module is None:
+    telegram_ext_module = types.ModuleType("telegram.ext")
     sys.modules["telegram.ext"] = telegram_ext_module
+telegram_constants_module = sys.modules.get("telegram.constants")
+if telegram_constants_module is None:
+    telegram_constants_module = types.ModuleType("telegram.constants")
     sys.modules["telegram.constants"] = telegram_constants_module
+telegram_error_module = sys.modules.get("telegram.error")
+if telegram_error_module is None:
+    telegram_error_module = types.ModuleType("telegram.error")
     sys.modules["telegram.error"] = telegram_error_module
+
+
+class _BadRequest(Exception):
+    pass
+
+
+if not hasattr(telegram_module, "InlineKeyboardButton"):
+    telegram_module.InlineKeyboardButton = object
+if not hasattr(telegram_module, "InlineKeyboardMarkup"):
+    telegram_module.InlineKeyboardMarkup = object
+if not hasattr(telegram_module, "WebAppInfo"):
+    telegram_module.WebAppInfo = object
+if not hasattr(telegram_module, "Update"):
+    telegram_module.Update = object
+if not hasattr(telegram_ext_module, "ContextTypes"):
+    telegram_ext_module.ContextTypes = SimpleNamespace(DEFAULT_TYPE=object)
+if not hasattr(telegram_constants_module, "ParseMode"):
+    telegram_constants_module.ParseMode = SimpleNamespace(HTML="HTML", MARKDOWN="MARKDOWN")
+if not hasattr(telegram_error_module, "BadRequest"):
+    telegram_error_module.BadRequest = _BadRequest
+telegram_module.ext = telegram_ext_module
 
 from app.handlers.messages_common import _handle_missing_user_field
 from app.handlers.messages_private import handle_private_message
@@ -216,6 +234,302 @@ class RootDirPendingFlowTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(bot.sent), 2)
             self.assertTrue(any("Введите root_dir" in text for _, text in bot.sent))
             self.assertTrue(any("нескольких попыток" in text for text in update3.message.replies))
+
+    async def test_private_working_dir_in_thin_mode_saves_via_api_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "test.sqlite3"
+            storage = Storage(db_path)
+            group = storage.upsert_group(-1002, "g")
+            role = storage.upsert_role(
+                role_name="thin_role",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            team_id = int(group.team_id or 0)
+            team_role_id = int(storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True) or 0)
+            pending = PendingStore(db_path)
+            pending_fields = PendingUserFieldStore(db_path)
+            pending.save(
+                telegram_user_id=42,
+                chat_id=group.group_id,
+                team_id=team_id,
+                message_id=55,
+                role_name=role.public_name(),
+                content="continue",
+                reply_text=None,
+            )
+            pending_fields.save(
+                telegram_user_id=42,
+                provider_id="codex-api",
+                key="working_dir",
+                role_id=role.role_id,
+                prompt="Введите working_dir",
+                chat_id=group.group_id,
+                team_id=team_id,
+            )
+            bot = _FakeBot()
+            catalog_dir = Path(td) / "roles_catalog"
+            catalog_dir.mkdir(parents=True, exist_ok=True)
+            runtime = SimpleNamespace(
+                storage=storage,
+                role_catalog=RoleCatalog.load(catalog_dir),
+                pending_store=pending,
+                pending_user_fields=pending_fields,
+                pending_prompts={},
+                pending_role_ops={},
+                pending_bash_auth={},
+                tools_bash_password="",
+                tool_service=None,
+                bash_cwd_by_user={},
+                private_buffer=None,
+                auth_service=None,
+                pending_replay_attempts={},
+                telegram_thin_client_enabled=True,
+                telegram_api_base_url="http://127.0.0.1:8080",
+                telegram_api_timeout_sec=5,
+                owner_user_id=700,
+            )
+            context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=bot)
+            api_calls: list[tuple[str, dict[str, object]]] = []
+
+            class _Resp:
+                def __init__(self, status_code: int, text: str = "") -> None:
+                    self.status_code = status_code
+                    self.text = text
+
+            class _FakeClient:
+                def __init__(self, *args, **kwargs) -> None:
+                    _ = (args, kwargs)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    _ = (exc_type, exc, tb)
+                    return False
+
+                async def put(self, endpoint: str, headers=None, json=None):
+                    _ = headers
+                    api_calls.append((endpoint, dict(json or {})))
+                    return _Resp(200)
+
+            async def _fake_replay(_user_id: int, _context: object) -> bool:
+                return True
+
+            with (
+                patch("app.handlers.messages_private.httpx.AsyncClient", _FakeClient, create=True),
+                patch("app.handlers.messages_private._process_pending_message_for_user", _fake_replay),
+                patch("app.handlers.messages_private._set_provider_user_field_from_pending_state", side_effect=AssertionError("must use api")),
+            ):
+                update = _FakeUpdate(42, "/tmp/work")
+                await handle_private_message(update, context)  # type: ignore[arg-type]
+
+            self.assertTrue(api_calls)
+            self.assertEqual(
+                api_calls[0],
+                (f"/api/v1/team-roles/{team_role_id}/working-dir", {"working_dir": "/tmp/work"}),
+            )
+
+    async def test_thin_replay_failure_does_not_reask_root_dir_without_missing_field(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "test.sqlite3"
+            storage = Storage(db_path)
+            group = storage.upsert_group(-1004, "g")
+            role = storage.upsert_role(
+                role_name="fs_role",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            team_id = int(group.team_id or 0)
+            team_role_id = int(storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True) or 0)
+            pending = PendingStore(db_path)
+            pending_fields = PendingUserFieldStore(db_path)
+            pending.save(
+                telegram_user_id=61,
+                chat_id=group.group_id,
+                team_id=team_id,
+                message_id=88,
+                role_name=role.public_name(),
+                content="continue",
+                reply_text=None,
+            )
+            pending_fields.save(
+                telegram_user_id=61,
+                provider_id="skills",
+                key="root_dir",
+                role_id=role.role_id,
+                prompt="Введите root_dir",
+                chat_id=group.group_id,
+                team_id=team_id,
+            )
+            bot = _FakeBot()
+            catalog_dir = Path(td) / "roles_catalog"
+            catalog_dir.mkdir(parents=True, exist_ok=True)
+            runtime = SimpleNamespace(
+                storage=storage,
+                role_catalog=RoleCatalog.load(catalog_dir),
+                pending_store=pending,
+                pending_user_fields=pending_fields,
+                pending_prompts={},
+                pending_role_ops={},
+                pending_bash_auth={},
+                tools_bash_password="",
+                tool_service=None,
+                bash_cwd_by_user={},
+                private_buffer=None,
+                auth_service=None,
+                pending_replay_attempts={},
+                telegram_thin_client_enabled=True,
+                telegram_api_base_url="http://127.0.0.1:8080",
+                telegram_api_timeout_sec=5,
+                owner_user_id=700,
+            )
+            context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=bot)
+
+            class _Resp:
+                def __init__(self, status_code: int, text: str = "") -> None:
+                    self.status_code = status_code
+                    self.text = text
+
+            class _FakeClient:
+                def __init__(self, *args, **kwargs) -> None:
+                    _ = (args, kwargs)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    _ = (exc_type, exc, tb)
+                    return False
+
+                async def put(self, endpoint: str, headers=None, json=None):
+                    _ = (endpoint, headers, json)
+                    return _Resp(200)
+
+            async def _fake_replay(_user_id: int, _context: object) -> bool:
+                return False
+
+            with (
+                patch("app.handlers.messages_private.httpx.AsyncClient", _FakeClient, create=True),
+                patch("app.handlers.messages_private._process_pending_message_for_user", _fake_replay),
+            ):
+                update = _FakeUpdate(61, "/tmp/root")
+                await handle_private_message(update, context)  # type: ignore[arg-type]
+
+            self.assertIsNone(pending.peek_record(61))
+            self.assertIsNone(pending_fields.get(61))
+            self.assertFalse(any("Введите root_dir" in text for _, text in bot.sent))
+            self.assertTrue(any("Не удалось автоматически продолжить запрос" in text for text in update.message.replies))
+
+    async def test_private_root_dir_in_thin_mode_saves_via_api_endpoint_and_replays(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db_path = Path(td) / "test.sqlite3"
+            storage = Storage(db_path)
+            group = storage.upsert_group(-1003, "g")
+            role = storage.upsert_role(
+                role_name="fs_role",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            team_id = int(group.team_id or 0)
+            team_role_id = int(storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True) or 0)
+            pending = PendingStore(db_path)
+            pending_fields = PendingUserFieldStore(db_path)
+            pending.save(
+                telegram_user_id=51,
+                chat_id=group.group_id,
+                team_id=team_id,
+                message_id=77,
+                role_name=role.public_name(),
+                content="continue",
+                reply_text=None,
+            )
+            pending_fields.save(
+                telegram_user_id=51,
+                provider_id="skills",
+                key="root_dir",
+                role_id=role.role_id,
+                prompt="Введите root_dir",
+                chat_id=group.group_id,
+                team_id=team_id,
+            )
+            bot = _FakeBot()
+            catalog_dir = Path(td) / "roles_catalog"
+            catalog_dir.mkdir(parents=True, exist_ok=True)
+            runtime = SimpleNamespace(
+                storage=storage,
+                role_catalog=RoleCatalog.load(catalog_dir),
+                pending_store=pending,
+                pending_user_fields=pending_fields,
+                pending_prompts={},
+                pending_role_ops={},
+                pending_bash_auth={},
+                tools_bash_password="",
+                tool_service=None,
+                bash_cwd_by_user={},
+                private_buffer=None,
+                auth_service=None,
+                pending_replay_attempts={},
+                telegram_thin_client_enabled=True,
+                telegram_api_base_url="http://127.0.0.1:8080",
+                telegram_api_timeout_sec=5,
+                owner_user_id=700,
+            )
+            context = SimpleNamespace(application=SimpleNamespace(bot_data={"runtime": runtime}), bot=bot)
+            api_calls: list[tuple[str, dict[str, object]]] = []
+            replay_calls: list[int] = []
+
+            class _Resp:
+                def __init__(self, status_code: int, text: str = "") -> None:
+                    self.status_code = status_code
+                    self.text = text
+
+            class _FakeClient:
+                def __init__(self, *args, **kwargs) -> None:
+                    _ = (args, kwargs)
+
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, exc_type, exc, tb):
+                    _ = (exc_type, exc, tb)
+                    return False
+
+                async def put(self, endpoint: str, headers=None, json=None):
+                    _ = headers
+                    api_calls.append((endpoint, dict(json or {})))
+                    return _Resp(200)
+
+            async def _fake_replay(user_id: int, _context: object) -> bool:
+                replay_calls.append(user_id)
+                return True
+
+            with (
+                patch("app.handlers.messages_private.httpx.AsyncClient", _FakeClient, create=True),
+                patch("app.handlers.messages_private._process_pending_message_for_user", _fake_replay),
+                patch("app.handlers.messages_private._set_provider_user_field_from_pending_state", side_effect=AssertionError("must use api")),
+            ):
+                update = _FakeUpdate(51, "/tmp/root")
+                await handle_private_message(update, context)  # type: ignore[arg-type]
+
+            self.assertTrue(api_calls)
+            self.assertEqual(
+                api_calls[0],
+                (f"/api/v1/team-roles/{team_role_id}/root-dir", {"root_dir": "/tmp/root"}),
+            )
+            self.assertEqual(replay_calls, [51])
 
     async def test_role_scoped_replay_repeat_budget_keeps_value_for_non_root_field(self) -> None:
         with tempfile.TemporaryDirectory() as td:

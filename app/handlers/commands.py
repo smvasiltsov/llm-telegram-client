@@ -118,7 +118,7 @@ async def handle_group_roles(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except ValueError:
         await update.message.reply_text("group_id должен быть числом.")
         return
-    view_result = build_team_roles_view(storage=runtime.storage, group_id=group_id)
+    view_result = build_team_roles_view(storage=runtime.storage, group_id=group_id, include_inactive=True)
     if view_result.is_error or view_result.value is None:
         app_error = view_result.error
         if app_error is None:

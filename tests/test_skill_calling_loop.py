@@ -68,8 +68,10 @@ class FakeLLMExecutor:
         content: str,
         role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
+        _ = team_role_id
         self.contents.append(content)
         if not self._responses:
             raise AssertionError("No fake LLM responses left")
@@ -283,7 +285,12 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             )
             storage.ensure_group_role(group.group_id, role.role_id)
             storage.upsert_role_skill(group.group_id, role.role_id, "fs.list_dir", enabled=True, config={})
-            storage.set_provider_user_value("provider", "working_dir", role.role_id, str(root))
+            team_id = int(group.team_id or 0)
+            team_role_id_raw = storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
+            if team_role_id_raw is None:
+                raise AssertionError("team_role_id missing")
+            team_role_id = int(team_role_id_raw)
+            storage.set_team_role_working_dir_by_id(team_role_id, str(root))
 
             registry = SkillRegistry()
             registry.register(FSListDirSkill())
@@ -330,7 +337,7 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             )
 
             result = await loop.run(
-                team_id=group.team_id,
+                team_id=team_id,
                 user_id=42,
                 role=role,
                 session_token="token",

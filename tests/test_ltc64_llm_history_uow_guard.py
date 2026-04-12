@@ -92,14 +92,17 @@ class _ProxyLLMExecutor:
         content: str,
         role,
         model_override: str | None = None,
+        team_role_id: int | None = None,
         retries: int = 2,
     ) -> str:
+        _ = team_role_id
         return await self._router.send_message(
             session_id=session_id,
             session_token=session_token,
             content=content,
             model_override=model_override or self._role_model,
             role_id=role.role_id,
+            team_role_id=team_role_id,
         )
 
     def provider_id_for_model(self, model_override: str | None) -> str:

@@ -24,7 +24,10 @@ class LTC75Stage4RuntimeHardeningTests(unittest.TestCase):
                     is_active=True,
                 )
                 team_id = int(group.team_id or 0)
-                storage.bind_master_role_to_team(team_id, role.role_id)
+                team_role, _ = storage.bind_master_role_to_team(team_id, role.role_id)
+                if team_role.team_role_id is None:
+                    raise AssertionError("team_role_id missing")
+                team_role_id = int(team_role.team_role_id)
                 original = storage.get_team_role(team_id, role.role_id)
 
             def _boom(*args, **kwargs):  # noqa: ANN002, ANN003
@@ -34,8 +37,7 @@ class LTC75Stage4RuntimeHardeningTests(unittest.TestCase):
             with patch.object(storage, "set_team_role_model", side_effect=_boom):
                 failed = patch_team_role_result(
                     storage,
-                    team_id=team_id,
-                    role_id=role.role_id,
+                    team_role_id=team_role_id,
                     patch=TeamRolePatchRequest(display_name="TempName", model_override="provider:model"),
                 )
             self.assertTrue(failed.is_error)
@@ -46,8 +48,7 @@ class LTC75Stage4RuntimeHardeningTests(unittest.TestCase):
 
             recovered = patch_team_role_result(
                 storage,
-                team_id=team_id,
-                role_id=role.role_id,
+                team_role_id=team_role_id,
                 patch=TeamRolePatchRequest(display_name="RecoveredName"),
             )
             self.assertTrue(recovered.is_ok)

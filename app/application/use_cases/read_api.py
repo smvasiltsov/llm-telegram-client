@@ -94,6 +94,8 @@ def list_team_roles_result(
                     mention_name=role.mention_name,
                     is_orchestrator=role.is_orchestrator,
                     team_role_id=role.team_role_id,
+                    working_dir=role.working_dir,
+                    root_dir=role.root_dir,
                     skills=tuple(skills),
                     pre_processing_tools=tuple(prepost),
                     post_processing_tools=tuple(prepost),

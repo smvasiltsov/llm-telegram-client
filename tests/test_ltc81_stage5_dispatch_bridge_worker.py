@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 from app.interfaces.api.qa_dispatch_bridge_worker import (
     BridgeExecutionResult,
+    QaPostAnswerDispatchItem,
+    QaPostAnswerDispatchPlan,
     QaDispatchBridgeWorker,
     _map_execution_failure,
     _resolve_execution_auth_token,
@@ -254,10 +256,49 @@ class LTC81Stage5DispatchBridgeWorkerTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertGreaterEqual(len(retry_metrics), 1)
 
+    async def test_long_running_execution_keeps_lease_alive_and_does_not_expire(self) -> None:
+        with self.storage.transaction(immediate=True):
+            self.storage.create_question(
+                question_id="q-worker-long-lease",
+                thread_id="t-worker-long-lease",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="long run",
+                status="accepted",
+            )
+
+        async def _executor(_runtime, _question, _correlation_id):
+            await asyncio.sleep(1.6)
+            return BridgeExecutionResult(
+                answer_text="long-ok",
+                role_name="dev",
+                answer_team_role_id=self.team_role_id,
+                append_orchestrator_feed=False,
+            )
+
+        worker = QaDispatchBridgeWorker(
+            runtime=SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort()),
+            execute_question_fn=_executor,
+            sweep_interval_sec=0.05,
+            max_parallelism=1,
+            claim_batch_size=10,
+            lease_ttl_sec=1,
+            max_attempts=3,
+            retry_delay_sec=0,
+        )
+        await worker.start()
+        self.addAsyncCleanup(worker.stop)
+
+        worker.enqueue_question("q-worker-long-lease")
+        await self._wait_for_status("q-worker-long-lease", "answered", timeout_sec=6.0)
+        self.assertEqual(self.storage.get_qa_dispatch_attempt_count("q-worker-long-lease"), 1)
+
     def test_map_execution_failure_codes(self) -> None:
         self.assertEqual(_map_execution_failure(RuntimeError("dispatch_rejected:no_token"))[0], "dispatch_rejected")
         self.assertEqual(_map_execution_failure(RuntimeError("runtime_busy_conflict"))[0], "runtime_busy_conflict")
         self.assertEqual(_map_execution_failure(asyncio.TimeoutError())[0], "provider_timeout")
+        self.assertEqual(_map_execution_failure(RuntimeError("Execution attempt lease expired"))[0], "runtime_dispatch_timeout")
         self.assertEqual(_map_execution_failure(RuntimeError("provider http 500"))[0], "provider_error")
         self.assertEqual(_map_execution_failure(RuntimeError("unexpected boom"))[0], "internal_execution_error")
 
@@ -370,6 +411,347 @@ class LTC81Stage5DispatchBridgeWorkerTests(unittest.IsolatedAsyncioTestCase):
                 correlation_id="corr-failsafe",
             )
         )
+
+    def test_build_post_answer_dispatch_plan_includes_tagged_role(self) -> None:
+        with self.storage.transaction(immediate=True):
+            worker_role = self.storage.upsert_role(
+                role_name="worker2",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            self.storage.ensure_team_role(self.team_id, worker_role.role_id)
+            question = self.storage.create_question(
+                question_id="q-plan-mention",
+                thread_id="t-plan",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="ask",
+                status="in_progress",
+                origin_type="user",
+            )
+            self.storage.create_answer(
+                answer_id="a-plan-mention",
+                question_id=question.question_id,
+                thread_id=question.thread_id,
+                team_id=question.team_id,
+                team_role_id=self.team_role_id,
+                role_name="dev",
+                text="call @worker2",
+            )
+
+        worker = QaDispatchBridgeWorker(
+            runtime=SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort()),
+            execute_question_fn=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+        plan = worker._build_post_answer_dispatch_plan(
+            question=question,
+            answer_id="a-plan-mention",
+            answer_text="call @worker2",
+        )
+        mention_items = [item for item in plan.items if item.reason == "mention_tag"]
+        self.assertEqual(len(mention_items), 1)
+        self.assertNotEqual(int(mention_items[0].target_team_role_id), int(self.team_role_id))
+
+    def test_build_post_answer_dispatch_plan_includes_orchestrator_events_for_direct_request(self) -> None:
+        with self.storage.transaction(immediate=True):
+            orch_role = self.storage.upsert_role(
+                role_name="orch",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            self.storage.ensure_team_role(self.team_id, orch_role.role_id)
+            self.storage.set_team_role_mode(self.team_id, orch_role.role_id, "orchestrator")
+            orch_team_role_id = int(self.storage.resolve_team_role_id(self.team_id, orch_role.role_id, ensure_exists=True) or 0)
+            question = self.storage.create_question(
+                question_id="q-plan-orch",
+                thread_id="t-plan-orch",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="user to dev",
+                status="in_progress",
+                origin_type="user",
+            )
+            self.storage.create_answer(
+                answer_id="a-plan-orch",
+                question_id=question.question_id,
+                thread_id=question.thread_id,
+                team_id=question.team_id,
+                team_role_id=self.team_role_id,
+                role_name="dev",
+                text="role answer",
+            )
+
+        worker = QaDispatchBridgeWorker(
+            runtime=SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort()),
+            execute_question_fn=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+        plan = worker._build_post_answer_dispatch_plan(
+            question=question,
+            answer_id="a-plan-orch",
+            answer_text="role answer",
+        )
+        reasons = [item.reason for item in plan.items]
+        self.assertIn("orchestrator_user_event", reasons)
+        self.assertIn("orchestrator_answer_event", reasons)
+        for item in plan.items:
+            if item.reason.startswith("orchestrator_"):
+                self.assertEqual(int(item.target_team_role_id), orch_team_role_id)
+
+    def test_dispatch_post_answer_plan_creates_child_question_once(self) -> None:
+        with self.storage.transaction(immediate=True):
+            target_role = self.storage.upsert_role(
+                role_name="worker3",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            self.storage.ensure_team_role(self.team_id, target_role.role_id)
+            target_team_role_id = int(self.storage.resolve_team_role_id(self.team_id, target_role.role_id, ensure_exists=True) or 0)
+            parent_question = self.storage.create_question(
+                question_id="q-dispatch-parent",
+                thread_id="t-dispatch",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="root",
+                status="answered",
+                origin_type="user",
+            )
+            self.storage.create_answer(
+                answer_id="a-dispatch-parent",
+                question_id=parent_question.question_id,
+                thread_id=parent_question.thread_id,
+                team_id=parent_question.team_id,
+                team_role_id=self.team_role_id,
+                role_name="dev",
+                text="mention @worker3",
+            )
+
+        worker = QaDispatchBridgeWorker(
+            runtime=SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort()),
+            execute_question_fn=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+        plan = QaPostAnswerDispatchPlan(
+            items=(
+                QaPostAnswerDispatchItem(
+                    target_team_role_id=target_team_role_id,
+                    text="follow-up for @worker3",
+                    reason="mention_tag",
+                    origin_type="role_dispatch",
+                    parent_question_id=parent_question.question_id,
+                    parent_answer_id="a-dispatch-parent",
+                ),
+            )
+        )
+
+        worker._dispatch_post_answer_plan(
+            correlation_id="corr-dispatch",
+            parent_question=parent_question,
+            plan=plan,
+        )
+        worker._dispatch_post_answer_plan(
+            correlation_id="corr-dispatch",
+            parent_question=parent_question,
+            plan=plan,
+        )
+
+        items, _ = self.storage.list_qa_journal(team_id=self.team_id, team_role_id=target_team_role_id, limit=20)
+        children = [q for q in items if q.source_question_id == parent_question.question_id and q.origin_type == "role_dispatch"]
+        self.assertEqual(len(children), 1)
+        self.assertEqual(children[0].parent_answer_id, "a-dispatch-parent")
+
+    def test_dispatch_post_answer_plan_creates_orchestrator_events_once(self) -> None:
+        with self.storage.transaction(immediate=True):
+            orch_role = self.storage.upsert_role(
+                role_name="orch2",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            self.storage.ensure_team_role(self.team_id, orch_role.role_id)
+            self.storage.set_team_role_mode(self.team_id, orch_role.role_id, "orchestrator")
+            orch_team_role_id = int(self.storage.resolve_team_role_id(self.team_id, orch_role.role_id, ensure_exists=True) or 0)
+            parent_question = self.storage.create_question(
+                question_id="q-dispatch-orch-parent",
+                thread_id="t-dispatch-orch",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="user text to role",
+                status="answered",
+                origin_type="user",
+            )
+            self.storage.create_answer(
+                answer_id="a-dispatch-orch-parent",
+                question_id=parent_question.question_id,
+                thread_id=parent_question.thread_id,
+                team_id=parent_question.team_id,
+                team_role_id=self.team_role_id,
+                role_name="dev",
+                text="role answer text",
+            )
+
+        worker = QaDispatchBridgeWorker(
+            runtime=SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort()),
+            execute_question_fn=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+        plan = worker._build_post_answer_dispatch_plan(
+            question=parent_question,
+            answer_id="a-dispatch-orch-parent",
+            answer_text="role answer text",
+        )
+        worker._dispatch_post_answer_plan(
+            correlation_id="corr-dispatch-orch",
+            parent_question=parent_question,
+            plan=plan,
+        )
+        worker._dispatch_post_answer_plan(
+            correlation_id="corr-dispatch-orch",
+            parent_question=parent_question,
+            plan=plan,
+        )
+
+        items, _ = self.storage.list_qa_journal(team_id=self.team_id, team_role_id=orch_team_role_id, limit=30)
+        children = [q for q in items if q.source_question_id == parent_question.question_id and q.origin_type == "orchestrator"]
+        self.assertEqual(len(children), 2)
+        texts = {str(q.text) for q in children}
+        self.assertIn("user text to role", texts)
+        self.assertIn("role answer text", texts)
+        for child in children:
+            self.assertEqual(child.parent_answer_id, "a-dispatch-orch-parent")
+
+    def test_dispatch_post_answer_plan_skips_when_max_hops_reached(self) -> None:
+        with self.storage.transaction(immediate=True):
+            target_role = self.storage.upsert_role(
+                role_name="hop_target",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            self.storage.ensure_team_role(self.team_id, target_role.role_id)
+            target_team_role_id = int(self.storage.resolve_team_role_id(self.team_id, target_role.role_id, ensure_exists=True) or 0)
+
+            q0 = self.storage.create_question(
+                question_id="q-hop-0",
+                thread_id="t-hop",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="root",
+                status="answered",
+                origin_type="user",
+            )
+            q1 = self.storage.create_question(
+                question_id="q-hop-1",
+                thread_id="t-hop",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="child1",
+                status="answered",
+                origin_type="role_dispatch",
+                source_question_id=q0.question_id,
+            )
+            q2 = self.storage.create_question(
+                question_id="q-hop-2",
+                thread_id="t-hop",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="child2",
+                status="answered",
+                origin_type="role_dispatch",
+                source_question_id=q1.question_id,
+            )
+            self.storage.create_answer(
+                answer_id="a-hop-2",
+                question_id=q2.question_id,
+                thread_id=q2.thread_id,
+                team_id=q2.team_id,
+                team_role_id=self.team_role_id,
+                role_name="dev",
+                text="mention @hop_target",
+            )
+
+        runtime = SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort(), qa_post_answer_max_hops=2)
+        worker = QaDispatchBridgeWorker(
+            runtime=runtime,
+            execute_question_fn=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+        plan = QaPostAnswerDispatchPlan(
+            items=(
+                QaPostAnswerDispatchItem(
+                    target_team_role_id=target_team_role_id,
+                    text="mention @hop_target",
+                    reason="mention_tag",
+                    origin_type="role_dispatch",
+                    parent_question_id="q-hop-2",
+                    parent_answer_id="a-hop-2",
+                ),
+            )
+        )
+        worker._dispatch_post_answer_plan(
+            correlation_id="corr-hop",
+            parent_question=q2,
+            plan=plan,
+        )
+        items, _ = self.storage.list_qa_journal(team_id=self.team_id, team_role_id=target_team_role_id, limit=20)
+        children = [q for q in items if q.source_question_id == "q-hop-2"]
+        self.assertEqual(children, [])
+
+    def test_build_post_answer_dispatch_plan_respects_fanout_limit(self) -> None:
+        with self.storage.transaction(immediate=True):
+            role_names: list[str] = []
+            for idx in range(1, 6):
+                name = f"fan_{idx}"
+                role = self.storage.upsert_role(
+                    role_name=name,
+                    description="d",
+                    base_system_prompt="sp",
+                    extra_instruction="ei",
+                    llm_model=None,
+                    is_active=True,
+                )
+                self.storage.ensure_team_role(self.team_id, role.role_id)
+                role_names.append(name)
+            q = self.storage.create_question(
+                question_id="q-fanout",
+                thread_id="t-fanout",
+                team_id=self.team_id,
+                created_by_user_id=700,
+                target_team_role_id=self.team_role_id,
+                text="root",
+                status="answered",
+                origin_type="user",
+            )
+
+        runtime = SimpleNamespace(storage=self.storage, metrics_port=_FakeMetricsPort(), qa_post_answer_max_fanout=2)
+        worker = QaDispatchBridgeWorker(
+            runtime=runtime,
+            execute_question_fn=lambda *_args, **_kwargs: None,  # type: ignore[arg-type]
+        )
+        answer_text = " ".join(f"@{name}" for name in role_names)
+        plan = worker._build_post_answer_dispatch_plan(
+            question=q,
+            answer_id="a-fanout",
+            answer_text=answer_text,
+        )
+        mention_items = [item for item in plan.items if item.reason == "mention_tag"]
+        self.assertLessEqual(len(mention_items), 2)
 
 
 if __name__ == "__main__":

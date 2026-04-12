@@ -48,6 +48,10 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
 
             updated = set_team_role_enabled(storage, group_id=group.group_id, role_id=role.role_id, enabled=False)
             self.assertFalse(updated.enabled)
+            self.assertEqual(list_team_role_states(storage, group.group_id), [])
+            with_inactive = list_team_role_states(storage, group.group_id, include_inactive=True)
+            self.assertEqual(len(with_inactive), 1)
+            self.assertFalse(with_inactive[0].is_active)
 
             updated, _ = set_team_role_mode(storage, group_id=group.group_id, role_id=role.role_id, mode="orchestrator")
             self.assertEqual(updated.mode, "orchestrator")
@@ -80,7 +84,7 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
             self.assertEqual(role_name, "reset_uc_role")
             self.assertIsNone(storage.get_user_role_session_by_team_role(77, team_role_id))
 
-    def test_reset_team_role_session_clears_skills_root_dir_for_current_team_role(self) -> None:
+    def test_reset_team_role_session_clears_team_role_working_and_root_dirs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             storage = Storage(Path(td) / "test.sqlite3")
             group = storage.upsert_group(-1023, "g")
@@ -96,12 +100,17 @@ class CoreTeamRolesUseCasesTests(unittest.TestCase):
             team_role, _ = storage.bind_master_role_to_team(team_id, role.role_id)
             team_role_id = int(team_role.team_role_id or 0)
             storage.save_user_role_session_by_team_role(telegram_user_id=77, team_role_id=team_role_id, session_id="s1")
+            storage.set_team_role_working_dir_by_id(team_role_id, "/tmp/work")
+            storage.set_team_role_root_dir_by_id(team_role_id, "/tmp/root")
             storage.set_provider_user_value_by_team_role("skills", "root_dir", team_role_id, "/tmp/demo")
 
             runtime = SimpleNamespace(default_provider_id="openai", provider_registry={})
             role_name = reset_team_role_session(runtime, storage, group_id=group.group_id, role_id=role.role_id, user_id=77)
 
             self.assertEqual(role_name, "reset_uc_role_skills_root")
+            state = storage.get_team_role(team_id, role.role_id)
+            self.assertIsNone(state.working_dir)
+            self.assertIsNone(state.root_dir)
             self.assertIsNone(storage.get_provider_user_value_by_team_role("skills", "root_dir", team_role_id))
 
     def test_reset_team_role_session_blocks_legacy_fallback_for_current_team_role(self) -> None:

@@ -59,7 +59,12 @@
   "interface": {
     "active": "telegram",
     "modules_dir": "app.interfaces",
-    "runtime_mode": "single"
+    "runtime_mode": "single",
+    "telegram": {
+      "api_base_url": "http://127.0.0.1:8080",
+      "api_timeout_sec": 30,
+      "thin_client_enabled": true
+    }
   },
   "dispatch": {
     "mode": "single-instance",

@@ -32,12 +32,16 @@ from app.application.use_cases.write_api import (
     bind_master_role_to_team_result,
     TeamRolePatchRequest,
     TeamRolePrepostPutRequest,
+    TeamRoleRootDirPutRequest,
     TeamRoleSkillPutRequest,
+    TeamRoleWorkingDirPutRequest,
     deactivate_team_role_binding_write_result,
     patch_master_role_result,
     patch_team_role_result,
     put_team_role_prepost_result,
+    put_team_role_root_dir_result,
     put_team_role_skill_result,
+    put_team_role_working_dir_result,
     reset_team_role_session_write_result,
 )
 from app.interfaces.api.dependencies import (
@@ -74,10 +78,14 @@ from app.interfaces.api.schemas import (
     TeamRolePatchRequestDTO,
     TeamRolePrepostOutcomeDTO,
     TeamRolePrepostPutRequestDTO,
+    TeamRoleRootDirOutcomeDTO,
+    TeamRoleRootDirPutRequestDTO,
     TeamRoleRuntimeStatusDTO,
     TeamRoleSkillOutcomeDTO,
     TeamRoleSkillPutRequestDTO,
     TeamRoleUserMutationRequestDTO,
+    TeamRoleWorkingDirOutcomeDTO,
+    TeamRoleWorkingDirPutRequestDTO,
     master_role_catalog_item_to_dto,
     master_role_patch_outcome_to_dto,
     mutation_ack_to_dto,
@@ -93,7 +101,9 @@ from app.interfaces.api.schemas import (
     team_role_patch_outcome_to_dto,
     team_role_bind_outcome_to_dto,
     team_role_prepost_outcome_to_dto,
+    team_role_root_dir_outcome_to_dto,
     team_role_skill_outcome_to_dto,
+    team_role_working_dir_outcome_to_dto,
     team_session_to_dto,
     team_role_runtime_status_to_dto,
     team_to_dto,
@@ -539,6 +549,10 @@ def build_read_only_v1_router(*, app_state: Any):
                 question_id=payload.question_id,
             ),
             idempotency_key=str(idempotency_key or ""),
+            provider_registry=dict(getattr(app_state.runtime, "provider_registry", {}) or {}),
+            provider_models=list(getattr(app_state.runtime, "provider_models", []) or []),
+            provider_model_map=dict(getattr(app_state.runtime, "provider_model_map", {}) or {}),
+            default_provider_id=str(getattr(app_state.runtime, "default_provider_id", "") or ""),
         )
         if result.is_error or result.value is None:
             mapped = map_result_error_to_api(result)
@@ -836,8 +850,13 @@ def build_read_only_v1_router(*, app_state: Any):
                 role_name=payload.role_name,
                 llm_model=payload.llm_model,
                 system_prompt=payload.system_prompt,
-                extra_instruction=payload.extra_instruction,
+                extra_instruction=(
+                    payload.extra_instructions
+                    if payload.extra_instructions is not None
+                    else payload.extra_instruction
+                ),
             ),
+            runtime=app_state.runtime,
         )
         if result.is_error or result.value is None:
             mapped = map_result_error_to_api(result)
@@ -883,7 +902,7 @@ def build_read_only_v1_router(*, app_state: Any):
         return team_role_bind_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.patch(
-        "/teams/{team_id}/roles/{role_id}",
+        "/team-roles/{team_role_id}",
         response_model=TeamRolePatchOutcomeDTO,
         responses={
             401: {"model": ApiErrorResponse},
@@ -895,8 +914,7 @@ def build_read_only_v1_router(*, app_state: Any):
         },
     )
     def patch_team_role(
-        team_id: int,
-        role_id: int,
+        team_role_id: int,
         payload: TeamRolePatchRequestDTO = Body(...),
         x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
         owner_user_id: int | None = Query(default=None),
@@ -913,15 +931,23 @@ def build_read_only_v1_router(*, app_state: Any):
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
         result = patch_team_role_result(
             deps_result.value.storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             patch=TeamRolePatchRequest(
                 enabled=payload.enabled,
+                is_active=payload.is_active,
                 is_orchestrator=payload.is_orchestrator,
                 model_override=payload.model_override,
                 display_name=payload.display_name,
-                system_prompt_override=payload.system_prompt_override,
-                extra_instruction_override=payload.extra_instruction_override,
+                system_prompt_override=(
+                    payload.system_prompt
+                    if payload.system_prompt is not None
+                    else payload.system_prompt_override
+                ),
+                extra_instruction_override=(
+                    payload.extra_instructions
+                    if payload.extra_instructions is not None
+                    else payload.extra_instruction_override
+                ),
                 user_prompt_suffix=payload.user_prompt_suffix,
                 user_reply_prefix=payload.user_reply_prefix,
             ),
@@ -932,7 +958,7 @@ def build_read_only_v1_router(*, app_state: Any):
         return team_role_patch_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.post(
-        "/teams/{team_id}/roles/{role_id}/reset-session",
+        "/team-roles/{team_role_id}/reset-session",
         response_model=MutationAckDTO,
         responses={
             401: {"model": ApiErrorResponse},
@@ -944,8 +970,7 @@ def build_read_only_v1_router(*, app_state: Any):
         },
     )
     def reset_team_role_session(
-        team_id: int,
-        role_id: int,
+        team_role_id: int,
         payload: TeamRoleUserMutationRequestDTO = Body(...),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
@@ -964,8 +989,7 @@ def build_read_only_v1_router(*, app_state: Any):
         result = reset_team_role_session_write_result(
             app_state.runtime,
             deps_result.value.storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=payload.telegram_user_id,
             idempotency_key=str(idempotency_key or ""),
         )
@@ -975,7 +999,7 @@ def build_read_only_v1_router(*, app_state: Any):
         return mutation_ack_to_dto(result.value).model_dump(mode="json")
 
     @router.delete(
-        "/teams/{team_id}/roles/{role_id}",
+        "/team-roles/{team_role_id}",
         status_code=204,
         responses={
             401: {"model": ApiErrorResponse},
@@ -987,8 +1011,7 @@ def build_read_only_v1_router(*, app_state: Any):
         },
     )
     def deactivate_team_role_binding(
-        team_id: int,
-        role_id: int,
+        team_role_id: int,
         payload: TeamRoleUserMutationRequestDTO = Body(...),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
         x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
@@ -1007,8 +1030,7 @@ def build_read_only_v1_router(*, app_state: Any):
         result = deactivate_team_role_binding_write_result(
             app_state.runtime,
             deps_result.value.storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=payload.telegram_user_id,
             idempotency_key=str(idempotency_key or ""),
         )
@@ -1060,6 +1082,88 @@ def build_read_only_v1_router(*, app_state: Any):
             mapped = map_result_error_to_api(result)
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
         return team_role_skill_outcome_to_dto(result.value).model_dump(mode="json")
+
+    @router.put(
+        "/team-roles/{team_role_id}/working-dir",
+        response_model=TeamRoleWorkingDirOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def put_team_role_working_dir(
+        team_role_id: int,
+        payload: TeamRoleWorkingDirPutRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = put_team_role_working_dir_result(
+            app_state.runtime,
+            deps_result.value.storage,
+            request=TeamRoleWorkingDirPutRequest(
+                team_role_id=team_role_id,
+                working_dir=payload.working_dir,
+            ),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return team_role_working_dir_outcome_to_dto(result.value).model_dump(mode="json")
+
+    @router.put(
+        "/team-roles/{team_role_id}/root-dir",
+        response_model=TeamRoleRootDirOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def put_team_role_root_dir(
+        team_role_id: int,
+        payload: TeamRoleRootDirPutRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = put_team_role_root_dir_result(
+            app_state.runtime,
+            deps_result.value.storage,
+            request=TeamRoleRootDirPutRequest(
+                team_role_id=team_role_id,
+                root_dir=payload.root_dir,
+            ),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return team_role_root_dir_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.put(
         "/team-roles/{team_role_id}/prepost/{prepost_id}",

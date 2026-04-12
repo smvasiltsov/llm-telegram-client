@@ -23,6 +23,7 @@ class TeamRoleState:
     role_id: int
     public_name: str
     enabled: bool
+    is_active: bool
     mode: str
 
 
@@ -60,22 +61,24 @@ def get_team_role_state(storage: Storage, group_id: int, role_id: int) -> TeamRo
         team_id=team_id,
         role_id=role_id,
         public_name=storage.get_team_role_name(team_id, role_id),
-        enabled=team_role.enabled,
+        enabled=team_role.is_active,
+        is_active=team_role.is_active,
         mode=team_role.mode,
     )
 
 
-def list_team_role_states(storage: Storage, group_id: int) -> list[TeamRoleState]:
+def list_team_role_states(storage: Storage, group_id: int, *, include_inactive: bool = False) -> list[TeamRoleState]:
     team_id = resolve_team_id(storage, group_id)
     rows: list[TeamRoleState] = []
-    for team_role in storage.list_team_roles(team_id):
+    for team_role in storage.list_team_roles(team_id, include_inactive=include_inactive):
         rows.append(
             TeamRoleState(
                 group_id=group_id,
                 team_id=team_id,
                 role_id=team_role.role_id,
                 public_name=storage.get_team_role_name(team_id, team_role.role_id),
-                enabled=team_role.enabled,
+                enabled=team_role.is_active,
+                is_active=team_role.is_active,
                 mode=team_role.mode,
             )
         )
@@ -93,7 +96,7 @@ def bind_master_role_to_group(runtime: Any, storage: Storage, *, group_id: int, 
 def set_team_role_enabled(storage: Storage, *, group_id: int, role_id: int, enabled: bool) -> TeamRoleState:
     with storage.transaction(immediate=True):
         team_id = resolve_team_id(storage, group_id)
-        storage.set_team_role_enabled(team_id, role_id, enabled)
+        storage.set_team_role_active(team_id, role_id, enabled)
         return get_team_role_state(storage, group_id, role_id)
 
 
@@ -267,9 +270,9 @@ def reset_team_role_session_result(
                 cur.execute(
                     """
                     DELETE FROM user_role_sessions
-                    WHERE telegram_user_id = ? AND team_role_id = ?
+                    WHERE telegram_user_id = ? AND (team_role_id = ? OR (team_id = ? AND role_id = ?))
                     """,
-                    (user_id, team_role_id),
+                    (user_id, team_role_id, team_id, resolved_role_id),
                 )
             else:
                 cur.execute(
@@ -288,6 +291,15 @@ def reset_team_role_session_result(
                     """,
                     (team_role_id,),
                 )
+            cur.execute(
+                """
+                UPDATE team_roles
+                SET working_dir = NULL,
+                    root_dir = NULL
+                WHERE team_role_id = ?
+                """,
+                (team_role_id,),
+            )
             legacy_keys = set(storage.list_provider_user_legacy_keys_for_role(role_id))
             legacy_keys.update(_iter_role_scoped_provider_fields(runtime))
             if storage.has_provider_user_data_team_role_legacy_blocks_table():
@@ -400,9 +412,9 @@ def delete_user_role_session_result(
                 cur.execute(
                     """
                     DELETE FROM user_role_sessions
-                    WHERE telegram_user_id = ? AND team_role_id = ?
+                    WHERE telegram_user_id = ? AND (team_role_id = ? OR (team_id = ? AND role_id = ?))
                     """,
-                    (user_id, team_role_id),
+                    (user_id, team_role_id, resolved_team_id, resolved_role_id),
                 )
             else:
                 cur.execute(

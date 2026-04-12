@@ -75,12 +75,15 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
             "/api/v1/threads/{thread_id}": ("get",),
             "/api/v1/teams": ("get",),
             "/api/v1/teams/{team_id}/roles": ("get",),
-            "/api/v1/teams/{team_id}/roles/{role_id}": ("post", "patch", "delete"),
-            "/api/v1/teams/{team_id}/roles/{role_id}/reset-session": ("post",),
+            "/api/v1/teams/{team_id}/roles/{role_id}": ("post",),
             "/api/v1/teams/{team_id}/runtime-status": ("get",),
             "/api/v1/teams/{team_id}/sessions": ("get",),
+            "/api/v1/team-roles/{team_role_id}": ("patch", "delete"),
+            "/api/v1/team-roles/{team_role_id}/reset-session": ("post",),
             "/api/v1/team-roles/{team_role_id}/skills/{skill_id}": ("put",),
             "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}": ("put",),
+            "/api/v1/team-roles/{team_role_id}/working-dir": ("put",),
+            "/api/v1/team-roles/{team_role_id}/root-dir": ("put",),
         }
         summary = {
             "paths": sorted(

@@ -206,9 +206,8 @@ class LTC42PrivatePendingUseCaseTests(unittest.TestCase):
 
     def test_validate_pending_field_value_for_root_dir(self) -> None:
         state = {"key": "root_dir"}
-        with tempfile.TemporaryDirectory() as td:
-            self.assertIsNone(validate_pending_field_value(state, td))
-        err = validate_pending_field_value(state, "/path/that/does/not/exist")
+        self.assertIsNone(validate_pending_field_value(state, "/path/that/does/not/exist"))
+        err = validate_pending_field_value(state, "relative/path")
         self.assertIsInstance(err, str)
 
 

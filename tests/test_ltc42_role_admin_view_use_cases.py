@@ -60,3 +60,30 @@ class LTC42RoleAdminViewUseCasesTests(unittest.TestCase):
             self.assertEqual(len(result.value.roles), 1)
             self.assertEqual(result.value.roles[0].role_id, role.role_id)
 
+    def test_build_team_roles_view_can_include_inactive_roles(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-4202, "g")
+            team_id = int(group.team_id or 0)
+            role = storage.upsert_role(
+                role_name="dev",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.bind_master_role_to_team(team_id, role.role_id)
+            with storage.transaction(immediate=True):
+                storage.set_team_role_active(team_id, role.role_id, False)
+
+            active_only = build_team_roles_view(storage=storage, group_id=group.group_id)
+            with_inactive = build_team_roles_view(storage=storage, group_id=group.group_id, include_inactive=True)
+
+            self.assertTrue(active_only.is_ok)
+            self.assertTrue(with_inactive.is_ok)
+            assert active_only.value is not None
+            assert with_inactive.value is not None
+            self.assertEqual(len(active_only.value.roles), 0)
+            self.assertEqual(len(with_inactive.value.roles), 1)
+            self.assertFalse(with_inactive.value.roles[0].is_active)

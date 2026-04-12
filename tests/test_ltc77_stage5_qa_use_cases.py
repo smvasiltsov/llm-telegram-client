@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.llm_providers import ProviderConfig, ProviderModel, ProviderUserField
 from app.application.use_cases.qa_api import (
     QaCreateQuestionRequest,
     create_question_result,
@@ -401,6 +402,136 @@ class LTC77Stage5QaUseCasesTests(unittest.TestCase):
         self.assertTrue(missing_team_role.is_error)
         self.assertEqual((missing_team_role.error.code if missing_team_role.error else None), "qa_not_found")
         self.assertEqual((missing_team_role.error.http_status if missing_team_role.error else None), 404)
+
+    def test_create_question_requires_working_and_root_dirs_for_fs_skills(self) -> None:
+        storage, team_id, team_role_id = self._bootstrap()
+        with storage.transaction(immediate=True):
+            storage.upsert_role_skill_for_team_role(team_role_id, "fs.read_file", enabled=True, config={})
+        result_missing = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="please handle @dev",
+                team_role_id=team_role_id,
+                thread_id="thread-fs-1",
+                question_id="question-fs-1",
+            ),
+            idempotency_key="idem-fs-1",
+        )
+        self.assertTrue(result_missing.is_error)
+        self.assertEqual((result_missing.error.code if result_missing.error else None), "validation.invalid_input")
+        self.assertEqual((result_missing.error.http_status if result_missing.error else None), 422)
+        self.assertEqual(
+            (result_missing.error.details if result_missing.error else {}).get("missing_fields"),
+            ["root_dir"],
+        )
+
+        with storage.transaction(immediate=True):
+            storage.set_team_role_root_dir_by_id(team_role_id, "/abs/root")
+        result_missing_root = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="please handle @dev",
+                team_role_id=team_role_id,
+                thread_id="thread-fs-2",
+                question_id="question-fs-2",
+            ),
+            idempotency_key="idem-fs-2",
+        )
+        self.assertTrue(result_missing_root.is_ok)
+
+        with storage.transaction(immediate=True):
+            storage.set_team_role_working_dir_by_id(team_role_id, "/abs/work")
+        result_ok = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="please handle @dev",
+                team_role_id=team_role_id,
+                thread_id="thread-fs-3",
+                question_id="question-fs-3",
+            ),
+            idempotency_key="idem-fs-3",
+        )
+        self.assertTrue(result_ok.is_ok)
+
+    def test_create_question_requires_working_dir_from_provider_user_fields(self) -> None:
+        storage, team_id, team_role_id = self._bootstrap()
+        with storage.transaction(immediate=True):
+            identity = storage.resolve_team_role_identity(team_role_id)
+            if identity is None:
+                raise AssertionError("team_role identity missing")
+            _, role_id = identity
+            storage.set_team_role_model(team_id, role_id, "codex-api:gpt-5")
+
+        provider_model = ProviderModel(provider_id="codex-api", model_id="gpt-5", label="GPT-5")
+        provider_registry = {
+            "codex-api": ProviderConfig(
+                provider_id="codex-api",
+                label="Codex",
+                base_url="http://localhost",
+                tls_ca_cert_path=None,
+                adapter="generic",
+                capabilities={},
+                auth_mode="none",
+                endpoints={},
+                models=[provider_model],
+                history_enabled=False,
+                history_limit=None,
+                user_fields={
+                    "working_dir": ProviderUserField(
+                        key="working_dir",
+                        prompt="Enter working_dir",
+                        scope="role",
+                    )
+                },
+            )
+        }
+        result_missing = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="please handle @dev",
+                team_role_id=team_role_id,
+                thread_id="thread-wd-1",
+                question_id="question-wd-1",
+            ),
+            idempotency_key="idem-wd-1",
+            provider_registry=provider_registry,
+            provider_models=[provider_model],
+            provider_model_map={provider_model.full_id: provider_model},
+            default_provider_id="codex-api",
+        )
+        self.assertTrue(result_missing.is_error)
+        self.assertEqual(
+            (result_missing.error.details if result_missing.error else {}).get("missing_fields"),
+            ["working_dir"],
+        )
+
+        with storage.transaction(immediate=True):
+            storage.set_team_role_working_dir_by_id(team_role_id, "/abs/work")
+        result_ok = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="please handle @dev",
+                team_role_id=team_role_id,
+                thread_id="thread-wd-2",
+                question_id="question-wd-2",
+            ),
+            idempotency_key="idem-wd-2",
+            provider_registry=provider_registry,
+            provider_models=[provider_model],
+            provider_model_map={provider_model.full_id: provider_model},
+            default_provider_id="codex-api",
+        )
+        self.assertTrue(result_ok.is_ok)
 
 
 if __name__ == "__main__":

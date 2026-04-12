@@ -110,6 +110,14 @@ class SkillCallingLoop:
     ) -> SkillLoopResult:
         chat_id = team_id
         group_role = self._storage.get_team_role(team_id, role.role_id)
+        resolved_team_role_id = (
+            int(group_role.team_role_id)
+            if group_role.team_role_id is not None
+            else self._storage.resolve_team_role_id(team_id, role.role_id, ensure_exists=True)
+        )
+        if resolved_team_role_id is None:
+            raise ValueError(f"Team role not found: team_id={team_id} role_id={role.role_id}")
+        team_role_id = int(resolved_team_role_id)
         model_override = resolve_provider_model(
             self._provider_models,
             self._provider_model_map,
@@ -117,7 +125,12 @@ class SkillCallingLoop:
             group_role.model_override or role.llm_model,
         )
         base_prompt = group_role.system_prompt_override if group_role.system_prompt_override is not None else role.base_system_prompt
-        system_prompt = f"{(base_prompt or '').strip()}\n\n{(role.extra_instruction or '').strip()}".strip()
+        extra_instruction = (
+            group_role.extra_instruction_override
+            if group_role.extra_instruction_override is not None
+            else role.extra_instruction
+        )
+        system_prompt = f"{(base_prompt or '').strip()}\n\n{(extra_instruction or '').strip()}".strip()
         if self._skills_usage_prompt:
             system_prompt = f"{system_prompt}\n\n{self._skills_usage_prompt}".strip()
         system_prompt = system_prompt or None
@@ -180,6 +193,7 @@ class SkillCallingLoop:
                     content=content,
                     role=role,
                     model_override=model_override,
+                    team_role_id=team_role_id,
                 )
             else:
                 step_result = await send_step(session_id, content, model_override)
@@ -340,26 +354,19 @@ class SkillCallingLoop:
         if root_dir:
             return resolved
 
-        provider_root = self._resolve_provider_working_dir(role_id=role.role_id, model_override=model_override)
+        provider_root = self._resolve_provider_working_dir(
+            team_id=team_id,
+            role_id=role.role_id,
+            model_override=model_override,
+        )
         if provider_root:
             resolved["root_dir"] = provider_root
             return resolved
 
-        team_role_id = self._storage.resolve_team_role_id(team_id, role.role_id)
-        shared_root = (
-            str(
-                self._storage.get_provider_user_value_by_team_role(
-                    SKILLS_PROVIDER_ID,
-                    SKILLS_ROOT_DIR_KEY,
-                    int(team_role_id),
-                )
-                or ""
-            ).strip()
-            if team_role_id is not None
-            else ""
-        )
-        if shared_root:
-            resolved["root_dir"] = shared_root
+        team_role = self._storage.get_team_role(team_id, role.role_id)
+        team_root = str(team_role.root_dir or "").strip()
+        if team_root:
+            resolved["root_dir"] = team_root
             return resolved
 
         raise MissingUserField(
@@ -375,7 +382,7 @@ class SkillCallingLoop:
             role.role_id,
         )
 
-    def _resolve_provider_working_dir(self, *, role_id: int, model_override: str | None) -> str | None:
+    def _resolve_provider_working_dir(self, *, team_id: int, role_id: int, model_override: str | None) -> str | None:
         if not model_override:
             return None
         default_provider_id = next(iter(self._provider_registry.keys()), "")
@@ -386,8 +393,12 @@ class SkillCallingLoop:
         field = provider.user_fields.get("working_dir")
         if field is None or field.scope != "role":
             return None
-        value = self._storage.get_provider_user_value(provider_id, "working_dir", role_id)
-        return str(value).strip() if value else None
+        try:
+            team_role = self._storage.get_team_role(team_id, role_id)
+        except Exception:
+            return None
+        value = str(team_role.working_dir or "").strip()
+        return value or None
 
     @staticmethod
     def _is_filesystem_skill(skill_id: str) -> bool:

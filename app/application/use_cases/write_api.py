@@ -4,6 +4,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
 from app.application.contracts import ErrorCode, Result
@@ -15,6 +16,7 @@ T = TypeVar("T")
 @dataclass(frozen=True)
 class TeamRolePatchRequest:
     enabled: bool | None = None
+    is_active: bool | None = None
     is_orchestrator: bool | None = None
     model_override: str | None = None
     display_name: str | None = None
@@ -81,6 +83,30 @@ class TeamRolePrepostOutcome:
     prepost_id: str
     enabled: bool
     config: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class TeamRoleWorkingDirPutRequest:
+    team_role_id: int
+    working_dir: str
+
+
+@dataclass(frozen=True)
+class TeamRoleRootDirPutRequest:
+    team_role_id: int
+    root_dir: str
+
+
+@dataclass(frozen=True)
+class TeamRoleWorkingDirOutcome:
+    team_role_id: int
+    working_dir: str
+
+
+@dataclass(frozen=True)
+class TeamRoleRootDirOutcome:
+    team_role_id: int
+    root_dir: str
 
 
 @dataclass(frozen=True)
@@ -155,14 +181,14 @@ class InMemoryIdempotencyStore:
 def patch_team_role_result(
     storage: Storage,
     *,
-    team_id: int,
-    role_id: int,
+    team_role_id: int,
     patch: TeamRolePatchRequest,
 ) -> Result[TeamRolePatchOutcome]:
     if all(
         value is None
         for value in (
             patch.enabled,
+            patch.is_active,
             patch.is_orchestrator,
             patch.model_override,
             patch.display_name,
@@ -177,7 +203,14 @@ def patch_team_role_result(
             "Patch payload is empty",
             details={"entity": "team_role", "cause": "empty_patch"},
         )
-    if patch.is_orchestrator is True and patch.enabled is False:
+    if patch.enabled is not None and patch.is_active is not None and patch.enabled != patch.is_active:
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "enabled and is_active must match when both are provided",
+            details={"entity": "team_role", "cause": "state_fields_conflict"},
+        )
+    effective_active = patch.is_active if patch.is_active is not None else patch.enabled
+    if patch.is_orchestrator is True and effective_active is False:
         return Result.fail(
             ErrorCode.VALIDATION_INVALID_INPUT,
             "Orchestrator role cannot be disabled in the same patch request",
@@ -185,6 +218,11 @@ def patch_team_role_result(
         )
     try:
         with storage.transaction(immediate=True):
+            identity = storage.resolve_team_role_identity(team_role_id)
+            if identity is None:
+                raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+            team_id = int(identity[0])
+            role_id = int(identity[1])
             storage.get_team(team_id)
             storage.get_team_role(team_id, role_id)
             if patch.display_name is not None:
@@ -201,15 +239,15 @@ def patch_team_role_result(
                 storage.set_team_role_model(team_id, role_id, patch.model_override)
             if patch.is_orchestrator is not None:
                 storage.set_team_role_mode(team_id, role_id, "orchestrator" if patch.is_orchestrator else "normal")
-            if patch.enabled is not None:
-                storage.set_team_role_enabled(team_id, role_id, patch.enabled)
+            if effective_active is not None:
+                storage.set_team_role_active(team_id, role_id, effective_active)
             current = storage.get_team_role(team_id, role_id)
             return Result.ok(
                 TeamRolePatchOutcome(
                     team_id=team_id,
                     role_id=role_id,
                     team_role_id=current.team_role_id,
-                    enabled=current.enabled,
+                    enabled=current.is_active,
                     is_active=current.is_active,
                     mode=current.mode,
                     is_orchestrator=(current.mode == "orchestrator"),
@@ -225,14 +263,14 @@ def patch_team_role_result(
         return Result.fail_from_exception(
             exc,
             fallback_code=ErrorCode.STORAGE_NOT_FOUND,
-            fallback_details={"entity": "team_role", "id": f"team_id={team_id} role_id={role_id}", "cause": "patch"},
+            fallback_details={"entity": "team_role", "id": f"team_role_id={team_role_id}", "cause": "patch"},
         )
     except Exception as exc:
         return Result.fail_from_exception(
             exc,
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to patch team role",
-            fallback_details={"entity": "team_role", "id": f"team_id={team_id} role_id={role_id}", "cause": "patch"},
+            fallback_details={"entity": "team_role", "id": f"team_role_id={team_role_id}", "cause": "patch"},
         )
 
 
@@ -240,8 +278,7 @@ def reset_team_role_session_write_result(
     runtime: Any,
     storage: Storage,
     *,
-    team_id: int,
-    role_id: int,
+    team_role_id: int,
     telegram_user_id: int,
     idempotency_key: str,
 ) -> Result[MutationAck]:
@@ -249,12 +286,11 @@ def reset_team_role_session_write_result(
         runtime=runtime,
         operation="reset_session",
         idempotency_key=idempotency_key,
-        fingerprint_payload={"team_id": team_id, "role_id": role_id, "telegram_user_id": telegram_user_id},
+        fingerprint_payload={"team_role_id": team_role_id, "telegram_user_id": telegram_user_id},
         apply_fn=lambda: _reset_team_role_session_once(
             runtime=runtime,
             storage=storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=telegram_user_id,
         ),
     )
@@ -264,8 +300,7 @@ def deactivate_team_role_binding_write_result(
     runtime: Any,
     storage: Storage,
     *,
-    team_id: int,
-    role_id: int,
+    team_role_id: int,
     telegram_user_id: int,
     idempotency_key: str,
 ) -> Result[MutationAck]:
@@ -273,12 +308,11 @@ def deactivate_team_role_binding_write_result(
         runtime=runtime,
         operation="deactivate_binding",
         idempotency_key=idempotency_key,
-        fingerprint_payload={"team_id": team_id, "role_id": role_id, "telegram_user_id": telegram_user_id},
+        fingerprint_payload={"team_role_id": team_role_id, "telegram_user_id": telegram_user_id},
         apply_fn=lambda: _deactivate_team_role_binding_once(
             runtime=runtime,
             storage=storage,
-            team_id=team_id,
-            role_id=role_id,
+            team_role_id=team_role_id,
             telegram_user_id=telegram_user_id,
         ),
     )
@@ -400,11 +434,80 @@ def put_team_role_prepost_result(
         )
 
 
+def put_team_role_working_dir_result(
+    runtime: Any,
+    storage: Storage,
+    *,
+    request: TeamRoleWorkingDirPutRequest,
+) -> Result[TeamRoleWorkingDirOutcome]:
+    try:
+        normalized = _normalize_absolute_path(request.working_dir, field_name="working_dir")
+        with storage.transaction(immediate=True):
+            team_role = storage.get_team_role_by_id(request.team_role_id)
+            storage.set_team_role_working_dir(team_role.team_id, team_role.role_id, normalized)
+            updated = storage.get_team_role_by_id(request.team_role_id)
+            return Result.ok(
+                TeamRoleWorkingDirOutcome(
+                    team_role_id=request.team_role_id,
+                    working_dir=str(updated.working_dir or normalized),
+                )
+            )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.VALIDATION_INVALID_INPUT,
+            fallback_message="Invalid team-role working_dir",
+            fallback_details={"entity": "team_role", "id": request.team_role_id, "cause": "working_dir_put"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to update team-role working_dir",
+            fallback_details={"entity": "team_role", "id": request.team_role_id, "cause": "working_dir_put"},
+        )
+
+
+def put_team_role_root_dir_result(
+    runtime: Any,
+    storage: Storage,
+    *,
+    request: TeamRoleRootDirPutRequest,
+) -> Result[TeamRoleRootDirOutcome]:
+    try:
+        normalized = _normalize_absolute_path(request.root_dir, field_name="root_dir")
+        with storage.transaction(immediate=True):
+            team_role = storage.get_team_role_by_id(request.team_role_id)
+            storage.set_team_role_root_dir(team_role.team_id, team_role.role_id, normalized)
+            updated = storage.get_team_role_by_id(request.team_role_id)
+            return Result.ok(
+                TeamRoleRootDirOutcome(
+                    team_role_id=request.team_role_id,
+                    root_dir=str(updated.root_dir or normalized),
+                )
+            )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.VALIDATION_INVALID_INPUT,
+            fallback_message="Invalid team-role root_dir",
+            fallback_details={"entity": "team_role", "id": request.team_role_id, "cause": "root_dir_put"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to update team-role root_dir",
+            fallback_details={"entity": "team_role", "id": request.team_role_id, "cause": "root_dir_put"},
+        )
+
+
 def patch_master_role_result(
     storage: Storage,
     *,
     role_id: int,
     patch: MasterRolePatchRequest,
+    runtime: Any | None = None,
 ) -> Result[MasterRolePatchOutcome]:
     if all(
         value is None
@@ -433,6 +536,13 @@ def patch_master_role_result(
         with storage.transaction(immediate=True):
             current = storage.get_role_by_id(role_id)
             next_role_name = normalized_role_name if normalized_role_name is not None else str(current.role_name)
+            next_system_prompt = patch.system_prompt if patch.system_prompt is not None else current.base_system_prompt
+            next_extra_instruction = (
+                patch.extra_instruction
+                if patch.extra_instruction is not None
+                else current.extra_instruction
+            )
+            next_llm_model = patch.llm_model if patch.llm_model is not None else current.llm_model
             if next_role_name.lower() != str(current.role_name).lower():
                 existing = None
                 try:
@@ -445,14 +555,21 @@ def patch_master_role_result(
                         f"Role name already exists: {next_role_name}",
                         details={"entity": "master_role", "cause": "name_conflict", "role_name": next_role_name},
                     )
+            _sync_master_role_catalog_file(
+                runtime=runtime,
+                storage=storage,
+                current=current,
+                next_role_name=next_role_name,
+                next_system_prompt=str(next_system_prompt or ""),
+                next_extra_instruction=str(next_extra_instruction or ""),
+                next_llm_model=next_llm_model,
+            )
             storage.update_master_role(
                 role_id=role_id,
                 role_name=next_role_name,
-                llm_model=patch.llm_model if patch.llm_model is not None else current.llm_model,
-                base_system_prompt=patch.system_prompt if patch.system_prompt is not None else current.base_system_prompt,
-                extra_instruction=patch.extra_instruction
-                if patch.extra_instruction is not None
-                else current.extra_instruction,
+                llm_model=next_llm_model,
+                base_system_prompt=str(next_system_prompt or ""),
+                extra_instruction=str(next_extra_instruction or ""),
             )
             updated = storage.get_role_by_id(role_id)
             return Result.ok(
@@ -483,6 +600,49 @@ def patch_master_role_result(
             fallback_message="Failed to patch master role",
             fallback_details={"entity": "master_role", "id": role_id, "cause": "patch"},
         )
+
+
+def _sync_master_role_catalog_file(
+    *,
+    runtime: Any | None,
+    storage: Storage,
+    current: Any,
+    next_role_name: str,
+    next_system_prompt: str,
+    next_extra_instruction: str,
+    next_llm_model: str | None,
+) -> None:
+    catalog = getattr(storage, "_role_catalog", None)
+    root_dir = getattr(catalog, "root_dir", None)
+    if not isinstance(root_dir, Path):
+        return
+
+    catalog_role = catalog.get(str(current.role_name)) if callable(getattr(catalog, "get", None)) else None
+    payload = {
+        "schema_version": 1,
+        "role_name": str(next_role_name),
+        "description": str((getattr(catalog_role, "description", None) or current.description) or ""),
+        "base_system_prompt": str(next_system_prompt or ""),
+        "extra_instruction": str(next_extra_instruction or ""),
+        "llm_model": next_llm_model,
+        "is_active": bool(getattr(catalog_role, "is_active", current.is_active)),
+    }
+
+    old_path = root_dir / f"{current.role_name}.json"
+    new_path = root_dir / f"{next_role_name}.json"
+    target_path = old_path if old_path.exists() and old_path == new_path else new_path
+    target_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if old_path != new_path and old_path.exists():
+        old_path.unlink()
+
+    try:
+        if runtime is None:
+            return
+        from app.role_catalog_service import refresh_role_catalog
+        refresh_role_catalog(runtime=runtime, storage=storage)
+    except Exception:
+        # Keep PATCH functional even if shared catalog reload fails; DB update remains authoritative fallback.
+        return
 
 
 def bind_master_role_to_team_result(
@@ -533,24 +693,39 @@ def _reset_team_role_session_once(
     runtime: Any,
     storage: Storage,
     *,
-    team_id: int,
-    role_id: int,
+    team_role_id: int,
     telegram_user_id: int,
 ) -> Result[MutationAck]:
     try:
         with storage.transaction(immediate=True):
-            storage.get_team(team_id)
-            team_role = storage.get_team_role(team_id, role_id)
-            team_role_id = storage.resolve_team_role_id(team_id, role_id, ensure_exists=True)
-            if team_role_id is None:
-                raise ValueError(f"Team role not found: team_id={team_id} role_id={role_id}")
+            identity = storage.resolve_team_role_identity(team_role_id)
+            if identity is None:
+                raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+            team_role = storage.get_team_role_by_id(team_role_id)
+            team_id = int(identity[0])
+            role_id = int(identity[1])
+            existing_session = storage.get_user_role_session_by_team_role(telegram_user_id, team_role_id)
+            if existing_session is None:
+                return Result.fail(
+                    ErrorCode.STORAGE_NOT_FOUND,
+                    (
+                        "Session not found for reset: "
+                        f"team_role_id={team_role_id} telegram_user_id={telegram_user_id}"
+                    ),
+                    details={
+                        "entity": "user_role_session",
+                        "cause": "not_found",
+                        "team_role_id": int(team_role_id),
+                        "telegram_user_id": int(telegram_user_id),
+                    },
+                )
             if storage.has_session_team_role_id():
                 storage._conn.execute(
                     """
                     DELETE FROM user_role_sessions
-                    WHERE telegram_user_id = ? AND team_role_id = ?
+                    WHERE telegram_user_id = ? AND (team_role_id = ? OR (team_id = ? AND role_id = ?))
                     """,
-                    (telegram_user_id, team_role_id),
+                    (telegram_user_id, team_role_id, team_id, role_id),
                 )
             else:
                 storage._conn.execute(
@@ -568,6 +743,15 @@ def _reset_team_role_session_once(
                     """,
                     (team_role_id,),
                 )
+            storage._conn.execute(
+                """
+                UPDATE team_roles
+                SET working_dir = NULL,
+                    root_dir = NULL
+                WHERE team_role_id = ?
+                """,
+                (team_role_id,),
+            )
             _apply_legacy_blocks(runtime=runtime, storage=storage, role_id=role_id, team_role_id=team_role_id)
             return Result.ok(
                 MutationAck(
@@ -583,14 +767,14 @@ def _reset_team_role_session_once(
         return Result.fail_from_exception(
             exc,
             fallback_code=ErrorCode.STORAGE_NOT_FOUND,
-            fallback_details={"entity": "team_role", "id": f"team_id={team_id} role_id={role_id}", "cause": "reset_session"},
+            fallback_details={"entity": "team_role", "id": f"team_role_id={team_role_id}", "cause": "reset_session"},
         )
     except Exception as exc:
         return Result.fail_from_exception(
             exc,
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to reset team role session",
-            fallback_details={"entity": "team_role", "id": f"team_id={team_id} role_id={role_id}", "cause": "reset_session"},
+            fallback_details={"entity": "team_role", "id": f"team_role_id={team_role_id}", "cause": "reset_session"},
         )
 
 
@@ -598,17 +782,17 @@ def _deactivate_team_role_binding_once(
     runtime: Any,
     storage: Storage,
     *,
-    team_id: int,
-    role_id: int,
+    team_role_id: int,
     telegram_user_id: int,
 ) -> Result[MutationAck]:
     try:
         with storage.transaction(immediate=True):
-            storage.get_team(team_id)
-            team_role = storage.get_team_role(team_id, role_id)
-            team_role_id = storage.resolve_team_role_id(team_id, role_id, ensure_exists=True)
-            if team_role_id is None:
-                raise ValueError(f"Team role not found: team_id={team_id} role_id={role_id}")
+            identity = storage.resolve_team_role_identity(team_role_id)
+            if identity is None:
+                raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+            team_role = storage.get_team_role_by_id(team_role_id)
+            team_id = int(identity[0])
+            role_id = int(identity[1])
             if storage.has_provider_user_data_team_role_table():
                 storage._conn.execute(
                     """
@@ -617,24 +801,94 @@ def _deactivate_team_role_binding_once(
                     """,
                     (team_role_id,),
                 )
-            _apply_legacy_blocks(runtime=runtime, storage=storage, role_id=role_id, team_role_id=team_role_id)
+            if storage.has_provider_user_data_team_role_legacy_blocks_table():
+                storage._conn.execute(
+                    """
+                    DELETE FROM provider_user_data_team_role_legacy_blocks
+                    WHERE team_role_id = ?
+                    """,
+                    (team_role_id,),
+                )
+            if storage.has_prepost_team_role_id():
+                storage._conn.execute(
+                    """
+                    DELETE FROM role_prepost_processing
+                    WHERE team_role_id = ? OR (team_id = ? AND role_id = ?)
+                    """,
+                    (team_role_id, team_id, role_id),
+                )
+            else:
+                storage._conn.execute(
+                    """
+                    DELETE FROM role_prepost_processing
+                    WHERE team_id = ? AND role_id = ?
+                    """,
+                    (team_id, role_id),
+                )
+            if storage.has_skill_team_role_id():
+                storage._conn.execute(
+                    """
+                    DELETE FROM role_skills_enabled
+                    WHERE team_role_id = ? OR (team_id = ? AND role_id = ?)
+                    """,
+                    (team_role_id, team_id, role_id),
+                )
+            else:
+                storage._conn.execute(
+                    """
+                    DELETE FROM role_skills_enabled
+                    WHERE team_id = ? AND role_id = ?
+                    """,
+                    (team_id, role_id),
+                )
             if storage.has_session_team_role_id():
                 storage._conn.execute(
                     """
                     DELETE FROM user_role_sessions
-                    WHERE telegram_user_id = ? AND team_role_id = ?
+                    WHERE team_role_id = ? OR (team_id = ? AND role_id = ?)
                     """,
-                    (telegram_user_id, team_role_id),
+                    (team_role_id, team_id, role_id),
                 )
             else:
                 storage._conn.execute(
                     """
                     DELETE FROM user_role_sessions
-                    WHERE telegram_user_id = ? AND team_id = ? AND role_id = ?
+                    WHERE team_id = ? AND role_id = ?
                     """,
-                    (telegram_user_id, team_id, role_id),
+                    (team_id, role_id),
                 )
-            storage.deactivate_team_role(team_id, role_id)
+            if storage.has_team_role_runtime_status_table():
+                storage._conn.execute(
+                    """
+                    DELETE FROM team_role_runtime_status
+                    WHERE team_role_id = ?
+                    """,
+                    (team_role_id,),
+                )
+            if storage.has_role_lock_group_members_table():
+                storage._conn.execute(
+                    """
+                    DELETE FROM role_lock_group_members
+                    WHERE team_role_id = ?
+                    """,
+                    (team_role_id,),
+                )
+            if storage.has_team_role_surrogate_id():
+                storage._conn.execute(
+                    """
+                    DELETE FROM team_roles
+                    WHERE team_role_id = ?
+                    """,
+                    (team_role_id,),
+                )
+            else:
+                storage._conn.execute(
+                    """
+                    DELETE FROM team_roles
+                    WHERE team_id = ? AND role_id = ?
+                    """,
+                    (team_id, role_id),
+                )
             return Result.ok(
                 MutationAck(
                     ok=True,
@@ -649,14 +903,14 @@ def _deactivate_team_role_binding_once(
         return Result.fail_from_exception(
             exc,
             fallback_code=ErrorCode.STORAGE_NOT_FOUND,
-            fallback_details={"entity": "team_role", "id": f"team_id={team_id} role_id={role_id}", "cause": "deactivate_binding"},
+            fallback_details={"entity": "team_role", "id": f"team_role_id={team_role_id}", "cause": "deactivate_binding"},
         )
     except Exception as exc:
         return Result.fail_from_exception(
             exc,
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
-            fallback_message="Failed to deactivate team role binding",
-            fallback_details={"entity": "team_role", "id": f"team_id={team_id} role_id={role_id}", "cause": "deactivate_binding"},
+            fallback_message="Failed to delete team role binding",
+            fallback_details={"entity": "team_role", "id": f"team_role_id={team_role_id}", "cause": "deactivate_binding"},
         )
 
 
@@ -733,3 +987,12 @@ def _execute_with_idempotency(
         store = InMemoryIdempotencyStore()
         setattr(runtime, "_write_idempotency_store", store)
     return store.execute(operation=operation, key=key, fingerprint=fingerprint, apply_fn=apply_fn)
+
+
+def _normalize_absolute_path(raw_value: str, *, field_name: str) -> str:
+    value = str(raw_value or "").strip()
+    if not value:
+        raise ValueError(f"{field_name} must be a non-empty string")
+    if not Path(value).is_absolute():
+        raise ValueError(f"{field_name} must be an absolute path")
+    return value

@@ -12,9 +12,11 @@ class RoleDTO(ApiSchema):
     team_role_id: int | None
     role_name: str
     description: str
-    base_system_prompt: str
-    extra_instruction: str
+    system_prompt: str
+    extra_instructions: str
     llm_model: str | None
+    working_dir: str | None = None
+    root_dir: str | None = None
     is_active: bool
     is_orchestrator: bool = False
     mention_name: str | None = None
@@ -144,9 +146,12 @@ class PrePostProcessingToolDTO(ApiSchema):
 
 class TeamRolePatchRequestDTO(ApiSchema):
     enabled: bool | None = None
+    is_active: bool | None = None
     is_orchestrator: bool | None = None
     model_override: str | None = None
     display_name: str | None = None
+    system_prompt: str | None = None
+    extra_instructions: str | None = None
     system_prompt_override: str | None = None
     extra_instruction_override: str | None = None
     user_prompt_suffix: str | None = None
@@ -157,6 +162,7 @@ class MasterRolePatchRequestDTO(ApiSchema):
     role_name: str | None = None
     llm_model: str | None = None
     system_prompt: str | None = None
+    extra_instructions: str | None = None
     extra_instruction: str | None = None
 
 
@@ -165,6 +171,7 @@ class MasterRolePatchOutcomeDTO(ApiSchema):
     role_name: str
     llm_model: str | None
     system_prompt: str
+    extra_instructions: str = ""
     extra_instruction: str
 
 
@@ -178,8 +185,10 @@ class TeamRolePatchOutcomeDTO(ApiSchema):
     is_orchestrator: bool
     model_override: str | None
     display_name: str | None
-    system_prompt_override: str | None
-    extra_instruction_override: str | None
+    system_prompt: str | None = None
+    extra_instructions: str | None = None
+    system_prompt_override: str | None = None
+    extra_instruction_override: str | None = None
     user_prompt_suffix: str | None
     user_reply_prefix: str | None
 
@@ -207,6 +216,14 @@ class TeamRolePrepostPutRequestDTO(ApiSchema):
     config: dict[str, object] | None = None
 
 
+class TeamRoleWorkingDirPutRequestDTO(ApiSchema):
+    working_dir: str
+
+
+class TeamRoleRootDirPutRequestDTO(ApiSchema):
+    root_dir: str
+
+
 class TeamRoleSkillOutcomeDTO(ApiSchema):
     team_role_id: int
     skill_id: str
@@ -219,6 +236,16 @@ class TeamRolePrepostOutcomeDTO(ApiSchema):
     prepost_id: str
     enabled: bool
     config: dict[str, object] | None = None
+
+
+class TeamRoleWorkingDirOutcomeDTO(ApiSchema):
+    team_role_id: int
+    working_dir: str
+
+
+class TeamRoleRootDirOutcomeDTO(ApiSchema):
+    team_role_id: int
+    root_dir: str
 
 
 class QaCreateQuestionRequestDTO(ApiSchema):

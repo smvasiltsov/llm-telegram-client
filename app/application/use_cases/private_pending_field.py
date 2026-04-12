@@ -65,13 +65,11 @@ def normalize_pending_field_value(state: dict[str, object], raw_text: str) -> Re
 
 def validate_pending_field_value(state: dict[str, object], value: str) -> str | None:
     key = str(state.get("key", "")).strip().lower()
-    if key != "root_dir":
+    if key not in {"root_dir", "working_dir"}:
         return None
     root_path = Path(value).expanduser()
-    if not root_path.exists():
-        return f"Путь не существует: {root_path}"
-    if not root_path.is_dir():
-        return f"Путь не является директорией: {root_path}"
+    if not root_path.is_absolute():
+        return "Путь должен быть абсолютным."
     return None
 
 

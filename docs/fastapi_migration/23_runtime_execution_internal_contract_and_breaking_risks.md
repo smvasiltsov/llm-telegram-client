@@ -62,6 +62,6 @@
 - R5: Неполная propagation `correlation_id` между API и Runtime service.
 - R6: Изменение error taxonomy (machine codes) и рассинхронизация error mapping.
 - R7: Нарушение single-runner policy/lock semantics при масштабировании runtime.
-- R8: Telegram adapter остаётся с доменной оркестрацией (thin-client migration не доведён).
+- R8: Риск регрессии при удалении legacy fallback после thin-client cutover (нужен контролируемый rollout и метрики ошибок adapter-контракта).
 - R9: Несовместимость idempotency/retry между API и runtime queue при сетевых ретраях.
 - R10: Неполная миграция observability/CI gates, из-за чего регрессии runtime пути не блокируют merge.

@@ -409,7 +409,7 @@ def _group_role_caption(storage: Storage, group_id: int, role_id: int) -> str:
 
 def _group_roles_keyboard(storage: Storage, group_id: int) -> list[list[InlineKeyboardButton]]:
     rows: list[list[InlineKeyboardButton]] = []
-    for group_role in list_team_role_states(storage, group_id):
+    for group_role in list_team_role_states(storage, group_id, include_inactive=True):
         status = "ON" if group_role.enabled else "OFF"
         mode = "ORCH" if group_role.mode == "orchestrator" else "ROLE"
         team_role_id = _team_role_id(storage, group_id, group_role.role_id, ensure_exists=False)

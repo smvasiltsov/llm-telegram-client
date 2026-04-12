@@ -12,12 +12,15 @@
     "/api/v1/roles/catalog",
     "/api/v1/roles/catalog/errors",
     "/api/v1/skills",
+    "/api/v1/team-roles/{team_role_id}",
     "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}",
+    "/api/v1/team-roles/{team_role_id}/reset-session",
+    "/api/v1/team-roles/{team_role_id}/root-dir",
     "/api/v1/team-roles/{team_role_id}/skills/{skill_id}",
+    "/api/v1/team-roles/{team_role_id}/working-dir",
     "/api/v1/teams",
     "/api/v1/teams/{team_id}/roles",
     "/api/v1/teams/{team_id}/roles/{role_id}",
-    "/api/v1/teams/{team_id}/roles/{role_id}/reset-session",
     "/api/v1/teams/{team_id}/runtime-status",
     "/api/v1/teams/{team_id}/sessions",
     "/api/v1/threads/{thread_id}"
@@ -135,6 +138,26 @@
         "500"
       ]
     },
+    "/api/v1/team-roles/{team_role_id}": {
+      "delete": [
+        "204",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ],
+      "patch": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
     "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}": {
       "put": [
         "200",
@@ -146,7 +169,40 @@
         "500"
       ]
     },
+    "/api/v1/team-roles/{team_role_id}/reset-session": {
+      "post": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/team-roles/{team_role_id}/root-dir": {
+      "put": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
     "/api/v1/team-roles/{team_role_id}/skills/{skill_id}": {
+      "put": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/team-roles/{team_role_id}/working-dir": {
       "put": [
         "200",
         "401",
@@ -177,35 +233,6 @@
       ]
     },
     "/api/v1/teams/{team_id}/roles/{role_id}": {
-      "delete": [
-        "204",
-        "401",
-        "403",
-        "404",
-        "409",
-        "422",
-        "500"
-      ],
-      "patch": [
-        "200",
-        "401",
-        "403",
-        "404",
-        "409",
-        "422",
-        "500"
-      ],
-      "post": [
-        "200",
-        "401",
-        "403",
-        "404",
-        "409",
-        "422",
-        "500"
-      ]
-    },
-    "/api/v1/teams/{team_id}/roles/{role_id}/reset-session": {
       "post": [
         "200",
         "401",

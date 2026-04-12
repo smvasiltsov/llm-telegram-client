@@ -8,6 +8,7 @@ Addendum (contract patch): **2026-04-06T01:00:00Z** (orchestrator fallback routi
 Addendum (dispatch bridge v1): **2026-04-06T09:00:00Z** (execution bridge, retry/timeout semantics, observability и blocking gate `stage5_execution_bridge_gates`).
 Addendum (API parity extension): **2026-04-06T14:30:00Z** (`skills/prepost`, `roles/catalog` master-role shape, `PATCH /roles/{role_id}`, `qa-journal.answer_id`; additive-only).
 Addendum (API parity extension Wave 2): **2026-04-08T00:00:00Z** (unified `prepost_processing_tools`, roles/runtime-status filtering fixes, `POST /questions` input cleanup, idempotent bind endpoint).
+Addendum (Telegram thin-client, runtime extraction stage step 5): **2026-04-08T12:00:00Z** (handlers switched to unified runtime adapter contract, feature-flag fallback verified, blocking gates PASS).
 
 ## 1. Решение
 - Stage 5 v1 Q/A API orchestration: **GO**.
@@ -187,4 +188,20 @@ Addendum (API parity extension Wave 2): **2026-04-08T00:00:00Z** (unified `prepo
   - архитектурное ограничение single-instance bridge/runtime сохраняется (известный риск Stage 5).
 - Итоговый статус:
   - API parity extension Wave 2 — **GO**;
+  - общий Stage 5 статус остаётся **GO**.
+
+## 13. Addendum (2026-04-08, Telegram thin-client)
+- Что изменено:
+  - Telegram handlers (`group/private/common`) переведены на единый runtime adapter-контракт;
+  - runtime orchestration логика удалена из handler-path и вынесена за thin boundary;
+  - введён/проверен feature-flag fallback `thin -> legacy` (default: thin ON).
+- Валидация/gates:
+  - `scripts/stage5_thin_client_gates.sh` — **PASS**;
+  - `scripts/stage5_qa_api_gates.sh` — **PASS**;
+  - `scripts/stage5_execution_bridge_gates.sh` — **PASS**.
+- Риски:
+  - сохраняется архитектурное ограничение single-instance runtime/bridge;
+  - fallback legacy path оставлен только как временный safety-switch до этапа полного runtime extraction.
+- Итоговый статус:
+  - thin-client milestone этапа runtime extraction — **GO**;
   - общий Stage 5 статус остаётся **GO**.
