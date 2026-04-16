@@ -62,11 +62,37 @@ class TeamRoleSkillPutRequest:
 
 
 @dataclass(frozen=True)
+class TeamRoleSkillReplaceItem:
+    skill_id: str
+    enabled: bool = True
+    config: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TeamRoleSkillsReplaceRequest:
+    team_role_id: int
+    items: tuple[TeamRoleSkillReplaceItem, ...]
+
+
+@dataclass(frozen=True)
 class TeamRolePrepostPutRequest:
     team_role_id: int
     prepost_id: str
     enabled: bool
     config: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TeamRolePrepostReplaceItem:
+    prepost_id: str
+    enabled: bool = True
+    config: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class TeamRolePrepostReplaceRequest:
+    team_role_id: int
+    items: tuple[TeamRolePrepostReplaceItem, ...]
 
 
 @dataclass(frozen=True)
@@ -83,6 +109,16 @@ class TeamRolePrepostOutcome:
     prepost_id: str
     enabled: bool
     config: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class TeamRoleSkillsReplaceOutcome:
+    items: tuple[TeamRoleSkillOutcome, ...]
+
+
+@dataclass(frozen=True)
+class TeamRolePrepostReplaceOutcome:
+    items: tuple[TeamRolePrepostOutcome, ...]
 
 
 @dataclass(frozen=True)
@@ -118,12 +154,74 @@ class MasterRolePatchRequest:
 
 
 @dataclass(frozen=True)
+class MasterRoleCreateRequest:
+    role_name: str
+    system_prompt: str
+    llm_model: str
+    description: str | None = None
+    extra_instruction: str | None = None
+
+
+@dataclass(frozen=True)
 class MasterRolePatchOutcome:
     role_id: int
     role_name: str
     llm_model: str | None
     system_prompt: str
     extra_instruction: str
+
+
+@dataclass(frozen=True)
+class MasterRoleCreateOutcome:
+    role_id: int
+    role_name: str
+    llm_model: str | None
+    system_prompt: str
+    extra_instruction: str
+    description: str
+    is_active: bool
+
+
+@dataclass(frozen=True)
+class TeamCreateRequest:
+    name: str
+
+
+@dataclass(frozen=True)
+class TeamCreateOutcome:
+    team_id: int
+    public_id: str
+    name: str | None
+    is_active: bool
+    ext_json: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class TeamRenameRequest:
+    name: str
+
+
+@dataclass(frozen=True)
+class TeamRenameOutcome:
+    team_id: int
+    public_id: str
+    name: str | None
+    is_active: bool
+    ext_json: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class DeleteTeamOutcome:
+    team_id: int
+
+
+@dataclass(frozen=True)
+class DeleteMasterRoleOutcome:
+    role_id: int
 
 
 @dataclass(frozen=True)
@@ -372,6 +470,93 @@ def put_team_role_skill_result(
         )
 
 
+def replace_team_role_skills_result(
+    runtime: Any,
+    storage: Storage,
+    *,
+    request: TeamRoleSkillsReplaceRequest,
+) -> Result[TeamRoleSkillsReplaceOutcome]:
+    seen: set[str] = set()
+    normalized_items: list[TeamRoleSkillReplaceItem] = []
+    for item in request.items:
+        skill_id = str(item.skill_id or "").strip()
+        if not skill_id:
+            return Result.fail(
+                ErrorCode.VALIDATION_INVALID_INPUT,
+                "skill_id must be a non-empty string",
+                details={"entity": "skill_binding", "cause": "invalid_skill_id"},
+            )
+        if skill_id in seen:
+            return Result.fail(
+                ErrorCode.VALIDATION_INVALID_INPUT,
+                f"Duplicate skill_id in request: {skill_id}",
+                details={"entity": "skill_binding", "id": skill_id, "cause": "duplicate_id"},
+            )
+        if not _skill_exists(runtime, skill_id):
+            return Result.fail(
+                ErrorCode.STORAGE_NOT_FOUND,
+                f"Skill not found: {skill_id}",
+                details={"entity": "skill", "id": skill_id, "cause": "not_found"},
+            )
+        seen.add(skill_id)
+        normalized_items.append(
+            TeamRoleSkillReplaceItem(
+                skill_id=skill_id,
+                enabled=bool(item.enabled),
+                config=item.config,
+            )
+        )
+    try:
+        with storage.transaction(immediate=True):
+            if storage.resolve_team_role_identity(request.team_role_id) is None:
+                raise ValueError(f"Team role not found: team_role_id={request.team_role_id}")
+            current = storage.list_role_skills_for_team_role(request.team_role_id, enabled_only=False)
+            current_ids = {str(item.skill_id) for item in current}
+            requested_ids = {item.skill_id for item in normalized_items}
+            for skill_id in sorted(current_ids - requested_ids):
+                storage.delete_role_skill_for_team_role(request.team_role_id, skill_id)
+            for item in normalized_items:
+                existing = storage.get_role_skill_for_team_role(request.team_role_id, item.skill_id)
+                if existing is None:
+                    storage.upsert_role_skill_for_team_role(
+                        request.team_role_id,
+                        item.skill_id,
+                        enabled=item.enabled,
+                        config=item.config,
+                    )
+                    continue
+                storage.set_role_skill_enabled_for_team_role(request.team_role_id, item.skill_id, item.enabled)
+                if item.config is not None:
+                    storage.set_role_skill_config_for_team_role(request.team_role_id, item.skill_id, item.config)
+            updated = storage.list_role_skills_for_team_role(request.team_role_id, enabled_only=False)
+            return Result.ok(
+                TeamRoleSkillsReplaceOutcome(
+                    items=tuple(
+                        TeamRoleSkillOutcome(
+                            team_role_id=request.team_role_id,
+                            skill_id=str(item.skill_id),
+                            enabled=bool(item.enabled),
+                            config=_json_or_none(item.config_json),
+                        )
+                        for item in updated
+                    )
+                )
+            )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "skill_binding", "id": f"team_role_id={request.team_role_id}", "cause": "replace"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to replace team-role skills",
+            fallback_details={"entity": "skill_binding", "id": f"team_role_id={request.team_role_id}", "cause": "replace"},
+        )
+
+
 def put_team_role_prepost_result(
     runtime: Any,
     storage: Storage,
@@ -431,6 +616,101 @@ def put_team_role_prepost_result(
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to update team-role pre/post processing state",
             fallback_details={"entity": "prepost_binding", "id": f"{request.team_role_id}:{request.prepost_id}", "cause": "put"},
+        )
+
+
+def replace_team_role_prepost_result(
+    runtime: Any,
+    storage: Storage,
+    *,
+    request: TeamRolePrepostReplaceRequest,
+) -> Result[TeamRolePrepostReplaceOutcome]:
+    seen: set[str] = set()
+    normalized_items: list[TeamRolePrepostReplaceItem] = []
+    for item in request.items:
+        prepost_id = str(item.prepost_id or "").strip()
+        if not prepost_id:
+            return Result.fail(
+                ErrorCode.VALIDATION_INVALID_INPUT,
+                "prepost_id must be a non-empty string",
+                details={"entity": "prepost_binding", "cause": "invalid_prepost_id"},
+            )
+        if prepost_id in seen:
+            return Result.fail(
+                ErrorCode.VALIDATION_INVALID_INPUT,
+                f"Duplicate prepost_id in request: {prepost_id}",
+                details={"entity": "prepost_binding", "id": prepost_id, "cause": "duplicate_id"},
+            )
+        if not _prepost_exists(runtime, prepost_id):
+            return Result.fail(
+                ErrorCode.STORAGE_NOT_FOUND,
+                f"Pre/post processing not found: {prepost_id}",
+                details={"entity": "prepost_processing", "id": prepost_id, "cause": "not_found"},
+            )
+        seen.add(prepost_id)
+        normalized_items.append(
+            TeamRolePrepostReplaceItem(
+                prepost_id=prepost_id,
+                enabled=bool(item.enabled),
+                config=item.config,
+            )
+        )
+    try:
+        with storage.transaction(immediate=True):
+            if storage.resolve_team_role_identity(request.team_role_id) is None:
+                raise ValueError(f"Team role not found: team_role_id={request.team_role_id}")
+            current = storage.list_role_prepost_processing_for_team_role(request.team_role_id, enabled_only=False)
+            current_ids = {str(item.prepost_processing_id) for item in current}
+            requested_ids = {item.prepost_id for item in normalized_items}
+            for prepost_id in sorted(current_ids - requested_ids):
+                storage.delete_role_prepost_processing_for_team_role(request.team_role_id, prepost_id)
+            for item in normalized_items:
+                existing = storage.get_role_prepost_processing_for_team_role(request.team_role_id, item.prepost_id)
+                if existing is None:
+                    storage.upsert_role_prepost_processing_for_team_role(
+                        request.team_role_id,
+                        item.prepost_id,
+                        enabled=item.enabled,
+                        config=item.config,
+                    )
+                    continue
+                storage.set_role_prepost_processing_enabled_for_team_role(
+                    request.team_role_id,
+                    item.prepost_id,
+                    item.enabled,
+                )
+                if item.config is not None:
+                    storage.set_role_prepost_processing_config_for_team_role(
+                        request.team_role_id,
+                        item.prepost_id,
+                        item.config,
+                    )
+            updated = storage.list_role_prepost_processing_for_team_role(request.team_role_id, enabled_only=False)
+            return Result.ok(
+                TeamRolePrepostReplaceOutcome(
+                    items=tuple(
+                        TeamRolePrepostOutcome(
+                            team_role_id=request.team_role_id,
+                            prepost_id=str(item.prepost_processing_id),
+                            enabled=bool(item.enabled),
+                            config=_json_or_none(item.config_json),
+                        )
+                        for item in updated
+                    )
+                )
+            )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "prepost_binding", "id": f"team_role_id={request.team_role_id}", "cause": "replace"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to replace team-role pre/post processing",
+            fallback_details={"entity": "prepost_binding", "id": f"team_role_id={request.team_role_id}", "cause": "replace"},
         )
 
 
@@ -599,6 +879,283 @@ def patch_master_role_result(
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to patch master role",
             fallback_details={"entity": "master_role", "id": role_id, "cause": "patch"},
+        )
+
+
+def create_master_role_result(
+    storage: Storage,
+    *,
+    request: MasterRoleCreateRequest,
+) -> Result[MasterRoleCreateOutcome]:
+    role_name = str(request.role_name or "").strip()
+    system_prompt = str(request.system_prompt or "").strip()
+    llm_model = str(request.llm_model or "").strip()
+    if not role_name:
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "role_name must be a non-empty string",
+            details={"entity": "master_role", "cause": "invalid_role_name"},
+        )
+    if not system_prompt:
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "system_prompt must be a non-empty string",
+            details={"entity": "master_role", "cause": "invalid_system_prompt"},
+        )
+    if not llm_model:
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "llm_model must be a non-empty string",
+            details={"entity": "master_role", "cause": "invalid_llm_model"},
+        )
+    description = str(request.description or "").strip()
+    extra_instruction = str(request.extra_instruction or "").strip()
+    try:
+        with storage.transaction(immediate=True):
+            try:
+                _ = storage.get_role_by_name(role_name)
+                return Result.fail(
+                    ErrorCode.CONFLICT_ALREADY_EXISTS,
+                    f"Role name already exists: {role_name}",
+                    details={"entity": "master_role", "cause": "name_conflict", "role_name": role_name},
+                )
+            except ValueError:
+                pass
+            created = storage.upsert_role(
+                role_name=role_name,
+                description=description,
+                base_system_prompt=system_prompt,
+                extra_instruction=extra_instruction,
+                llm_model=llm_model,
+                is_active=True,
+            )
+            return Result.ok(
+                MasterRoleCreateOutcome(
+                    role_id=int(created.role_id),
+                    role_name=str(created.role_name),
+                    llm_model=created.llm_model,
+                    system_prompt=str(created.base_system_prompt),
+                    extra_instruction=str(created.extra_instruction or ""),
+                    description=str(created.description or ""),
+                    is_active=bool(created.is_active),
+                )
+            )
+    except sqlite3.IntegrityError:
+        return Result.fail(
+            ErrorCode.CONFLICT_ALREADY_EXISTS,
+            "Role name conflict",
+            details={"entity": "master_role", "cause": "name_conflict", "role_name": role_name},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to create master role",
+            fallback_details={"entity": "master_role", "cause": "create"},
+        )
+
+
+def create_team_result(
+    storage: Storage,
+    *,
+    request: TeamCreateRequest,
+) -> Result[TeamCreateOutcome]:
+    name = str(request.name or "").strip()
+    if not name:
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "name must be a non-empty string",
+            details={"entity": "team", "cause": "invalid_name"},
+        )
+    try:
+        with storage.transaction(immediate=True):
+            created = storage.upsert_team(name=name, public_id=None, is_active=True, ext_json=None)
+            return Result.ok(
+                TeamCreateOutcome(
+                    team_id=int(created.team_id),
+                    public_id=str(created.public_id),
+                    name=created.name,
+                    is_active=bool(created.is_active),
+                    ext_json=created.ext_json,
+                    created_at=str(created.created_at),
+                    updated_at=str(created.updated_at),
+                )
+            )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to create team",
+            fallback_details={"entity": "team", "cause": "create"},
+        )
+
+
+def rename_team_result(
+    storage: Storage,
+    *,
+    team_id: int,
+    request: TeamRenameRequest,
+) -> Result[TeamRenameOutcome]:
+    name = str(request.name or "").strip()
+    if not name:
+        return Result.fail(
+            ErrorCode.VALIDATION_INVALID_INPUT,
+            "name must be a non-empty string",
+            details={"entity": "team", "cause": "invalid_name"},
+        )
+    try:
+        with storage.transaction(immediate=True):
+            _ = storage.get_team(team_id)
+            now = datetime.now(timezone.utc).isoformat()
+            storage._conn.execute(
+                """
+                UPDATE teams
+                SET name = ?, updated_at = ?
+                WHERE team_id = ?
+                """,
+                (name, now, team_id),
+            )
+            updated = storage.get_team(team_id)
+            return Result.ok(
+                TeamRenameOutcome(
+                    team_id=int(updated.team_id),
+                    public_id=str(updated.public_id),
+                    name=updated.name,
+                    is_active=bool(updated.is_active),
+                    ext_json=updated.ext_json,
+                    created_at=str(updated.created_at),
+                    updated_at=str(updated.updated_at),
+                )
+            )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "team", "id": team_id, "cause": "rename"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to rename team",
+            fallback_details={"entity": "team", "id": team_id, "cause": "rename"},
+        )
+
+
+def delete_team_result(
+    storage: Storage,
+    *,
+    team_id: int,
+) -> Result[DeleteTeamOutcome]:
+    dependency_tables = (
+        "team_bindings",
+        "team_roles",
+        "questions",
+        "answers",
+        "orchestrator_feed",
+        "thread_events",
+    )
+    try:
+        with storage.transaction(immediate=True):
+            _ = storage.get_team(team_id)
+            cur = storage._conn.cursor()
+            blocking: list[str] = []
+            for table in dependency_tables:
+                row = cur.execute(f"SELECT 1 FROM {table} WHERE team_id = ? LIMIT 1", (team_id,)).fetchone()
+                if row is not None:
+                    blocking.append(table)
+            if blocking:
+                return Result.fail(
+                    ErrorCode.CONFLICT_ALREADY_EXISTS,
+                    f"Team {team_id} has dependent entities and cannot be deleted",
+                    details={
+                        "entity": "team",
+                        "id": team_id,
+                        "cause": "dependency_conflict",
+                        "dependencies": blocking,
+                    },
+                )
+            storage._conn.execute("DELETE FROM teams WHERE team_id = ?", (team_id,))
+            return Result.ok(DeleteTeamOutcome(team_id=team_id))
+    except sqlite3.IntegrityError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.CONFLICT_ALREADY_EXISTS,
+            fallback_message=f"Team {team_id} has dependent entities and cannot be deleted",
+            fallback_details={"entity": "team", "id": team_id, "cause": "dependency_conflict"},
+        )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "team", "id": team_id, "cause": "delete"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to delete team",
+            fallback_details={"entity": "team", "id": team_id, "cause": "delete"},
+        )
+
+
+def delete_master_role_result(
+    storage: Storage,
+    *,
+    role_id: int,
+) -> Result[DeleteMasterRoleOutcome]:
+    dependency_checks: tuple[tuple[str, str], ...] = (
+        ("team_roles", "role_id"),
+        ("user_role_sessions", "role_id"),
+        ("role_prepost_processing", "role_id"),
+        ("role_skills_enabled", "role_id"),
+        ("provider_user_data", "role_id"),
+        ("skill_runs", "role_id"),
+    )
+    try:
+        with storage.transaction(immediate=True):
+            _ = storage.get_role_by_id(role_id)
+            cur = storage._conn.cursor()
+            blocking: list[str] = []
+            for table, column in dependency_checks:
+                row = cur.execute(
+                    f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
+                    (role_id,),
+                ).fetchone()
+                if row is not None:
+                    blocking.append(table)
+            if blocking:
+                return Result.fail(
+                    ErrorCode.CONFLICT_ALREADY_EXISTS,
+                    f"Role {role_id} has bindings/dependencies and cannot be deleted",
+                    details={
+                        "entity": "master_role",
+                        "id": role_id,
+                        "cause": "dependency_conflict",
+                        "dependencies": blocking,
+                    },
+                )
+            storage._conn.execute("DELETE FROM roles WHERE role_id = ?", (role_id,))
+            return Result.ok(DeleteMasterRoleOutcome(role_id=role_id))
+    except sqlite3.IntegrityError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.CONFLICT_ALREADY_EXISTS,
+            fallback_message=f"Role {role_id} has bindings/dependencies and cannot be deleted",
+            fallback_details={"entity": "master_role", "id": role_id, "cause": "dependency_conflict"},
+        )
+    except ValueError as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.STORAGE_NOT_FOUND,
+            fallback_details={"entity": "master_role", "id": role_id, "cause": "delete"},
+        )
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to delete master role",
+            fallback_details={"entity": "master_role", "id": role_id, "cause": "delete"},
         )
 
 

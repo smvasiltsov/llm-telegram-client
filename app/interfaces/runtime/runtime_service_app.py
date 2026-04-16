@@ -10,6 +10,7 @@ from app.interfaces.api.dependencies import (
     provide_runtime_dispatch_health,
 )
 from app.interfaces.api.qa_dispatch_bridge_worker import build_dispatch_bridge_worker
+from app.interfaces.api.thread_event_outbox_dispatcher import build_thread_event_outbox_dispatcher
 
 logger = logging.getLogger("runtime_service")
 
@@ -41,13 +42,26 @@ def build_runtime_service_fastapi_app(runtime) -> object:
         if worker is None:
             setattr(app.state, "runtime_dispatch_bridge_worker", None)
             logger.info("runtime_service_worker_disabled")
-            return
-        await worker.start()
-        setattr(app.state, "runtime_dispatch_bridge_worker", worker)
-        logger.info("runtime_service_worker_started")
+        else:
+            await worker.start()
+            setattr(app.state, "runtime_dispatch_bridge_worker", worker)
+            logger.info("runtime_service_worker_started")
+        outbox = build_thread_event_outbox_dispatcher(getattr(app.state, "runtime", None))
+        if outbox is None:
+            setattr(app.state, "runtime_thread_event_outbox_dispatcher", None)
+            logger.info("runtime_service_outbox_disabled")
+        else:
+            await outbox.start()
+            setattr(app.state, "runtime_thread_event_outbox_dispatcher", outbox)
+            logger.info("runtime_service_outbox_started")
 
     @app.on_event("shutdown")
     async def _shutdown_worker() -> None:
+        outbox = getattr(app.state, "runtime_thread_event_outbox_dispatcher", None)
+        if outbox is not None:
+            await outbox.stop()
+            setattr(app.state, "runtime_thread_event_outbox_dispatcher", None)
+            logger.info("runtime_service_outbox_stopped")
         worker = getattr(app.state, "runtime_dispatch_bridge_worker", None)
         if worker is None:
             return

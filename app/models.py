@@ -285,3 +285,59 @@ class QaOrchestratorFeedItem:
     question_id: str
     answer_id: str
     created_at: str
+
+
+@dataclass
+class ThreadEvent:
+    event_id: str
+    team_id: int
+    thread_id: str
+    seq: int
+    event_type: str
+    author_type: str
+    direction: str
+    origin_interface: str | None
+    source_ref_type: str | None
+    source_ref_id: str | None
+    question_id: str | None
+    answer_id: str | None
+    source_question_id: str | None
+    parent_answer_id: str | None
+    payload_json: str | None
+    idempotency_key: str | None
+    created_at: str
+
+
+@dataclass
+class EventDelivery:
+    delivery_id: int
+    event_id: str
+    interface_type: str
+    target_id: str
+    status: str
+    attempt_count: int
+    max_attempts: int
+    next_retry_at: str | None
+    last_attempt_at: str | None
+    delivered_at: str | None
+    last_error_code: str | None
+    last_error_message: str | None
+    lease_owner: str | None
+    lease_expires_at: str | None
+    idempotency_key: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class EventSubscription:
+    subscription_id: int
+    scope: str
+    scope_id: str
+    interface_type: str
+    target_id: str
+    mode: str
+    is_active: bool
+    options_json: str | None
+    created_at: str
+    updated_at: str

@@ -217,6 +217,27 @@
   - blocking merge gate;
   - включает baseline `stage5_qa_api_gates` + bridge-specific suites.
 
+### 8.5 Addendum: Universal Thread Event Bus + Outbox (2026-04-12)
+- Публикация event-ов:
+  - `thread.message.created` для `user-question`, `child-question`, `role-answer`.
+- Outbox-доставка:
+  - primary interface + subscriptions (`thread`/`team`);
+  - retry/backoff + `failed_dlq`;
+  - idempotent delivery key.
+- Admin API:
+  - `GET|PUT|DELETE /api/v1/admin/event-subscriptions`
+  - `GET /api/v1/admin/thread-events`
+  - `GET /api/v1/admin/thread-events/trace?event_id=...`
+  - `GET /api/v1/admin/event-deliveries`
+  - `GET /api/v1/admin/event-deliveries/summary`
+  - `POST /api/v1/admin/event-deliveries/{delivery_id}/retry|skip|dlq-requeue`
+- Наблюдаемость:
+  - `events_published`
+  - `deliveries_ok`
+  - `deliveries_failed`
+  - `delivery_lag_ms`
+  - `dlq_size`
+
 ## 9. Связанные документы
 - `docs/fastapi_migration/14_stage5_qa_api_orchestration_spec.md`
 - `docs/fastapi_migration/18_stage5_qa_api_execution_checklist.md`

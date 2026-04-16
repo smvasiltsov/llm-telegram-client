@@ -3,22 +3,26 @@
     "/api/v1/answers/{answer_id}",
     "/api/v1/orchestrator/feed",
     "/api/v1/prepost_processing_tools",
+    "/api/v1/qa-journal",
     "/api/v1/questions",
     "/api/v1/questions/{question_id}",
     "/api/v1/questions/{question_id}/answer",
     "/api/v1/questions/{question_id}/status",
-    "/api/v1/qa-journal",
-    "/api/v1/roles/{role_id}",
+    "/api/v1/roles",
     "/api/v1/roles/catalog",
     "/api/v1/roles/catalog/errors",
+    "/api/v1/roles/{role_id}",
     "/api/v1/skills",
     "/api/v1/team-roles/{team_role_id}",
+    "/api/v1/team-roles/{team_role_id}/prepost",
     "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}",
     "/api/v1/team-roles/{team_role_id}/reset-session",
     "/api/v1/team-roles/{team_role_id}/root-dir",
+    "/api/v1/team-roles/{team_role_id}/skills",
     "/api/v1/team-roles/{team_role_id}/skills/{skill_id}",
     "/api/v1/team-roles/{team_role_id}/working-dir",
     "/api/v1/teams",
+    "/api/v1/teams/{team_id}",
     "/api/v1/teams/{team_id}/roles",
     "/api/v1/teams/{team_id}/roles/{role_id}",
     "/api/v1/teams/{team_id}/runtime-status",
@@ -32,6 +36,7 @@
         "401",
         "403",
         "404",
+        "422",
         "500"
       ]
     },
@@ -45,6 +50,15 @@
       ]
     },
     "/api/v1/prepost_processing_tools": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/qa-journal": {
       "get": [
         "200",
         "401",
@@ -70,6 +84,7 @@
         "401",
         "403",
         "404",
+        "422",
         "500"
       ]
     },
@@ -80,6 +95,7 @@
         "403",
         "404",
         "409",
+        "422",
         "500"
       ]
     },
@@ -89,24 +105,15 @@
         "401",
         "403",
         "404",
-        "500"
-      ]
-    },
-    "/api/v1/qa-journal": {
-      "get": [
-        "200",
-        "401",
-        "403",
         "422",
         "500"
       ]
     },
-    "/api/v1/roles/{role_id}": {
-      "patch": [
-        "200",
+    "/api/v1/roles": {
+      "post": [
+        "201",
         "401",
         "403",
-        "404",
         "409",
         "422",
         "500"
@@ -126,19 +133,11 @@
         "200",
         "401",
         "403",
-        "500"
-      ]
-    },
-    "/api/v1/skills": {
-      "get": [
-        "200",
-        "401",
-        "403",
         "422",
         "500"
       ]
     },
-    "/api/v1/team-roles/{team_role_id}": {
+    "/api/v1/roles/{role_id}": {
       "delete": [
         "204",
         "401",
@@ -158,7 +157,47 @@
         "500"
       ]
     },
+    "/api/v1/skills": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/team-roles/{team_role_id}": {
+      "patch": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ],
+      "delete": [
+        "204",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
     "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}": {
+      "put": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/team-roles/{team_role_id}/prepost": {
       "put": [
         "200",
         "401",
@@ -202,6 +241,17 @@
         "500"
       ]
     },
+    "/api/v1/team-roles/{team_role_id}/skills": {
+      "put": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ]
+    },
     "/api/v1/team-roles/{team_role_id}/working-dir": {
       "put": [
         "200",
@@ -218,6 +268,33 @@
         "200",
         "401",
         "403",
+        "422",
+        "500"
+      ],
+      "post": [
+        "201",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/teams/{team_id}": {
+      "delete": [
+        "204",
+        "401",
+        "403",
+        "404",
+        "409",
+        "422",
+        "500"
+      ],
+      "patch": [
+        "200",
+        "401",
+        "403",
+        "404",
+        "409",
         "422",
         "500"
       ]

@@ -95,6 +95,28 @@ class TeamRoleRuntimeStatusDTO(ApiSchema):
     updated_at: str
 
 
+class TeamRoleRuntimeCurrentQuestionDTO(ApiSchema):
+    question_id: str | None = None
+    thread_id: str | None = None
+    text: str
+    status: str | None = None
+    updated_at: str | None = None
+    source: Literal["question", "preview"] = "question"
+
+
+class TeamRoleRuntimeOverviewDTO(ApiSchema):
+    team_id: int
+    role_id: int
+    team_role_id: int
+    role_name: str
+    display_name: str
+    status: Literal["free", "busy"]
+    busy_request_id: str | None = None
+    busy_since: str | None = None
+    lease_expires_at: str | None = None
+    current_question: TeamRoleRuntimeCurrentQuestionDTO | None = None
+
+
 class RoleCatalogItemDTO(ApiSchema):
     role_name: str
     is_active: bool
@@ -166,6 +188,24 @@ class MasterRolePatchRequestDTO(ApiSchema):
     extra_instruction: str | None = None
 
 
+class MasterRoleCreateRequestDTO(ApiSchema):
+    role_name: str
+    system_prompt: str
+    llm_model: str
+    description: str | None = None
+    extra_instructions: str | None = None
+
+
+class MasterRoleCreateOutcomeDTO(ApiSchema):
+    role_id: int
+    role_name: str
+    llm_model: str | None
+    system_prompt: str
+    extra_instructions: str
+    description: str
+    is_active: bool
+
+
 class MasterRolePatchOutcomeDTO(ApiSchema):
     role_id: int
     role_name: str
@@ -197,6 +237,34 @@ class TeamRoleUserMutationRequestDTO(ApiSchema):
     telegram_user_id: int
 
 
+class TeamCreateRequestDTO(ApiSchema):
+    name: str
+
+
+class TeamCreateOutcomeDTO(ApiSchema):
+    team_id: int
+    public_id: str
+    name: str | None
+    is_active: bool
+    ext_json: str | None
+    created_at: str
+    updated_at: str
+
+
+class TeamRenameRequestDTO(ApiSchema):
+    name: str
+
+
+class TeamRenameOutcomeDTO(ApiSchema):
+    team_id: int
+    public_id: str
+    name: str | None
+    is_active: bool
+    ext_json: str | None
+    created_at: str
+    updated_at: str
+
+
 class MutationAckDTO(ApiSchema):
     ok: bool
     team_id: int
@@ -211,9 +279,29 @@ class TeamRoleSkillPutRequestDTO(ApiSchema):
     config: dict[str, object] | None = None
 
 
+class TeamRoleSkillReplaceItemDTO(ApiSchema):
+    skill_id: str
+    enabled: bool = True
+    config: dict[str, object] | None = None
+
+
+class TeamRoleSkillReplaceRequestDTO(ApiSchema):
+    items: list[TeamRoleSkillReplaceItemDTO]
+
+
 class TeamRolePrepostPutRequestDTO(ApiSchema):
     enabled: bool
     config: dict[str, object] | None = None
+
+
+class TeamRolePrepostReplaceItemDTO(ApiSchema):
+    prepost_id: str
+    enabled: bool = True
+    config: dict[str, object] | None = None
+
+
+class TeamRolePrepostReplaceRequestDTO(ApiSchema):
+    items: list[TeamRolePrepostReplaceItemDTO]
 
 
 class TeamRoleWorkingDirPutRequestDTO(ApiSchema):
@@ -238,6 +326,14 @@ class TeamRolePrepostOutcomeDTO(ApiSchema):
     config: dict[str, object] | None = None
 
 
+class TeamRoleSkillsReplaceOutcomeDTO(ApiSchema):
+    items: list[TeamRoleSkillOutcomeDTO]
+
+
+class TeamRolePrepostReplaceOutcomeDTO(ApiSchema):
+    items: list[TeamRolePrepostOutcomeDTO]
+
+
 class TeamRoleWorkingDirOutcomeDTO(ApiSchema):
     team_role_id: int
     working_dir: str
@@ -248,10 +344,44 @@ class TeamRoleRootDirOutcomeDTO(ApiSchema):
     root_dir: str
 
 
+class RecoveryQueuesResetScopeDTO(ApiSchema):
+    mode: Literal["global", "team"] = "global"
+    team_id: int | None = None
+
+
+class RecoveryQueuesResetSnapshotDTO(ApiSchema):
+    questions_accepted: int = 0
+    questions_queued: int = 0
+    questions_in_progress: int = 0
+    qa_dispatch_bridge_rows: int = 0
+    event_deliveries_pending: int = 0
+    event_deliveries_retry_scheduled: int = 0
+    event_deliveries_in_progress: int = 0
+    runtime_status_busy: int = 0
+    runtime_status_free: int = 0
+    runtime_status_pending: int = 0
+
+
+class RecoveryQueuesResetRequestDTO(ApiSchema):
+    scope: RecoveryQueuesResetScopeDTO = Field(default_factory=RecoveryQueuesResetScopeDTO)
+    dry_run: bool = True
+
+
+class RecoveryQueuesResetResponseDTO(ApiSchema):
+    scope: RecoveryQueuesResetScopeDTO
+    dry_run: bool
+    applied: bool
+    before: RecoveryQueuesResetSnapshotDTO
+    after: RecoveryQueuesResetSnapshotDTO
+    delta: RecoveryQueuesResetSnapshotDTO
+    summary: str | None = None
+
+
 class QaCreateQuestionRequestDTO(ApiSchema):
     team_id: int
     text: str
     team_role_id: int | None = None
+    origin_interface: str | None = None
     origin_type: Literal["user", "role_dispatch", "orchestrator"] = "user"
     source_question_id: str | None = None
     parent_answer_id: str | None = None
@@ -316,3 +446,89 @@ class QaOrchestratorFeedItemDTO(ApiSchema):
 class QaThreadResponseDTO(ApiSchema):
     questions: ApiCursorResponse
     answers: ApiCursorResponse
+
+
+class EventSubscriptionDTO(ApiSchema):
+    subscription_id: int
+    scope: str
+    scope_id: str
+    interface_type: str
+    target_id: str
+    mode: str
+    is_active: bool
+    options_json: str | None
+    created_at: str
+    updated_at: str
+
+
+class EventSubscriptionUpsertRequestDTO(ApiSchema):
+    scope: str
+    scope_id: str
+    interface_type: str
+    target_id: str
+    mode: str = "mirror"
+    is_active: bool = True
+    options_json: str | None = None
+
+
+class ThreadEventDTO(ApiSchema):
+    event_id: str
+    team_id: int
+    thread_id: str
+    seq: int
+    event_type: str
+    author_type: str
+    author_name: str | None = None
+    direction: str
+    origin_interface: str | None
+    source_ref_type: str | None
+    source_ref_id: str | None
+    question_id: str | None
+    answer_id: str | None
+    source_question_id: str | None
+    parent_answer_id: str | None
+    payload_json: str | None
+    idempotency_key: str | None
+    created_at: str
+
+
+class EventDeliveryDTO(ApiSchema):
+    delivery_id: int
+    event_id: str
+    interface_type: str
+    target_id: str
+    status: str
+    attempt_count: int
+    max_attempts: int
+    next_retry_at: str | None
+    last_attempt_at: str | None
+    delivered_at: str | None
+    last_error_code: str | None
+    last_error_message: str | None
+    lease_owner: str | None
+    lease_expires_at: str | None
+    idempotency_key: str | None
+    created_at: str
+    updated_at: str
+    lag_ms: float | None = None
+
+
+class EventDeliveryActionRequestDTO(ApiSchema):
+    reset_attempt_count: bool = False
+
+
+class ThreadEventTraceDTO(ApiSchema):
+    event: ThreadEventDTO
+    deliveries: list[EventDeliveryDTO] = Field(default_factory=list)
+
+
+class EventDeliveriesSummaryDTO(ApiSchema):
+    total: int
+    pending: int
+    in_progress: int
+    retry_scheduled: int
+    delivered: int
+    skipped: int
+    failed_dlq: int
+    avg_lag_ms: float | None = None
+    max_lag_ms: float | None = None

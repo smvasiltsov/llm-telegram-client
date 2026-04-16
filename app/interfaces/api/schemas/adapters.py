@@ -16,6 +16,8 @@ from app.application.use_cases.write_api import (
 from app.application.use_cases.qa_api import QaCreateQuestionOutcome, QaQuestionStatus
 from app.application.use_cases.read_api import RegistryItem
 from app.models import (
+    EventDelivery,
+    EventSubscription,
     MasterRoleCatalogItem,
     QaAnswer,
     QaOrchestratorFeedItem,
@@ -29,6 +31,7 @@ from app.models import (
     TeamRole,
     TeamRoleRuntimeStatus,
     TeamSessionView,
+    ThreadEvent,
     UserRoleSession,
 )
 
@@ -44,6 +47,9 @@ from .entities import (
     MutationAckDTO,
     MasterRoleCatalogItemDTO,
     MasterRolePatchOutcomeDTO,
+    EventDeliveryDTO,
+    EventSubscriptionDTO,
+    ThreadEventDTO,
     PrePostProcessingToolDTO,
     TeamBindingDTO,
     RoleLinkedItemDTO,
@@ -234,6 +240,18 @@ def qa_create_question_outcome_to_dto(value: QaCreateQuestionOutcome) -> QaCreat
 
 def qa_orchestrator_feed_item_to_dto(value: QaOrchestratorFeedItem) -> QaOrchestratorFeedItemDTO:
     return QaOrchestratorFeedItemDTO.model_validate(value)
+
+
+def event_subscription_to_dto(value: EventSubscription) -> EventSubscriptionDTO:
+    return EventSubscriptionDTO.model_validate(value)
+
+
+def thread_event_to_dto(value: ThreadEvent) -> ThreadEventDTO:
+    return ThreadEventDTO.model_validate(value)
+
+
+def event_delivery_to_dto(value: EventDelivery) -> EventDeliveryDTO:
+    return EventDeliveryDTO.model_validate(value)
 
 
 def skill_to_dto(value: RegistryItem) -> SkillDTO:

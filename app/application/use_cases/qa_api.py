@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Generic, Literal, TypeVar
 from uuid import uuid4
 
 from app.application.contracts import ErrorCode, Result
+from app.application.observability import ensure_correlation_id, get_correlation_id
 from app.services.prompt_builder import provider_id_from_model, resolve_provider_model
 from app.models import QaAnswer, QaOrchestratorFeedItem, QaQuestion
 from app.storage import QA_STATUSES, Storage
 from app.utils import extract_role_mentions
 
 T = TypeVar("T")
+logger = logging.getLogger("api.thread_events")
 
 QA_STATUS_ORDER: tuple[str, ...] = (
     "accepted",
@@ -53,6 +56,7 @@ class QaCreateQuestionRequest:
     parent_answer_id: str | None = None
     thread_id: str | None = None
     question_id: str | None = None
+    origin_interface: str | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +113,7 @@ def create_question_result(
     provider_model_map: dict[str, Any] | None = None,
     default_provider_id: str | None = None,
     scope: str = "qa.create_question",
+    metrics_port: Any | None = None,
 ) -> Result[QaCreateQuestionOutcome]:
     key = str(idempotency_key or "").strip()
     if not key:
@@ -183,6 +188,46 @@ def create_question_result(
                 origin_type=request.origin_type,
                 text=request.text,
                 status="accepted",
+            )
+            question_event_payload = json.dumps(
+                {
+                    "kind": _question_event_kind(request.origin_type),
+                    "text": str(request.text or ""),
+                    "lineage": _question_event_lineage_payload(request),
+                },
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            created_event = storage.create_thread_event(
+                team_id=int(created.team_id),
+                thread_id=str(created.thread_id),
+                event_type="thread.message.created",
+                author_type=("user" if str(request.origin_type or "user") == "user" else "role"),
+                direction="question",
+                origin_interface=_resolve_question_origin_interface(request),
+                source_ref_type="question",
+                source_ref_id=str(created.question_id),
+                question_id=str(created.question_id),
+                source_question_id=request.source_question_id,
+                parent_answer_id=request.parent_answer_id,
+                payload_json=question_event_payload,
+                idempotency_key=f"thread-message:question:{created.question_id}",
+            )
+            if hasattr(metrics_port, "increment"):
+                metrics_port.increment(
+                    "events_published",
+                    labels={"operation": "thread_event_publish", "result": "ok", "error_code": ""},
+                )
+            corr_id = ensure_correlation_id(get_correlation_id())
+            logger.info(
+                "thread_event_published correlation_id=%s event_id=%s thread_id=%s seq=%s question_id=%s kind=%s",
+                corr_id,
+                created_event.event_id,
+                created_event.thread_id,
+                created_event.seq,
+                created.question_id,
+                _question_event_kind(request.origin_type),
             )
             storage.upsert_qa_idempotency(
                 scope=scope,
@@ -548,9 +593,32 @@ def _fingerprint_request(request: QaCreateQuestionRequest) -> str:
         "parent_answer_id": request.parent_answer_id,
         "thread_id": request.thread_id,
         "question_id": request.question_id,
+        "origin_interface": request.origin_interface,
     }
     serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _resolve_question_origin_interface(request: QaCreateQuestionRequest) -> str:
+    explicit = str(request.origin_interface or "").strip()
+    if explicit:
+        return explicit
+    if str(request.origin_type or "").strip().lower() == "user":
+        return "api"
+    return "qa_bridge"
+
+
+def _question_event_kind(origin_type: str) -> str:
+    if str(origin_type or "").strip().lower() == "user":
+        return "user-question"
+    return "child-question"
+
+
+def _question_event_lineage_payload(request: QaCreateQuestionRequest) -> dict[str, str | None]:
+    return {
+        "source_question_id": request.source_question_id,
+        "parent_answer_id": request.parent_answer_id,
+    }
 
 
 def _resolve_target_team_role_id(

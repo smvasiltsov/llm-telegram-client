@@ -250,11 +250,14 @@ def build_runtime(
         role_catalog=role_catalog,
         dispatch_mode=config.dispatch_mode,
         dispatch_is_runner=config.dispatch_is_runner,
+        qa_post_answer_max_hops=config.dispatch_post_answer_max_hops,
         telegram_thin_client_enabled=config.telegram_thin_client_enabled,
         telegram_api_base_url=config.telegram_api_base_url,
         telegram_api_timeout_sec=config.telegram_api_timeout_sec,
         queue_backend="in-memory",
         started_at=datetime.now(timezone.utc).isoformat(),
     )
+    setattr(runtime, "telegram_bot_token", str(config.telegram_bot_token or ""))
+    setattr(runtime, "telegram_event_bus_delivery_enabled", True)
     runtime.dependency_provider = build_runtime_dependency_provider(runtime)
     return runtime

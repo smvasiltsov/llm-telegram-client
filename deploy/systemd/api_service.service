@@ -1,0 +1,16 @@
+[Unit]
+Description=LLM Telegram API Service
+After=network.target runtime_service.service
+Wants=runtime_service.service
+
+[Service]
+Type=simple
+User=dev
+WorkingDirectory=/opt/llm/llm-telegram-client-in-dev
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/llm/llm-telegram-client-in-dev/.venv/bin/python /opt/llm/llm-telegram-client-in-dev/api_service.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

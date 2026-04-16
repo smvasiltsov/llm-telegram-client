@@ -4,6 +4,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 import hashlib
+import json
 from time import monotonic
 from typing import Awaitable, Callable, Literal
 from uuid import uuid4
@@ -378,6 +379,7 @@ class QaDispatchBridgeWorker:
                 max_hops,
             )
             return
+        origin_interface = self._resolve_origin_interface_for_question(parent_question) or "qa_bridge"
         for item in plan.items:
             if item.reason not in {"mention_tag", "orchestrator_user_event", "orchestrator_answer_event"}:
                 continue
@@ -396,6 +398,7 @@ class QaDispatchBridgeWorker:
                     source_question_id=item.parent_question_id,
                     parent_answer_id=item.parent_answer_id,
                     thread_id=parent_question.thread_id,
+                    origin_interface=origin_interface,
                 ),
                 idempotency_key=idempotency_key,
                 provider_registry=dict(getattr(self._runtime, "provider_registry", {}) or {}),
@@ -403,6 +406,7 @@ class QaDispatchBridgeWorker:
                 provider_model_map=dict(getattr(self._runtime, "provider_model_map", {}) or {}),
                 default_provider_id=str(getattr(self._runtime, "default_provider_id", "") or ""),
                 scope="qa.post_answer_dispatch",
+                metrics_port=getattr(self._runtime, "metrics_port", None),
             )
             if result.is_error or result.value is None:
                 logger.warning(
@@ -425,6 +429,21 @@ class QaDispatchBridgeWorker:
             )
             if not bool(result.value.idempotent_replay):
                 self.enqueue_question(child.question_id)
+
+    def _resolve_origin_interface_for_question(self, question: QaQuestion) -> str | None:
+        events = self._storage.list_thread_events(thread_id=str(question.thread_id), limit=500)
+        matched = [
+            item
+            for item in events
+            if str(item.event_type) == "thread.message.created"
+            and str(item.direction) == "question"
+            and str(item.question_id or "") == str(question.question_id)
+        ]
+        if not matched:
+            return None
+        latest = max(matched, key=lambda item: int(item.seq))
+        origin = str(latest.origin_interface or "").strip()
+        return origin or None
 
     async def _process_question(self, question_id: str) -> None:
         question = self._storage.get_question(question_id)
@@ -502,6 +521,50 @@ class QaDispatchBridgeWorker:
                     if outcome.is_error or outcome.value is None or outcome.value.question is None:
                         raise RuntimeError("internal_execution_error:persist_terminal_outcome_failed")
                     final_q = outcome.value.question
+                    if outcome.value.answer is not None:
+                        answer_origin_interface = self._resolve_origin_interface_for_question(final_q) or "qa_bridge"
+                        answer_event_payload = json.dumps(
+                            {
+                                "kind": "role-answer",
+                                "text": str(outcome.value.answer.text or ""),
+                                "lineage": {
+                                    "source_question_id": final_q.source_question_id,
+                                    "parent_answer_id": final_q.parent_answer_id,
+                                },
+                            },
+                            ensure_ascii=True,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        with self._storage.transaction(immediate=True):
+                            answer_event = self._storage.create_thread_event(
+                                team_id=int(final_q.team_id),
+                                thread_id=str(final_q.thread_id),
+                                event_type="thread.message.created",
+                                author_type="role",
+                                direction="answer",
+                                origin_interface=answer_origin_interface,
+                                source_ref_type="answer",
+                                source_ref_id=str(outcome.value.answer.answer_id),
+                                question_id=str(final_q.question_id),
+                                answer_id=str(outcome.value.answer.answer_id),
+                                source_question_id=final_q.source_question_id,
+                                parent_answer_id=final_q.parent_answer_id,
+                                payload_json=answer_event_payload,
+                                idempotency_key=f"thread-message:answer:{outcome.value.answer.answer_id}",
+                            )
+                        self._metrics.increment(
+                            "events_published",
+                            labels={"operation": "thread_event_publish", "result": "ok", "error_code": ""},
+                        )
+                        logger.info(
+                            "thread_event_published correlation_id=%s event_id=%s thread_id=%s seq=%s answer_id=%s kind=role-answer",
+                            corr_id,
+                            answer_event.event_id,
+                            answer_event.thread_id,
+                            answer_event.seq,
+                            outcome.value.answer.answer_id,
+                        )
                     latency_ms = max(0.0, (monotonic() - operation_started) * 1000.0)
                     self._metrics.observe_ms(
                         "runtime_transition_latency_ms",

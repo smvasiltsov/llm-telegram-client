@@ -171,6 +171,7 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
                 "team_id": 1,
                 "text": "hello",
                 "team_role_id": 7,
+                "origin_interface": None,
                 "origin_type": "user",
                 "source_question_id": None,
                 "parent_answer_id": None,

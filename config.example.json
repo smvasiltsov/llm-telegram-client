@@ -68,7 +68,8 @@
   },
   "dispatch": {
     "mode": "single-instance",
-    "is_runner": true
+    "is_runner": true,
+    "post_answer_max_hops": 3
   },
   "migration": {
     "team": {

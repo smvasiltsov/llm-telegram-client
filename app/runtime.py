@@ -84,6 +84,7 @@ class RuntimeContext:
     role_catalog: RoleCatalog
     dispatch_mode: str = "single-instance"
     dispatch_is_runner: bool = True
+    qa_post_answer_max_hops: int = 3
     telegram_thin_client_enabled: bool = True
     telegram_api_base_url: str = "http://127.0.0.1:8080"
     telegram_api_timeout_sec: int = 30

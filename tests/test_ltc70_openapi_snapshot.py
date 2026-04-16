@@ -58,7 +58,7 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
     def test_read_only_openapi_snapshot(self) -> None:
         client = self._client()
         schema = client.get("/openapi.json").json()
-        managed_statuses = {"200", "204", "401", "403", "404", "409", "422", "500"}
+        managed_statuses = {"200", "201", "202", "204", "401", "403", "404", "409", "422", "500"}
         managed_routes: dict[str, tuple[str, ...]] = {
             "/api/v1/answers/{answer_id}": ("get",),
             "/api/v1/orchestrator/feed": ("get",),
@@ -68,12 +68,14 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
             "/api/v1/questions/{question_id}/answer": ("get",),
             "/api/v1/questions/{question_id}/status": ("get",),
             "/api/v1/qa-journal": ("get",),
-            "/api/v1/roles/{role_id}": ("patch",),
+            "/api/v1/roles": ("post",),
+            "/api/v1/roles/{role_id}": ("patch", "delete"),
             "/api/v1/roles/catalog": ("get",),
             "/api/v1/roles/catalog/errors": ("get",),
             "/api/v1/skills": ("get",),
             "/api/v1/threads/{thread_id}": ("get",),
-            "/api/v1/teams": ("get",),
+            "/api/v1/teams": ("get", "post"),
+            "/api/v1/teams/{team_id}": ("patch", "delete"),
             "/api/v1/teams/{team_id}/roles": ("get",),
             "/api/v1/teams/{team_id}/roles/{role_id}": ("post",),
             "/api/v1/teams/{team_id}/runtime-status": ("get",),
@@ -81,7 +83,9 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
             "/api/v1/team-roles/{team_role_id}": ("patch", "delete"),
             "/api/v1/team-roles/{team_role_id}/reset-session": ("post",),
             "/api/v1/team-roles/{team_role_id}/skills/{skill_id}": ("put",),
+            "/api/v1/team-roles/{team_role_id}/skills": ("put",),
             "/api/v1/team-roles/{team_role_id}/prepost/{prepost_id}": ("put",),
+            "/api/v1/team-roles/{team_role_id}/prepost": ("put",),
             "/api/v1/team-roles/{team_role_id}/working-dir": ("put",),
             "/api/v1/team-roles/{team_role_id}/root-dir": ("put",),
         }

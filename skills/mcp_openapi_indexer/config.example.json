@@ -1,0 +1,14 @@
+{
+  "base_url": "https://api.example.com",
+  "https_only": true,
+  "allow_localhost": false,
+  "allow_private_network": false,
+  "request_timeout_sec": 10,
+  "retry_attempts": 2,
+  "max_redirects": 3,
+  "cache_ttl_sec": 300,
+  "max_spec_bytes": 10485760,
+  "max_operations": 5000,
+  "bearer_token": "",
+  "api_key": ""
+}

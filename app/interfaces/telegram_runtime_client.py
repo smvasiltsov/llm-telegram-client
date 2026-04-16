@@ -205,6 +205,7 @@ class ThinRuntimeClient:
             "team_id": team_id,
             "team_role_id": int(team_role_id),
             "text": user_text,
+            "origin_interface": "telegram",
             "origin_type": "user",
         }
 
@@ -251,10 +252,64 @@ class ThinRuntimeClient:
                     )
                     return None
                 create_payload = create_resp.json()
+                question_payload = create_payload.get("question") or {}
                 question_id = str(((create_payload.get("question") or {}).get("question_id")) or "").strip()
+                thread_id = str((question_payload.get("thread_id")) or "").strip()
                 if not question_id:
                     logger.warning("thin_api_fallback_inprocess reason=missing_question_id")
                     return None
+                if thread_id:
+                    try:
+                        _ = await client.put(
+                            "/api/v1/admin/event-subscriptions",
+                            json={
+                                "scope": "thread",
+                                "scope_id": thread_id,
+                                "interface_type": "telegram",
+                                "target_id": str(chat_id),
+                                "mode": "mirror",
+                                "is_active": True,
+                            },
+                            headers=headers,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "thin_api_thread_subscription_upsert_failed correlation_id=%s thread_id=%s chat_id=%s",
+                            corr_id,
+                            thread_id,
+                            chat_id,
+                        )
+
+                event_bus_delivery_enabled = bool(getattr(runtime, "telegram_event_bus_delivery_enabled", False))
+                if event_bus_delivery_enabled:
+                    logger.info(
+                        "thin_api_event_bus_delivery_enabled correlation_id=%s question_id=%s thread_id=%s",
+                        corr_id,
+                        question_id,
+                        thread_id,
+                    )
+                    return Result.ok(
+                        RuntimeOperationResult(
+                            operation=op_name,
+                            request_id=request_id,
+                            completed=True,
+                            queued=True,
+                            busy_acquired=True,
+                            pending_saved=False,
+                            replay_scheduled=False,
+                            transitions=(
+                                RuntimeTransition(
+                                    operation=op_name,
+                                    trigger=str(kwargs.get("chain_origin") or "telegram"),
+                                    from_state="accepted",
+                                    to_state="queued",
+                                    team_role_id=int(team_role_id),
+                                    request_id=request_id,
+                                    reason="thin_api_event_bus_dispatch",
+                                ),
+                            ),
+                        )
+                    )
 
                 answer_text: str | None = None
                 for _ in range(timeout_sec):

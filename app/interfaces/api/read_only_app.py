@@ -10,6 +10,7 @@ from app.interfaces.api.dependencies import (
 )
 from app.interfaces.api.error_mapping import map_exception_to_api_error
 from app.interfaces.api.qa_dispatch_bridge_worker import build_dispatch_bridge_worker
+from app.interfaces.api.thread_event_outbox_dispatcher import build_thread_event_outbox_dispatcher
 from app.interfaces.api.routers import build_read_only_v1_router
 from app.interfaces.api.schemas import ApiErrorBody, ApiErrorResponse
 
@@ -98,12 +99,22 @@ def build_read_only_fastapi_app(runtime) -> object:
         worker = build_dispatch_bridge_worker(getattr(app.state, "runtime", None))
         if worker is None:
             setattr(app.state, "qa_dispatch_bridge_worker", None)
+        else:
+            await worker.start()
+            setattr(app.state, "qa_dispatch_bridge_worker", worker)
+        outbox = build_thread_event_outbox_dispatcher(getattr(app.state, "runtime", None))
+        if outbox is None:
+            setattr(app.state, "thread_event_outbox_dispatcher", None)
             return
-        await worker.start()
-        setattr(app.state, "qa_dispatch_bridge_worker", worker)
+        await outbox.start()
+        setattr(app.state, "thread_event_outbox_dispatcher", outbox)
 
     @app.on_event("shutdown")
     async def _shutdown_dispatch_bridge() -> None:
+        outbox = getattr(app.state, "thread_event_outbox_dispatcher", None)
+        if outbox is not None:
+            await outbox.stop()
+            setattr(app.state, "thread_event_outbox_dispatcher", None)
         worker = getattr(app.state, "qa_dispatch_bridge_worker", None)
         if worker is None:
             return

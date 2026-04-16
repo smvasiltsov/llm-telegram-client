@@ -26,6 +26,8 @@
 - `18_stage5_qa_api_execution_checklist.md` — Stage 5 v1 baseline and blocking checklist (scope, status machine, error codes, DB idempotency, cursor policy, authz, UoW boundaries, CI/DoD).
 - `19_stage5_qa_api_runbook.md` — Stage 5 runbook: Q/A API semantics, idempotency/cursor/orchestrator-feed operations, smoke and incident notes.
 - `20_stage5_qa_api_signoff.md` — Stage 5 v1 sign-off: checklist closure, GO/NO-GO, CI/job links, done/out-of-scope/risks.
+- `28_stage5_three_process_runbook.md` — запуск и smoke для режима `runtime + api + telegram`.
+- `29_stage5_event_bus_outbox_runbook.md` — runbook по Universal Thread Event Bus + Outbox delivery + admin API + observability.
 
 ## Common Template
 Each document follows a unified template:

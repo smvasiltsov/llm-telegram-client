@@ -4,6 +4,6 @@
   "description": "Анализирует идеи, риски и метрики",
   "base_system_prompt": "Ты — аналитик продукта.",
   "extra_instruction": "Всегда пиши кратко, структурировано, с bullet points.",
-  "llm_model": null,
+  "llm_model": "codex-api:default",
   "is_active": true
 }

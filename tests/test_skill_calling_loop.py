@@ -79,6 +79,126 @@ class FakeLLMExecutor:
 
 
 class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
+    async def test_loop_with_write_uow_guard_logs_skill_run_on_success_path(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1201, "g")
+            role = storage.upsert_role(
+                role_name="skill_role_guard_success",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            storage.upsert_role_skill(group.group_id, role.role_id, "echo.skill", enabled=True, config={})
+            storage.enable_write_uow_guard()
+
+            registry = SkillRegistry()
+            registry.register(EchoSkill())
+            service = SkillService(registry)
+            executor = FakeLLMExecutor(
+                responses=[
+                    json.dumps(
+                        {
+                            "type": "skill_call",
+                            "skill_call": {
+                                "skill_id": "echo.skill",
+                                "arguments": {"text": "hello"},
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "final_answer",
+                            "answer": {"text": "done"},
+                        }
+                    ),
+                ]
+            )
+            loop = SkillCallingLoop(
+                storage=storage,
+                llm_executor=executor,
+                session_resolver=FakeSessionResolver(),
+                skills_service=service,
+                provider_models=[FakeModel(full_id="provider:model")],
+                provider_model_map={"provider:model": FakeModel(full_id="provider:model")},
+                provider_registry={},
+            )
+
+            result = await loop.run(
+                team_id=group.team_id,
+                user_id=42,
+                role=role,
+                session_token="token",
+                user_text="say hello",
+                reply_text=None,
+                actor_username="user",
+                trigger_type="mention_role",
+                mentioned_roles=["skill_role_guard_success"],
+                recipient="skill_role_guard_success",
+            )
+
+            self.assertEqual(result.status, "final_answer")
+            self.assertEqual(len(result.executed_skills), 1)
+            self.assertEqual(result.executed_skills[0].status, "ok")
+
+    async def test_loop_with_write_uow_guard_logs_skill_run_on_error_path(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1202, "g")
+            role = storage.upsert_role(
+                role_name="skill_role_guard_error",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            storage.enable_write_uow_guard()
+
+            registry = SkillRegistry()
+            service = SkillService(registry)
+            repeated_call = json.dumps(
+                {
+                    "type": "skill_call",
+                    "skill_call": {
+                        "skill_id": "missing.skill",
+                        "arguments": {"text": "loop"},
+                    },
+                }
+            )
+            executor = FakeLLMExecutor(responses=[repeated_call, repeated_call, repeated_call, repeated_call])
+            loop = SkillCallingLoop(
+                storage=storage,
+                llm_executor=executor,
+                session_resolver=FakeSessionResolver(),
+                skills_service=service,
+                provider_models=[FakeModel(full_id="provider:model")],
+                provider_model_map={"provider:model": FakeModel(full_id="provider:model")},
+                provider_registry={},
+            )
+
+            result = await loop.run(
+                team_id=group.team_id,
+                user_id=42,
+                role=role,
+                session_token="token",
+                user_text="loop",
+                reply_text=None,
+                actor_username="user",
+                trigger_type="mention_role",
+                mentioned_roles=["skill_role_guard_error"],
+                recipient="skill_role_guard_error",
+                max_steps=6,
+            )
+
+            self.assertEqual(result.status, "guard_repeated_call")
+            self.assertTrue(result.executed_skills)
+            self.assertTrue(all(item.status == "not_enabled" for item in result.executed_skills))
+
     async def test_loop_executes_skill_and_returns_final_answer(self) -> None:
         with TemporaryDirectory() as td:
             storage = Storage(Path(td) / "test.sqlite3")

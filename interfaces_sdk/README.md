@@ -2,6 +2,12 @@
 
 `interfaces_sdk` defines the public contract for external interface modules.
 
+## Interface SDK Kit
+
+For full onboarding and implementation docs, see:
+
+- `interfaces_sdk/kit/README.md`
+
 ## What To Implement
 
 Each interface module must expose `create_adapter(core_port, runtime, config)`.

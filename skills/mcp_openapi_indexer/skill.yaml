@@ -1,0 +1,7 @@
+id: mcp.openapi_indexer
+version: 0.1.0
+entrypoint: skill:create_skill
+enabled_by_default: false
+timeout_sec: 20
+permissions: []
+description: "Indexes OpenAPI 3.x endpoints, supports keyword search, path prefix filtering, and batch endpoint details."

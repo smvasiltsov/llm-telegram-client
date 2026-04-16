@@ -130,6 +130,122 @@ PY
 - оба `PUT` возвращают `200`;
 - в `GET /teams/{team_id}/roles` у роли видны `working_dir` и `root_dir`.
 
+## 5.1) HTTP smoke: create master-role / create team
+```bash
+NEW_ROLE=$(curl -sS -X POST "http://127.0.0.1:8080/api/v1/roles" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"role_name":"smoke_master_role","system_prompt":"You are smoke role","llm_model":"gpt-4o-mini","description":"Smoke","extra_instructions":"Reply short"}')
+echo "$NEW_ROLE"
+
+NEW_TEAM=$(curl -sS -X POST "http://127.0.0.1:8080/api/v1/teams" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Smoke Team"}')
+echo "$NEW_TEAM"
+```
+Ожидаемо:
+- оба `POST` возвращают `201`;
+- у роли `is_active=true`;
+- у команды `public_id` начинается с `team-`.
+
+Проверка дубля роли (`409`):
+```bash
+curl -i -X POST "http://127.0.0.1:8080/api/v1/roles" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"role_name":"smoke_master_role","system_prompt":"dup","llm_model":"gpt-4o-mini"}'
+```
+Ожидаемо: `409` и `error.code=conflict.already_exists`.
+
+## 5.2) HTTP smoke: rename/delete team, delete master-role
+Переименовать команду (`200`):
+```bash
+TEAM_ID_TO_RENAME=$(python3 - <<'PY'
+import json,sys
+payload=json.loads(sys.stdin.read() or "{}")
+print(payload.get("team_id",""))
+PY
+<<< "$NEW_TEAM")
+
+curl -i -X PATCH "http://127.0.0.1:8080/api/v1/teams/${TEAM_ID_TO_RENAME}" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Smoke Team Renamed"}'
+```
+
+Удалить пустую команду (`204`):
+```bash
+curl -i -X DELETE "http://127.0.0.1:8080/api/v1/teams/${TEAM_ID_TO_RENAME}" \
+  -H "X-Owner-User-Id: ${OWNER_ID}"
+```
+
+Удалить неиспользуемую мастер-роль (`204`):
+```bash
+ROLE_ID_TO_DELETE=$(python3 - <<'PY'
+import json,sys
+payload=json.loads(sys.stdin.read() or "{}")
+print(payload.get("role_id",""))
+PY
+<<< "$NEW_ROLE")
+
+curl -i -X DELETE "http://127.0.0.1:8080/api/v1/roles/${ROLE_ID_TO_DELETE}" \
+  -H "X-Owner-User-Id: ${OWNER_ID}"
+```
+
+Проверка конфликтов (`409`):
+```bash
+# team in use
+curl -i -X DELETE "http://127.0.0.1:8080/api/v1/teams/${TEAM_ID}" \
+  -H "X-Owner-User-Id: ${OWNER_ID}"
+
+# role in use (привязана в team_roles)
+curl -i -X DELETE "http://127.0.0.1:8080/api/v1/roles/$(python3 - <<'PY'
+import json,sys
+items=json.load(sys.stdin) or []
+print(items[0].get("role_id","") if items else "")
+PY
+<<< "$(curl -sS -H "X-Owner-User-Id: ${OWNER_ID}" "http://127.0.0.1:8080/api/v1/teams/${TEAM_ID}/roles?include_inactive=true")")" \
+  -H "X-Owner-User-Id: ${OWNER_ID}"
+```
+
+## 5.3) HTTP smoke: bulk replace skills/prepost
+Полная замена skills (`200`):
+```bash
+curl -i -X PUT "http://127.0.0.1:8080/api/v1/team-roles/${TEAM_ROLE_ID}/skills" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"skill_id":"fs.list_dir","enabled":true,"config":{"root_dir":"/tmp"}},{"skill_id":"fs.read_file","enabled":false,"config":{"x":1}}]}'
+```
+
+Очистка skills через `items: []` (`200`):
+```bash
+curl -i -X PUT "http://127.0.0.1:8080/api/v1/team-roles/${TEAM_ROLE_ID}/skills" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[]}'
+```
+
+Полная замена prepost (`200`):
+```bash
+curl -i -X PUT "http://127.0.0.1:8080/api/v1/team-roles/${TEAM_ROLE_ID}/prepost" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[{"prepost_id":"echo","enabled":true,"config":{"x":1}},{"prepost_id":"trim","enabled":false,"config":{"y":2}}]}'
+```
+
+Очистка prepost через `items: []` (`200`):
+```bash
+curl -i -X PUT "http://127.0.0.1:8080/api/v1/team-roles/${TEAM_ROLE_ID}/prepost" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"items":[]}'
+```
+
+Проверки ошибок:
+- duplicate `skill_id`/`prepost_id` в одном payload -> `422`.
+- неизвестный `skill_id`/`prepost_id` -> `404`.
+
 ## 6) Telegram smoke: message -> answer
 Действия:
 - Написать боту в Telegram личное сообщение (owner-user).
@@ -154,6 +270,24 @@ PY
 - Отправить запрос на эту роль.
 - Ожидаемо: бот в ЛС просит `root_dir`; после ответа абсолютным путём (например `/tmp/root`) исходный запрос продолжается автоматически.
 
+## 7.1) Event Bus / Outbox admin smoke
+```bash
+curl -i -X PUT "http://127.0.0.1:8080/api/v1/admin/event-subscriptions" \
+  -H "X-Owner-User-Id: ${OWNER_ID}" \
+  -H "Content-Type: application/json" \
+  -d "{\"scope\":\"team\",\"scope_id\":\"${TEAM_ID}\",\"interface_type\":\"mirror\",\"target_id\":\"team-${TEAM_ID}\",\"is_active\":true}"
+
+curl -sS -H "X-Owner-User-Id: ${OWNER_ID}" \
+  "http://127.0.0.1:8080/api/v1/admin/thread-events?team_id=${TEAM_ID}&limit=10"
+
+curl -sS -H "X-Owner-User-Id: ${OWNER_ID}" \
+  "http://127.0.0.1:8080/api/v1/admin/event-deliveries/summary"
+```
+Ожидаемо:
+- subscription создаётся (`200`);
+- есть `thread.message.created` события;
+- summary возвращает `failed_dlq/avg_lag_ms/max_lag_ms`.
+
 ## 8) Fallback (legacy path)
 ```bash
 python3 - <<'PY'
@@ -176,3 +310,31 @@ cd /opt/llm/llm-telegram-client-in-dev
 cp /tmp/config.stage5.3proc.backup.json config.json
 ```
 Ожидаемо: процессы остановлены, конфиг восстановлен.
+
+## 10) Rollout checklist
+1. Обновить код `api_service` + `runtime_service`.
+2. Перезапустить процессы (`runtime`, затем `api`, затем `telegram`).
+3. Прогнать smoke:
+   - `POST /api/v1/roles` -> `201`;
+   - `POST /api/v1/teams` -> `201`;
+   - `PATCH /api/v1/teams/{team_id}` -> `200`;
+   - `DELETE /api/v1/teams/{team_id}` (empty) -> `204`;
+   - `DELETE /api/v1/roles/{role_id}` (unused) -> `204`;
+   - `DELETE /api/v1/teams/{team_id}` (in use) -> `409`;
+   - `DELETE /api/v1/roles/{role_id}` (in use) -> `409`;
+   - `PUT /api/v1/team-roles/{team_role_id}/skills` (full replace) -> `200`;
+   - `PUT /api/v1/team-roles/{team_role_id}/skills` (`items: []`) -> `200` + пустой список;
+   - `PUT /api/v1/team-roles/{team_role_id}/prepost` (full replace) -> `200`;
+   - `PUT /api/v1/team-roles/{team_role_id}/prepost` (`items: []`) -> `200` + пустой список;
+   - duplicate ids в bulk payload -> `422`;
+   - unknown ids в bulk payload -> `404`;
+   - duplicate `role_name` -> `409`;
+   - invalid payload -> `422`.
+4. Проверить authz:
+   - без `X-Owner-User-Id` -> `401`;
+   - с чужим `X-Owner-User-Id` -> `403`.
+5. Проверить `/openapi.json` доступность и новые маршруты.
+6. Откат (если нужно):
+   - вернуть предыдущий релиз;
+   - перезапустить `runtime/api/telegram`;
+   - перепроверить smoke по старому baseline.

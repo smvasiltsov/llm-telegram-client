@@ -218,6 +218,311 @@ class LTC78Stage5FastApiContractTests(unittest.TestCase):
         response = client.get("/api/v1/qa-journal?limit=201", headers={"X-Owner-User-Id": "700"})
         self.assertEqual(response.status_code, 422)
 
+    def test_team_runtime_status_overview_includes_current_question_for_busy_role(self) -> None:
+        client = self._client()
+        storage = client.app.state.runtime.storage
+        team_id, role_id = self._team_id_and_role_id(client)
+        team_role_id = int(storage.resolve_team_role_id(team_id, role_id, ensure_exists=True) or 0)
+        self.assertGreater(team_role_id, 0)
+
+        with storage.transaction(immediate=True):
+            q = storage.create_question(
+                question_id="q-runtime-overview",
+                thread_id="t-runtime-overview",
+                team_id=team_id,
+                created_by_user_id=700,
+                target_team_role_id=team_role_id,
+                text="runtime overview current question",
+                status="accepted",
+            )
+            storage.transition_question_status(question_id=q.question_id, status="queued")
+            started = storage.start_question_dispatch_attempt(question_id=q.question_id, lease_ttl_sec=120, max_attempts=3)
+            self.assertIsNotNone(started)
+        acquired, _, _ = storage.try_acquire_team_role_busy(
+            team_role_id=team_role_id,
+            busy_request_id="overview-busy-1",
+            busy_owner_user_id=700,
+            busy_origin="qa",
+            preview_text="runtime overview current question",
+            preview_source="user",
+            busy_since="2026-04-15T00:00:00+00:00",
+            lease_expires_at="2026-04-15T00:05:00+00:00",
+        )
+        self.assertTrue(acquired)
+
+        response = client.get(
+            f"/api/v1/teams/{team_id}/runtime-status/overview",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        target = next((item for item in payload if int(item["team_role_id"]) == team_role_id), None)
+        self.assertIsNotNone(target)
+        self.assertEqual(target["status"], "busy")
+        self.assertIsNotNone(target["current_question"])
+        self.assertEqual(target["current_question"]["question_id"], "q-runtime-overview")
+        self.assertEqual(target["current_question"]["source"], "question")
+
+    def test_admin_event_bus_endpoints_crud_and_delivery_actions(self) -> None:
+        client = self._client()
+        team_id, role_id = self._team_id_and_role_id(client)
+        team_role_id = int(client.app.state.runtime.storage.resolve_team_role_id(team_id, role_id, ensure_exists=True) or 0)
+
+        upsert = client.put(
+            "/api/v1/admin/event-subscriptions",
+            headers={"X-Owner-User-Id": "700"},
+            json={
+                "scope": "team",
+                "scope_id": str(team_id),
+                "interface_type": "mirror",
+                "target_id": "team-mirror",
+                "mode": "mirror",
+                "is_active": True,
+            },
+        )
+        self.assertEqual(upsert.status_code, 200)
+        subscription_id = int(upsert.json()["subscription_id"])
+
+        listed = client.get(
+            f"/api/v1/admin/event-subscriptions?scope=team&scope_id={team_id}",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(int(item["subscription_id"]) == subscription_id for item in listed.json()))
+
+        created = client.post(
+            "/api/v1/questions",
+            headers={"X-Owner-User-Id": "700", "Idempotency-Key": "idem-admin-events-1"},
+            json={
+                "team_id": team_id,
+                "text": "admin bus smoke",
+                "team_role_id": team_role_id,
+                "thread_id": "t-admin-events",
+                "question_id": "q-admin-events",
+            },
+        )
+        self.assertEqual(created.status_code, 202)
+
+        events = client.get(
+            "/api/v1/admin/thread-events?thread_id=t-admin-events",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(events.status_code, 200)
+        self.assertGreaterEqual(len(events.json()), 1)
+        event_id = str(events.json()[0]["event_id"])
+        trace = client.get(
+            f"/api/v1/admin/thread-events/trace?event_id={event_id}",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(trace.status_code, 200)
+        self.assertEqual(str(trace.json()["event"]["event_id"]), event_id)
+
+        deliveries = client.get(
+            f"/api/v1/admin/event-deliveries?event_id={event_id}",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(deliveries.status_code, 200)
+        self.assertGreaterEqual(len(deliveries.json()), 1)
+        delivery_id = int(deliveries.json()[0]["delivery_id"])
+
+        skipped = client.post(
+            f"/api/v1/admin/event-deliveries/{delivery_id}/skip",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(skipped.status_code, 200)
+        self.assertEqual(skipped.json()["status"], "skipped")
+
+        retried = client.post(
+            f"/api/v1/admin/event-deliveries/{delivery_id}/retry",
+            headers={"X-Owner-User-Id": "700"},
+            json={"reset_attempt_count": True},
+        )
+        self.assertEqual(retried.status_code, 200)
+        self.assertEqual(retried.json()["status"], "retry_scheduled")
+        self.assertEqual(int(retried.json()["attempt_count"]), 0)
+        summary = client.get("/api/v1/admin/event-deliveries/summary", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(summary.status_code, 200)
+        self.assertIn("failed_dlq", summary.json())
+
+        with client.app.state.runtime.storage.transaction(immediate=True):
+            _ = client.app.state.runtime.storage.mark_event_delivery_dlq(
+                delivery_id,
+                error_code="test",
+                error_message="force_dlq",
+            )
+        dlq_requeue = client.post(
+            f"/api/v1/admin/event-deliveries/{delivery_id}/dlq-requeue",
+            headers={"X-Owner-User-Id": "700"},
+            json={"reset_attempt_count": True},
+        )
+        self.assertEqual(dlq_requeue.status_code, 200)
+        self.assertEqual(dlq_requeue.json()["status"], "retry_scheduled")
+
+        deleted = client.delete(
+            f"/api/v1/admin/event-subscriptions/{subscription_id}",
+            headers={"X-Owner-User-Id": "700"},
+        )
+        self.assertEqual(deleted.status_code, 204)
+
+    def test_admin_recovery_reset_dry_run_keeps_state(self) -> None:
+        client = self._client()
+        storage = client.app.state.runtime.storage
+        team_id, role_id = self._team_id_and_role_id(client)
+        team_role_id = int(storage.resolve_team_role_id(team_id, role_id, ensure_exists=True) or 0)
+        self.assertGreater(team_role_id, 0)
+
+        with storage.transaction(immediate=True):
+            q = storage.create_question(
+                question_id="q-recovery-dry",
+                thread_id="t-recovery-dry",
+                team_id=team_id,
+                created_by_user_id=700,
+                target_team_role_id=team_role_id,
+                text="recovery dry run",
+                status="accepted",
+            )
+            storage.transition_question_status(question_id=q.question_id, status="queued")
+            storage.start_question_dispatch_attempt(question_id=q.question_id, lease_ttl_sec=120, max_attempts=3)
+            acquired, _, _ = storage.try_acquire_team_role_busy(
+                team_role_id=team_role_id,
+                busy_request_id="dry-busy-1",
+                busy_owner_user_id=700,
+                busy_origin="qa",
+                preview_text="busy",
+                preview_source="user",
+                busy_since="2026-04-15T00:00:00+00:00",
+                lease_expires_at="2026-04-15T00:05:00+00:00",
+            )
+            self.assertTrue(acquired)
+            ev = storage.create_thread_event(
+                team_id=team_id,
+                thread_id="t-recovery-dry",
+                event_type="thread.message.created",
+                author_type="user",
+                direction="question",
+                origin_interface="telegram",
+                source_ref_type="question",
+                source_ref_id=q.question_id,
+                question_id=q.question_id,
+            )
+            delivery = storage.enqueue_event_delivery(
+                event_id=ev.event_id,
+                interface_type="mirror",
+                target_id="dry-target",
+            )
+            _ = storage.mark_event_delivery_retry(
+                int(delivery.delivery_id),
+                error_code="tmp",
+                error_message="tmp",
+                retry_delay_sec=0,
+            )
+
+        response = client.post(
+            "/api/v1/admin/recovery/queues/reset",
+            headers={"X-Owner-User-Id": "700"},
+            json={"scope": {"mode": "global"}, "dry_run": True},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertFalse(body["applied"])
+        self.assertTrue(body["dry_run"])
+        self.assertGreaterEqual(int(body["before"]["questions_in_progress"]), 1)
+        self.assertEqual(body["before"], body["after"])
+
+        q_after = storage.get_question("q-recovery-dry")
+        self.assertEqual((q_after.status if q_after else None), "in_progress")
+
+    def test_admin_recovery_reset_apply_resets_runtime_qa_and_event_deliveries(self) -> None:
+        client = self._client()
+        storage = client.app.state.runtime.storage
+        team_id, role_id = self._team_id_and_role_id(client)
+        team_role_id = int(storage.resolve_team_role_id(team_id, role_id, ensure_exists=True) or 0)
+        self.assertGreater(team_role_id, 0)
+
+        with storage.transaction(immediate=True):
+            q = storage.create_question(
+                question_id="q-recovery-apply",
+                thread_id="t-recovery-apply",
+                team_id=team_id,
+                created_by_user_id=700,
+                target_team_role_id=team_role_id,
+                text="recovery apply",
+                status="accepted",
+            )
+            storage.transition_question_status(question_id=q.question_id, status="queued")
+            started = storage.start_question_dispatch_attempt(question_id=q.question_id, lease_ttl_sec=120, max_attempts=3)
+            self.assertIsNotNone(started)
+            acquired, _, _ = storage.try_acquire_team_role_busy(
+                team_role_id=team_role_id,
+                busy_request_id="apply-busy-1",
+                busy_owner_user_id=700,
+                busy_origin="qa",
+                preview_text="busy",
+                preview_source="user",
+                busy_since="2026-04-15T00:00:00+00:00",
+                lease_expires_at="2026-04-15T00:05:00+00:00",
+            )
+            self.assertTrue(acquired)
+            ev = storage.create_thread_event(
+                team_id=team_id,
+                thread_id="t-recovery-apply",
+                event_type="thread.message.created",
+                author_type="user",
+                direction="question",
+                origin_interface="telegram",
+                source_ref_type="question",
+                source_ref_id=q.question_id,
+                question_id=q.question_id,
+            )
+            d_pending = storage.enqueue_event_delivery(
+                event_id=ev.event_id,
+                interface_type="mirror",
+                target_id="pending-target",
+            )
+            d_retry = storage.enqueue_event_delivery(
+                event_id=ev.event_id,
+                interface_type="mirror",
+                target_id="retry-target",
+            )
+            d_progress = storage.enqueue_event_delivery(
+                event_id=ev.event_id,
+                interface_type="mirror",
+                target_id="progress-target",
+            )
+            _ = storage.mark_event_delivery_retry(
+                int(d_retry.delivery_id),
+                error_code="tmp",
+                error_message="tmp",
+                retry_delay_sec=0,
+            )
+            claimed = storage.claim_pending_event_deliveries(limit=10, lease_owner="worker-1", lease_ttl_sec=120)
+            claimed_ids = {int(item.delivery_id) for item in claimed}
+            self.assertIn(int(d_progress.delivery_id), claimed_ids)
+
+        response = client.post(
+            "/api/v1/admin/recovery/queues/reset",
+            headers={"X-Owner-User-Id": "700"},
+            json={"scope": {"mode": "global"}, "dry_run": False},
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["applied"])
+        self.assertFalse(body["dry_run"])
+        self.assertGreaterEqual(int(body["before"]["questions_in_progress"]), 1)
+        self.assertEqual(int(body["after"]["questions_in_progress"]), 0)
+        self.assertEqual(int(body["after"]["runtime_status_busy"]), 0)
+
+        q_after = storage.get_question("q-recovery-apply")
+        self.assertEqual((q_after.status if q_after else None), "accepted")
+        status_after = storage.get_team_role_runtime_status(team_role_id)
+        self.assertEqual((status_after.status if status_after else None), "free")
+        self.assertEqual((status_after.busy_request_id if status_after else None), None)
+
+        deliveries = storage.list_event_deliveries(event_id=ev.event_id, limit=50)
+        statuses = {str(item.status) for item in deliveries}
+        self.assertEqual(statuses, {"retry_scheduled"})
+        self.assertTrue(all(int(item.attempt_count) == 0 for item in deliveries))
+
     def test_stage5_endpoints_owner_authz_401_403(self) -> None:
         client = self._client()
         endpoints = (

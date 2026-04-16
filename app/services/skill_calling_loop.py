@@ -534,20 +534,21 @@ class SkillCallingLoop:
                 error_text="Skill did not return SkillResult.",
             )
 
-        stored = self._storage.log_skill_run(
-            chain_id=chain_id,
-            step_index=step_index,
-            telegram_user_id=user_id,
-            chat_id=chat_id,
-            role_id=role.role_id,
-            skill_id=request.skill_id,
-            arguments=request.arguments,
-            config=config,
-            status="ok" if result.ok else "error",
-            ok=result.ok,
-            error_text=result.error,
-            output=result.output,
-        )
+        with self._storage.transaction(immediate=True):
+            stored = self._storage.log_skill_run(
+                chain_id=chain_id,
+                step_index=step_index,
+                telegram_user_id=user_id,
+                chat_id=chat_id,
+                role_id=role.role_id,
+                skill_id=request.skill_id,
+                arguments=request.arguments,
+                config=config,
+                status="ok" if result.ok else "error",
+                ok=result.ok,
+                error_text=result.error,
+                output=result.output,
+            )
         logger.info(
             "skill loop result chat_id=%s user_id=%s role=%s step=%s skill_id=%s status=%s ok=%s",
             chat_id,
@@ -581,20 +582,21 @@ class SkillCallingLoop:
         status: str,
         error_text: str,
     ) -> SkillExecutionRecord:
-        self._storage.log_skill_run(
-            chain_id=chain_id,
-            step_index=step_index,
-            telegram_user_id=user_id,
-            chat_id=chat_id,
-            role_id=role.role_id,
-            skill_id=skill_id,
-            arguments=arguments,
-            config=config,
-            status=status,
-            ok=False,
-            error_text=error_text,
-            output={},
-        )
+        with self._storage.transaction(immediate=True):
+            self._storage.log_skill_run(
+                chain_id=chain_id,
+                step_index=step_index,
+                telegram_user_id=user_id,
+                chat_id=chat_id,
+                role_id=role.role_id,
+                skill_id=skill_id,
+                arguments=arguments,
+                config=config,
+                status=status,
+                ok=False,
+                error_text=error_text,
+                output={},
+            )
         return SkillExecutionRecord(
             step_index=step_index,
             skill_id=skill_id,

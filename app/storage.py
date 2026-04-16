@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING
 
 from app.models import (
     AuthToken,
+    EventDelivery,
+    EventSubscription,
     Group,
     GroupRole,
     QaAnswer,
@@ -30,6 +32,7 @@ from app.models import (
     TeamRole,
     TeamRoleRuntimeStatus,
     TeamSessionView,
+    ThreadEvent,
     User,
     UserRoleSession,
 )
@@ -565,6 +568,76 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_events (
+                event_id TEXT PRIMARY KEY,
+                team_id INTEGER NOT NULL,
+                thread_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                author_type TEXT NOT NULL,
+                direction TEXT NOT NULL,
+                origin_interface TEXT,
+                source_ref_type TEXT,
+                source_ref_id TEXT,
+                question_id TEXT,
+                answer_id TEXT,
+                source_question_id TEXT,
+                parent_answer_id TEXT,
+                payload_json TEXT,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (team_id) REFERENCES teams(team_id),
+                FOREIGN KEY (question_id) REFERENCES questions(question_id),
+                FOREIGN KEY (answer_id) REFERENCES answers(answer_id),
+                FOREIGN KEY (source_question_id) REFERENCES questions(question_id),
+                FOREIGN KEY (parent_answer_id) REFERENCES answers(answer_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_subscriptions (
+                subscription_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                interface_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'mirror',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                options_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(scope, scope_id, interface_type, target_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_deliveries (
+                delivery_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL,
+                interface_type TEXT NOT NULL,
+                target_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 10,
+                next_retry_at TEXT,
+                last_attempt_at TEXT,
+                delivered_at TEXT,
+                last_error_code TEXT,
+                last_error_message TEXT,
+                lease_owner TEXT,
+                lease_expires_at TEXT,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (event_id) REFERENCES thread_events(event_id),
+                UNIQUE(event_id, interface_type, target_id)
+            )
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_chain_step ON skill_runs(chain_id, step_index, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_created ON skill_runs(skill_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_status ON team_role_runtime_status(status)")
@@ -614,6 +687,28 @@ class Storage:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_team_bindings_team_iface ON team_bindings(team_id, interface_type)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_user_created ON tool_runs(telegram_user_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tool_runs_tool_created ON tool_runs(tool_name, created_at)")
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_thread_events_idempotency
+            ON thread_events(idempotency_key)
+            WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_thread_events_thread_seq ON thread_events(thread_id, seq)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_thread_events_team_created ON thread_events(team_id, created_at DESC)")
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_subscriptions_scope
+            ON event_subscriptions(scope, scope_id, interface_type, is_active)
+            """
+        )
+        cur.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_event_deliveries_pending
+            ON event_deliveries(status, next_retry_at, lease_expires_at, attempt_count)
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_event_deliveries_event ON event_deliveries(event_id, created_at)")
         self._conn.commit()
 
         # Backwards-compatible migrations for existing DBs
@@ -1710,6 +1805,86 @@ class Storage:
             raise RuntimeError("Failed to upsert team")
         return self.get_team(int(row["team_id"]))
 
+    def create_team(
+        self,
+        *,
+        name: str | None,
+        is_active: bool = True,
+        ext_json: str | None = None,
+        public_id: str | None = None,
+    ) -> Team:
+        self._require_write_transaction('create_team')
+        cur = self._conn.cursor()
+        now = _utc_now()
+        if public_id is not None and str(public_id).strip():
+            candidate_ids = [str(public_id).strip()]
+        else:
+            candidate_ids = []
+        # Backend is the source of truth for public_id generation.
+        for _ in range(16):
+            candidate_ids.append(f"team-{secrets.token_hex(8)}")
+        for candidate_id in candidate_ids:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO teams (public_id, name, is_active, ext_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (candidate_id, name, 1 if is_active else 0, ext_json, now, now),
+                )
+                team_id = int(cur.lastrowid or 0)
+                if team_id <= 0:
+                    cur.execute("SELECT team_id FROM teams WHERE public_id = ? LIMIT 1", (candidate_id,))
+                    row = cur.fetchone()
+                    if row is None:
+                        raise RuntimeError("Failed to create team")
+                    team_id = int(row["team_id"])
+                return self.get_team(team_id)
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError("Failed to create team: cannot generate unique public_id")
+
+    def rename_team(self, *, team_id: int, name: str | None) -> Team:
+        self._require_write_transaction('rename_team')
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM teams WHERE team_id = ? LIMIT 1", (team_id,))
+        if cur.fetchone() is None:
+            raise ValueError(f"Team not found: {team_id}")
+        now = _utc_now()
+        cur.execute(
+            """
+            UPDATE teams
+            SET name = ?, updated_at = ?
+            WHERE team_id = ?
+            """,
+            (name, now, team_id),
+        )
+        return self.get_team(team_id)
+
+    def delete_team_hard_if_unused(self, *, team_id: int) -> tuple[bool, tuple[str, ...]]:
+        self._require_write_transaction('delete_team_hard_if_unused')
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM teams WHERE team_id = ? LIMIT 1", (team_id,))
+        if cur.fetchone() is None:
+            raise ValueError(f"Team not found: {team_id}")
+        dependency_tables = (
+            "team_bindings",
+            "team_roles",
+            "questions",
+            "answers",
+            "orchestrator_feed",
+            "thread_events",
+        )
+        blockers: list[str] = []
+        for table in dependency_tables:
+            row = cur.execute(f"SELECT 1 FROM {table} WHERE team_id = ? LIMIT 1", (team_id,)).fetchone()
+            if row is not None:
+                blockers.append(table)
+        if blockers:
+            return False, tuple(blockers)
+        cur.execute("DELETE FROM teams WHERE team_id = ?", (team_id,))
+        return True, ()
+
     def upsert_team_binding(
         self,
         *,
@@ -2272,6 +2447,33 @@ class Storage:
             (role_name, description, base_system_prompt, extra_instruction, llm_model, 1 if is_active else 0),
         )
         return self.get_role_by_name(role_name)
+
+    def create_role(
+        self,
+        *,
+        role_name: str,
+        description: str,
+        base_system_prompt: str,
+        extra_instruction: str,
+        llm_model: str | None,
+        is_active: bool = True,
+    ) -> Role:
+        self._require_write_transaction('create_role')
+        cur = self._conn.cursor()
+        try:
+            cur.execute(
+                """
+                INSERT INTO roles (role_name, description, base_system_prompt, extra_instruction, llm_model, is_active)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (role_name, description, base_system_prompt, extra_instruction, llm_model, 1 if is_active else 0),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"Role already exists: {role_name}") from exc
+        role_id = int(cur.lastrowid or 0)
+        if role_id <= 0:
+            return self.get_role_by_name(role_name)
+        return self.get_role_by_id(role_id)
 
     def role_exists(self, role_name: str) -> bool:
         cur = self._conn.cursor()
@@ -3944,6 +4146,33 @@ class Storage:
         cur.execute("DELETE FROM roles WHERE role_id = ?", (role_id,))
         return True
 
+    def delete_master_role_hard_if_unused(self, *, role_id: int) -> tuple[bool, tuple[str, ...]]:
+        self._require_write_transaction('delete_master_role_hard_if_unused')
+        cur = self._conn.cursor()
+        cur.execute("SELECT 1 FROM roles WHERE role_id = ? LIMIT 1", (role_id,))
+        if cur.fetchone() is None:
+            raise ValueError(f"Role not found: {role_id}")
+        dependency_checks: tuple[tuple[str, str], ...] = (
+            ("team_roles", "role_id"),
+            ("user_role_sessions", "role_id"),
+            ("role_prepost_processing", "role_id"),
+            ("role_skills_enabled", "role_id"),
+            ("provider_user_data", "role_id"),
+            ("skill_runs", "role_id"),
+        )
+        blockers: list[str] = []
+        for table, column in dependency_checks:
+            row = cur.execute(
+                f"SELECT 1 FROM {table} WHERE {column} = ? LIMIT 1",
+                (role_id,),
+            ).fetchone()
+            if row is not None:
+                blockers.append(table)
+        if blockers:
+            return False, tuple(blockers)
+        cur.execute("DELETE FROM roles WHERE role_id = ?", (role_id,))
+        return True, ()
+
     def get_user_role_session(self, telegram_user_id: int, group_id: int, role_id: int) -> UserRoleSession | None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         return self.get_user_role_session_by_team(telegram_user_id, team_id, role_id)
@@ -4604,6 +4833,65 @@ class Storage:
                 (team_id, role_id, prepost_processing_id),
             )
 
+    def replace_role_prepost_processing_for_team_role(
+        self,
+        team_role_id: int,
+        items: list[tuple[str, bool, dict | None]],
+    ) -> list[RolePrePostProcessing]:
+        self._require_write_transaction('replace_role_prepost_processing_for_team_role')
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        team_id, role_id = identity
+        requested_ids = {str(prepost_id) for prepost_id, _, _ in items}
+        cur = self._conn.cursor()
+        if self.has_prepost_team_role_id():
+            if requested_ids:
+                placeholders = ",".join(["?"] * len(requested_ids))
+                cur.execute(
+                    f"""
+                    DELETE FROM role_prepost_processing
+                    WHERE team_role_id = ?
+                      AND prepost_processing_id NOT IN ({placeholders})
+                    """,
+                    (team_role_id, *sorted(requested_ids)),
+                )
+            else:
+                cur.execute(
+                    """
+                    DELETE FROM role_prepost_processing
+                    WHERE team_role_id = ?
+                    """,
+                    (team_role_id,),
+                )
+        else:
+            if requested_ids:
+                placeholders = ",".join(["?"] * len(requested_ids))
+                cur.execute(
+                    f"""
+                    DELETE FROM role_prepost_processing
+                    WHERE team_id = ? AND role_id = ?
+                      AND prepost_processing_id NOT IN ({placeholders})
+                    """,
+                    (team_id, role_id, *sorted(requested_ids)),
+                )
+            else:
+                cur.execute(
+                    """
+                    DELETE FROM role_prepost_processing
+                    WHERE team_id = ? AND role_id = ?
+                    """,
+                    (team_id, role_id),
+                )
+        for prepost_id, enabled, config in items:
+            self.upsert_role_prepost_processing_for_team_role(
+                team_role_id,
+                str(prepost_id),
+                enabled=bool(enabled),
+                config=config,
+            )
+        return self.list_role_prepost_processing_for_team_role(team_role_id, enabled_only=False)
+
     def set_role_prepost_processing_enabled(self, group_id: int, role_id: int, prepost_processing_id: str, enabled: bool) -> None:
         team_id = self.resolve_team_id_by_group_id_legacy(group_id)
         self.set_role_prepost_processing_enabled_for_team(team_id, role_id, prepost_processing_id, enabled)
@@ -4943,6 +5231,65 @@ class Storage:
                 (team_id, role_id, skill_id),
             )
 
+    def replace_role_skills_for_team_role(
+        self,
+        team_role_id: int,
+        items: list[tuple[str, bool, dict | None]],
+    ) -> list[RoleSkill]:
+        self._require_write_transaction('replace_role_skills_for_team_role')
+        identity = self.resolve_team_role_identity(team_role_id)
+        if identity is None:
+            raise ValueError(f"Team role not found: team_role_id={team_role_id}")
+        team_id, role_id = identity
+        requested_ids = {str(skill_id) for skill_id, _, _ in items}
+        cur = self._conn.cursor()
+        if self.has_skill_team_role_id():
+            if requested_ids:
+                placeholders = ",".join(["?"] * len(requested_ids))
+                cur.execute(
+                    f"""
+                    DELETE FROM role_skills_enabled
+                    WHERE team_role_id = ?
+                      AND skill_id NOT IN ({placeholders})
+                    """,
+                    (team_role_id, *sorted(requested_ids)),
+                )
+            else:
+                cur.execute(
+                    """
+                    DELETE FROM role_skills_enabled
+                    WHERE team_role_id = ?
+                    """,
+                    (team_role_id,),
+                )
+        else:
+            if requested_ids:
+                placeholders = ",".join(["?"] * len(requested_ids))
+                cur.execute(
+                    f"""
+                    DELETE FROM role_skills_enabled
+                    WHERE team_id = ? AND role_id = ?
+                      AND skill_id NOT IN ({placeholders})
+                    """,
+                    (team_id, role_id, *sorted(requested_ids)),
+                )
+            else:
+                cur.execute(
+                    """
+                    DELETE FROM role_skills_enabled
+                    WHERE team_id = ? AND role_id = ?
+                    """,
+                    (team_id, role_id),
+                )
+        for skill_id, enabled, config in items:
+            self.upsert_role_skill_for_team_role(
+                team_role_id,
+                str(skill_id),
+                enabled=bool(enabled),
+                config=config,
+            )
+        return self.list_role_skills_for_team_role(team_role_id, enabled_only=False)
+
     def clone_team_role_processing_bindings(self, source_team_role_id: int, target_team_role_id: int) -> None:
         source_identity = self.resolve_team_role_identity(source_team_role_id)
         target_identity = self.resolve_team_role_identity(target_team_role_id)
@@ -5071,6 +5418,65 @@ class Storage:
             question_id=str(row["question_id"]),
             answer_id=str(row["answer_id"]),
             created_at=str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_thread_event(row: sqlite3.Row) -> ThreadEvent:
+        return ThreadEvent(
+            event_id=str(row["event_id"]),
+            team_id=int(row["team_id"]),
+            thread_id=str(row["thread_id"]),
+            seq=int(row["seq"]),
+            event_type=str(row["event_type"]),
+            author_type=str(row["author_type"]),
+            direction=str(row["direction"]),
+            origin_interface=(str(row["origin_interface"]) if row["origin_interface"] is not None else None),
+            source_ref_type=(str(row["source_ref_type"]) if row["source_ref_type"] is not None else None),
+            source_ref_id=(str(row["source_ref_id"]) if row["source_ref_id"] is not None else None),
+            question_id=(str(row["question_id"]) if row["question_id"] is not None else None),
+            answer_id=(str(row["answer_id"]) if row["answer_id"] is not None else None),
+            source_question_id=(str(row["source_question_id"]) if row["source_question_id"] is not None else None),
+            parent_answer_id=(str(row["parent_answer_id"]) if row["parent_answer_id"] is not None else None),
+            payload_json=(str(row["payload_json"]) if row["payload_json"] is not None else None),
+            idempotency_key=(str(row["idempotency_key"]) if row["idempotency_key"] is not None else None),
+            created_at=str(row["created_at"]),
+        )
+
+    @staticmethod
+    def _row_to_event_delivery(row: sqlite3.Row) -> EventDelivery:
+        return EventDelivery(
+            delivery_id=int(row["delivery_id"]),
+            event_id=str(row["event_id"]),
+            interface_type=str(row["interface_type"]),
+            target_id=str(row["target_id"]),
+            status=str(row["status"]),
+            attempt_count=int(row["attempt_count"]),
+            max_attempts=int(row["max_attempts"]),
+            next_retry_at=(str(row["next_retry_at"]) if row["next_retry_at"] is not None else None),
+            last_attempt_at=(str(row["last_attempt_at"]) if row["last_attempt_at"] is not None else None),
+            delivered_at=(str(row["delivered_at"]) if row["delivered_at"] is not None else None),
+            last_error_code=(str(row["last_error_code"]) if row["last_error_code"] is not None else None),
+            last_error_message=(str(row["last_error_message"]) if row["last_error_message"] is not None else None),
+            lease_owner=(str(row["lease_owner"]) if row["lease_owner"] is not None else None),
+            lease_expires_at=(str(row["lease_expires_at"]) if row["lease_expires_at"] is not None else None),
+            idempotency_key=(str(row["idempotency_key"]) if row["idempotency_key"] is not None else None),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_event_subscription(row: sqlite3.Row) -> EventSubscription:
+        return EventSubscription(
+            subscription_id=int(row["subscription_id"]),
+            scope=str(row["scope"]),
+            scope_id=str(row["scope_id"]),
+            interface_type=str(row["interface_type"]),
+            target_id=str(row["target_id"]),
+            mode=str(row["mode"]),
+            is_active=bool(row["is_active"]),
+            options_json=(str(row["options_json"]) if row["options_json"] is not None else None),
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
         )
 
     def _question_exists(self, question_id: str) -> bool:
@@ -5785,6 +6191,1020 @@ class Storage:
         if record is None:
             raise RuntimeError("Failed to upsert qa_idempotency")
         return record
+
+    def get_thread_event(self, event_id: str) -> ThreadEvent | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                event_id, team_id, thread_id, seq, event_type, author_type, direction,
+                origin_interface, source_ref_type, source_ref_id, question_id, answer_id,
+                source_question_id, parent_answer_id, payload_json, idempotency_key, created_at
+            FROM thread_events
+            WHERE event_id = ?
+            LIMIT 1
+            """,
+            (event_id,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_thread_event(row)
+
+    def get_thread_event_by_idempotency(self, idempotency_key: str) -> ThreadEvent | None:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            return None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                event_id, team_id, thread_id, seq, event_type, author_type, direction,
+                origin_interface, source_ref_type, source_ref_id, question_id, answer_id,
+                source_question_id, parent_answer_id, payload_json, idempotency_key, created_at
+            FROM thread_events
+            WHERE idempotency_key = ?
+            LIMIT 1
+            """,
+            (key,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        return self._row_to_thread_event(row)
+
+    def _next_thread_event_seq(self, thread_id: str) -> int:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT COALESCE(MAX(seq), 0) AS max_seq
+            FROM thread_events
+            WHERE thread_id = ?
+            """,
+            (thread_id,),
+        )
+        row = cur.fetchone()
+        return int((row["max_seq"] if row is not None else 0) or 0) + 1
+
+    def create_thread_event(
+        self,
+        *,
+        team_id: int,
+        thread_id: str,
+        event_type: str,
+        author_type: str,
+        direction: str,
+        origin_interface: str | None = None,
+        source_ref_type: str | None = None,
+        source_ref_id: str | None = None,
+        question_id: str | None = None,
+        answer_id: str | None = None,
+        source_question_id: str | None = None,
+        parent_answer_id: str | None = None,
+        payload_json: str | None = None,
+        idempotency_key: str | None = None,
+        event_id: str | None = None,
+    ) -> ThreadEvent:
+        self._require_write_transaction('create_thread_event')
+        key = str(idempotency_key or "").strip() or None
+        if key is not None:
+            existing = self.get_thread_event_by_idempotency(key)
+            if existing is not None:
+                return existing
+        self.get_team(int(team_id))
+        if question_id is not None and not self._question_exists(str(question_id)):
+            raise ValueError(f"Question not found: {question_id}")
+        if answer_id is not None and not self._answer_exists(str(answer_id)):
+            raise ValueError(f"Answer not found: {answer_id}")
+        if source_question_id is not None and not self._question_exists(str(source_question_id)):
+            raise ValueError(f"source_question_id not found: {source_question_id}")
+        if parent_answer_id is not None and not self._answer_exists(str(parent_answer_id)):
+            raise ValueError(f"parent_answer_id not found: {parent_answer_id}")
+        seq = self._next_thread_event_seq(str(thread_id))
+        now = _utc_now()
+        resolved_event_id = str(event_id or secrets.token_hex(16))
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO thread_events (
+                event_id, team_id, thread_id, seq, event_type, author_type, direction,
+                origin_interface, source_ref_type, source_ref_id, question_id, answer_id,
+                source_question_id, parent_answer_id, payload_json, idempotency_key, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_event_id,
+                int(team_id),
+                str(thread_id),
+                int(seq),
+                str(event_type),
+                str(author_type),
+                str(direction),
+                origin_interface,
+                source_ref_type,
+                source_ref_id,
+                question_id,
+                answer_id,
+                source_question_id,
+                parent_answer_id,
+                payload_json,
+                key,
+                now,
+            ),
+        )
+        created = self.get_thread_event(resolved_event_id)
+        if created is None:
+            raise RuntimeError("Failed to create thread event")
+        self._enqueue_thread_event_deliveries(created)
+        return created
+
+    def _enqueue_thread_event_deliveries(self, event: ThreadEvent) -> None:
+        targets: dict[tuple[str, str], int] = {}
+
+        primary_iface = str(event.origin_interface or "").strip()
+        if primary_iface:
+            targets[(primary_iface, str(event.thread_id))] = 10
+
+        thread_subs = self.list_event_subscriptions(scope="thread", scope_id=str(event.thread_id), active_only=True, limit=500)
+        team_subs = self.list_event_subscriptions(scope="team", scope_id=str(event.team_id), active_only=True, limit=500)
+        for sub in [*thread_subs, *team_subs]:
+            key = (str(sub.interface_type), str(sub.target_id))
+            max_attempts = 10
+            try:
+                if sub.options_json:
+                    options = json.loads(str(sub.options_json))
+                    if isinstance(options, dict) and options.get("max_attempts") is not None:
+                        max_attempts = max(1, int(options.get("max_attempts")))
+            except Exception:
+                max_attempts = 10
+            targets[key] = max(max_attempts, int(targets.get(key, 1)))
+
+        for (interface_type, target_id), max_attempts in targets.items():
+            self.enqueue_event_delivery(
+                event_id=str(event.event_id),
+                interface_type=interface_type,
+                target_id=target_id,
+                idempotency_key=f"delivery:{event.event_id}:{interface_type}:{target_id}",
+                max_attempts=max_attempts,
+            )
+
+    def list_thread_events(
+        self,
+        *,
+        event_id: str | None = None,
+        thread_id: str | None = None,
+        team_id: int | None = None,
+        limit: int = 100,
+    ) -> list[ThreadEvent]:
+        safe_limit = max(1, min(int(limit), 500))
+        where: list[str] = []
+        binds: list[object] = []
+        if event_id is not None:
+            where.append("event_id = ?")
+            binds.append(str(event_id))
+        if thread_id is not None:
+            where.append("thread_id = ?")
+            binds.append(str(thread_id))
+        if team_id is not None:
+            where.append("team_id = ?")
+            binds.append(int(team_id))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                event_id, team_id, thread_id, seq, event_type, author_type, direction,
+                origin_interface, source_ref_type, source_ref_id, question_id, answer_id,
+                source_question_id, parent_answer_id, payload_json, idempotency_key, created_at
+            FROM thread_events
+            {where_sql}
+            ORDER BY created_at DESC, event_id DESC
+            LIMIT ?
+            """,
+            (*binds, safe_limit),
+        )
+        return [self._row_to_thread_event(row) for row in cur.fetchall()]
+
+    def upsert_event_subscription(
+        self,
+        *,
+        scope: str,
+        scope_id: str,
+        interface_type: str,
+        target_id: str,
+        mode: str = "mirror",
+        is_active: bool = True,
+        options_json: str | None = None,
+    ) -> EventSubscription:
+        self._require_write_transaction('upsert_event_subscription')
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO event_subscriptions (
+                scope, scope_id, interface_type, target_id, mode, is_active, options_json, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope, scope_id, interface_type, target_id) DO UPDATE SET
+                mode = excluded.mode,
+                is_active = excluded.is_active,
+                options_json = excluded.options_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(scope),
+                str(scope_id),
+                str(interface_type),
+                str(target_id),
+                str(mode),
+                1 if is_active else 0,
+                options_json,
+                now,
+                now,
+            ),
+        )
+        cur.execute(
+            """
+            SELECT
+                subscription_id, scope, scope_id, interface_type, target_id, mode, is_active,
+                options_json, created_at, updated_at
+            FROM event_subscriptions
+            WHERE scope = ? AND scope_id = ? AND interface_type = ? AND target_id = ?
+            LIMIT 1
+            """,
+            (str(scope), str(scope_id), str(interface_type), str(target_id)),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("Failed to upsert event subscription")
+        return self._row_to_event_subscription(row)
+
+    def list_event_subscriptions(
+        self,
+        *,
+        scope: str | None = None,
+        scope_id: str | None = None,
+        interface_type: str | None = None,
+        active_only: bool = True,
+        limit: int = 200,
+    ) -> list[EventSubscription]:
+        safe_limit = max(1, min(int(limit), 1000))
+        where: list[str] = []
+        binds: list[object] = []
+        if scope is not None:
+            where.append("scope = ?")
+            binds.append(str(scope))
+        if scope_id is not None:
+            where.append("scope_id = ?")
+            binds.append(str(scope_id))
+        if interface_type is not None:
+            where.append("interface_type = ?")
+            binds.append(str(interface_type))
+        if active_only:
+            where.append("is_active = 1")
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                subscription_id, scope, scope_id, interface_type, target_id, mode, is_active,
+                options_json, created_at, updated_at
+            FROM event_subscriptions
+            {where_sql}
+            ORDER BY subscription_id DESC
+            LIMIT ?
+            """,
+            (*binds, safe_limit),
+        )
+        return [self._row_to_event_subscription(row) for row in cur.fetchall()]
+
+    def get_event_subscription(self, subscription_id: int) -> EventSubscription | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                subscription_id, scope, scope_id, interface_type, target_id, mode, is_active,
+                options_json, created_at, updated_at
+            FROM event_subscriptions
+            WHERE subscription_id = ?
+            LIMIT 1
+            """,
+            (int(subscription_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_event_subscription(row)
+
+    def delete_event_subscription(self, subscription_id: int) -> bool:
+        self._require_write_transaction('delete_event_subscription')
+        cur = self._conn.cursor()
+        cur.execute(
+            "DELETE FROM event_subscriptions WHERE subscription_id = ?",
+            (int(subscription_id),),
+        )
+        return int(cur.rowcount or 0) > 0
+
+    def enqueue_event_delivery(
+        self,
+        *,
+        event_id: str,
+        interface_type: str,
+        target_id: str,
+        idempotency_key: str | None = None,
+        max_attempts: int = 10,
+        next_retry_at: str | None = None,
+    ) -> EventDelivery:
+        self._require_write_transaction('enqueue_event_delivery')
+        if self.get_thread_event(event_id) is None:
+            raise ValueError(f"Thread event not found: {event_id}")
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO event_deliveries (
+                event_id, interface_type, target_id, status, attempt_count, max_attempts,
+                next_retry_at, last_attempt_at, delivered_at, last_error_code, last_error_message,
+                lease_owner, lease_expires_at, idempotency_key, created_at, updated_at
+            )
+            VALUES (?, ?, ?, 'pending', 0, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?, ?)
+            ON CONFLICT(event_id, interface_type, target_id) DO UPDATE SET
+                max_attempts = excluded.max_attempts,
+                idempotency_key = COALESCE(excluded.idempotency_key, event_deliveries.idempotency_key),
+                updated_at = excluded.updated_at
+            """,
+            (
+                str(event_id),
+                str(interface_type),
+                str(target_id),
+                max(1, int(max_attempts)),
+                next_retry_at,
+                idempotency_key,
+                now,
+                now,
+            ),
+        )
+        cur.execute(
+            """
+            SELECT
+                delivery_id, event_id, interface_type, target_id, status, attempt_count, max_attempts,
+                next_retry_at, last_attempt_at, delivered_at, last_error_code, last_error_message,
+                lease_owner, lease_expires_at, idempotency_key, created_at, updated_at
+            FROM event_deliveries
+            WHERE event_id = ? AND interface_type = ? AND target_id = ?
+            LIMIT 1
+            """,
+            (str(event_id), str(interface_type), str(target_id)),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("Failed to enqueue event delivery")
+        return self._row_to_event_delivery(row)
+
+    def list_pending_event_deliveries(
+        self,
+        *,
+        limit: int = 100,
+        interface_type: str | None = None,
+        now: str | None = None,
+    ) -> list[EventDelivery]:
+        safe_limit = max(1, min(int(limit), 1000))
+        ts = str(now or _utc_now())
+        where = [
+            "status IN ('pending', 'retry_scheduled')",
+            "(next_retry_at IS NULL OR next_retry_at <= ?)",
+            "(lease_expires_at IS NULL OR lease_expires_at <= ?)",
+            "attempt_count < max_attempts",
+        ]
+        binds: list[object] = [ts, ts]
+        if interface_type is not None:
+            where.append("interface_type = ?")
+            binds.append(str(interface_type))
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                delivery_id, event_id, interface_type, target_id, status, attempt_count, max_attempts,
+                next_retry_at, last_attempt_at, delivered_at, last_error_code, last_error_message,
+                lease_owner, lease_expires_at, idempotency_key, created_at, updated_at
+            FROM event_deliveries
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at ASC, delivery_id ASC
+            LIMIT ?
+            """,
+            (*binds, safe_limit),
+        )
+        return [self._row_to_event_delivery(row) for row in cur.fetchall()]
+
+    def count_event_deliveries(self, *, status: str | None = None) -> int:
+        cur = self._conn.cursor()
+        if status is None:
+            cur.execute("SELECT COUNT(1) AS cnt FROM event_deliveries")
+        else:
+            cur.execute("SELECT COUNT(1) AS cnt FROM event_deliveries WHERE status = ?", (str(status),))
+        row = cur.fetchone()
+        return int((row["cnt"] if row is not None else 0) or 0)
+
+    def claim_pending_event_deliveries(
+        self,
+        *,
+        limit: int = 50,
+        lease_owner: str,
+        lease_ttl_sec: int = 30,
+        interface_type: str | None = None,
+        now: str | None = None,
+    ) -> list[EventDelivery]:
+        self._require_write_transaction('claim_pending_event_deliveries')
+        safe_limit = max(1, min(int(limit), 1000))
+        owner = str(lease_owner or "").strip()
+        if not owner:
+            raise ValueError("lease_owner is required")
+        ts = str(now or _utc_now())
+        lease_expires = _iso_plus_seconds(ts, max(1, int(lease_ttl_sec)))
+        where = [
+            "("
+            "status IN ('pending', 'retry_scheduled') "
+            "OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)"
+            ")",
+            "(next_retry_at IS NULL OR next_retry_at <= ?)",
+            "(lease_expires_at IS NULL OR lease_expires_at <= ?)",
+            "attempt_count < max_attempts",
+        ]
+        binds: list[object] = [ts, ts, ts]
+        if interface_type is not None:
+            where.append("interface_type = ?")
+            binds.append(str(interface_type))
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT delivery_id
+            FROM event_deliveries
+            WHERE {' AND '.join(where)}
+            ORDER BY created_at ASC, delivery_id ASC
+            LIMIT ?
+            """,
+            (*binds, safe_limit),
+        )
+        rows = cur.fetchall()
+        claimed: list[EventDelivery] = []
+        for row in rows:
+            delivery_id = int(row["delivery_id"])
+            cur.execute(
+                """
+                UPDATE event_deliveries
+                SET status = 'in_progress',
+                    lease_owner = ?,
+                    lease_expires_at = ?,
+                    updated_at = ?
+                WHERE delivery_id = ?
+                  AND (
+                        status IN ('pending', 'retry_scheduled')
+                        OR (status = 'in_progress' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?)
+                  )
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
+                  AND (lease_expires_at IS NULL OR lease_expires_at <= ?)
+                  AND attempt_count < max_attempts
+                """,
+                (owner, lease_expires, ts, delivery_id, ts, ts, ts),
+            )
+            if int(cur.rowcount or 0) <= 0:
+                continue
+            item = self.get_event_delivery(delivery_id)
+            if item is not None:
+                claimed.append(item)
+        return claimed
+
+    def mark_event_delivery_delivered(self, delivery_id: int, *, now: str | None = None) -> EventDelivery | None:
+        self._require_write_transaction('mark_event_delivery_delivered')
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE event_deliveries
+            SET status = 'delivered',
+                delivered_at = ?,
+                last_attempt_at = ?,
+                next_retry_at = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE delivery_id = ?
+            """,
+            (ts, ts, ts, int(delivery_id)),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_event_delivery(int(delivery_id))
+
+    def mark_event_delivery_retry(
+        self,
+        delivery_id: int,
+        *,
+        error_code: str,
+        error_message: str,
+        retry_delay_sec: int = 5,
+        now: str | None = None,
+    ) -> EventDelivery | None:
+        self._require_write_transaction('mark_event_delivery_retry')
+        ts = str(now or _utc_now())
+        next_retry = _iso_plus_seconds(ts, max(0, int(retry_delay_sec)))
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE event_deliveries
+            SET status = 'retry_scheduled',
+                attempt_count = attempt_count + 1,
+                last_attempt_at = ?,
+                next_retry_at = ?,
+                last_error_code = ?,
+                last_error_message = ?,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE delivery_id = ?
+            """,
+            (ts, next_retry, str(error_code), str(error_message), ts, int(delivery_id)),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_event_delivery(int(delivery_id))
+
+    def mark_event_delivery_dlq(
+        self,
+        delivery_id: int,
+        *,
+        error_code: str,
+        error_message: str,
+        now: str | None = None,
+    ) -> EventDelivery | None:
+        self._require_write_transaction('mark_event_delivery_dlq')
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE event_deliveries
+            SET status = 'failed_dlq',
+                attempt_count = attempt_count + 1,
+                last_attempt_at = ?,
+                next_retry_at = NULL,
+                last_error_code = ?,
+                last_error_message = ?,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE delivery_id = ?
+            """,
+            (ts, str(error_code), str(error_message), ts, int(delivery_id)),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_event_delivery(int(delivery_id))
+
+    def get_event_delivery(self, delivery_id: int) -> EventDelivery | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                delivery_id, event_id, interface_type, target_id, status, attempt_count, max_attempts,
+                next_retry_at, last_attempt_at, delivered_at, last_error_code, last_error_message,
+                lease_owner, lease_expires_at, idempotency_key, created_at, updated_at
+            FROM event_deliveries
+            WHERE delivery_id = ?
+            LIMIT 1
+            """,
+            (int(delivery_id),),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return self._row_to_event_delivery(row)
+
+    def list_event_deliveries(
+        self,
+        *,
+        event_id: str | None = None,
+        interface_type: str | None = None,
+        target_id: str | None = None,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[EventDelivery]:
+        safe_limit = max(1, min(int(limit), 1000))
+        where: list[str] = []
+        binds: list[object] = []
+        if event_id is not None:
+            where.append("event_id = ?")
+            binds.append(str(event_id))
+        if interface_type is not None:
+            where.append("interface_type = ?")
+            binds.append(str(interface_type))
+        if target_id is not None:
+            where.append("target_id = ?")
+            binds.append(str(target_id))
+        if status is not None:
+            where.append("status = ?")
+            binds.append(str(status))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self._conn.cursor()
+        cur.execute(
+            f"""
+            SELECT
+                delivery_id, event_id, interface_type, target_id, status, attempt_count, max_attempts,
+                next_retry_at, last_attempt_at, delivered_at, last_error_code, last_error_message,
+                lease_owner, lease_expires_at, idempotency_key, created_at, updated_at
+            FROM event_deliveries
+            {where_sql}
+            ORDER BY created_at DESC, delivery_id DESC
+            LIMIT ?
+            """,
+            (*binds, safe_limit),
+        )
+        return [self._row_to_event_delivery(row) for row in cur.fetchall()]
+
+    def requeue_event_delivery(
+        self,
+        delivery_id: int,
+        *,
+        reset_attempt_count: bool = False,
+        now: str | None = None,
+    ) -> EventDelivery | None:
+        self._require_write_transaction('requeue_event_delivery')
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+        if bool(reset_attempt_count):
+            cur.execute(
+                """
+                UPDATE event_deliveries
+                SET status = 'retry_scheduled',
+                    attempt_count = 0,
+                    next_retry_at = ?,
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE delivery_id = ?
+                """,
+                (ts, ts, int(delivery_id)),
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE event_deliveries
+                SET status = 'retry_scheduled',
+                    next_retry_at = ?,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE delivery_id = ?
+                """,
+                (ts, ts, int(delivery_id)),
+            )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_event_delivery(int(delivery_id))
+
+    def skip_event_delivery(self, delivery_id: int, *, now: str | None = None) -> EventDelivery | None:
+        self._require_write_transaction('skip_event_delivery')
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE event_deliveries
+            SET status = 'skipped',
+                delivered_at = ?,
+                last_attempt_at = ?,
+                next_retry_at = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE delivery_id = ?
+            """,
+            (ts, ts, ts, int(delivery_id)),
+        )
+        if int(cur.rowcount or 0) <= 0:
+            return None
+        return self.get_event_delivery(int(delivery_id))
+
+    def snapshot_recovery_queues(
+        self,
+        *,
+        scope_mode: str = "global",
+        team_id: int | None = None,
+    ) -> dict[str, int]:
+        mode = str(scope_mode or "").strip().lower()
+        if mode not in {"global", "team"}:
+            raise ValueError(f"Unsupported recovery scope_mode: {scope_mode}")
+        scoped_team_id = int(team_id) if mode == "team" and team_id is not None else None
+        if mode == "team" and scoped_team_id is None:
+            raise ValueError("team_id is required when scope_mode='team'")
+
+        cur = self._conn.cursor()
+        result = {
+            "questions_accepted": 0,
+            "questions_queued": 0,
+            "questions_in_progress": 0,
+            "qa_dispatch_bridge_rows": 0,
+            "event_deliveries_pending": 0,
+            "event_deliveries_retry_scheduled": 0,
+            "event_deliveries_in_progress": 0,
+            "runtime_status_busy": 0,
+            "runtime_status_free": 0,
+            "runtime_status_pending": 0,
+        }
+
+        # Keep explicit branch with concrete SQL per scope for maintainability.
+        if mode == "global":
+            cur.execute("SELECT COUNT(1) AS cnt FROM questions WHERE status = 'accepted'")
+            row = cur.fetchone()
+            result["questions_accepted"] = int((row["cnt"] if row is not None else 0) or 0)
+            cur.execute("SELECT COUNT(1) AS cnt FROM questions WHERE status = 'queued'")
+            row = cur.fetchone()
+            result["questions_queued"] = int((row["cnt"] if row is not None else 0) or 0)
+            cur.execute("SELECT COUNT(1) AS cnt FROM questions WHERE status = 'in_progress'")
+            row = cur.fetchone()
+            result["questions_in_progress"] = int((row["cnt"] if row is not None else 0) or 0)
+
+            cur.execute(
+                """
+                SELECT COUNT(1) AS cnt
+                FROM qa_dispatch_bridge_state
+                """
+            )
+            row = cur.fetchone()
+            result["qa_dispatch_bridge_rows"] = int((row["cnt"] if row is not None else 0) or 0)
+
+            cur.execute("SELECT COUNT(1) AS cnt FROM event_deliveries WHERE status = 'pending'")
+            row = cur.fetchone()
+            result["event_deliveries_pending"] = int((row["cnt"] if row is not None else 0) or 0)
+            cur.execute("SELECT COUNT(1) AS cnt FROM event_deliveries WHERE status = 'retry_scheduled'")
+            row = cur.fetchone()
+            result["event_deliveries_retry_scheduled"] = int((row["cnt"] if row is not None else 0) or 0)
+            cur.execute("SELECT COUNT(1) AS cnt FROM event_deliveries WHERE status = 'in_progress'")
+            row = cur.fetchone()
+            result["event_deliveries_in_progress"] = int((row["cnt"] if row is not None else 0) or 0)
+
+            cur.execute("SELECT COUNT(1) AS cnt FROM team_role_runtime_status WHERE status = 'busy'")
+            row = cur.fetchone()
+            result["runtime_status_busy"] = int((row["cnt"] if row is not None else 0) or 0)
+            cur.execute("SELECT COUNT(1) AS cnt FROM team_role_runtime_status WHERE status = 'free'")
+            row = cur.fetchone()
+            result["runtime_status_free"] = int((row["cnt"] if row is not None else 0) or 0)
+            cur.execute("SELECT COUNT(1) AS cnt FROM team_role_runtime_status WHERE status NOT IN ('busy', 'free')")
+            row = cur.fetchone()
+            result["runtime_status_pending"] = int((row["cnt"] if row is not None else 0) or 0)
+            return result
+
+        assert scoped_team_id is not None
+        cur.execute("SELECT COUNT(1) AS cnt FROM questions WHERE team_id = ? AND status = 'accepted'", (scoped_team_id,))
+        row = cur.fetchone()
+        result["questions_accepted"] = int((row["cnt"] if row is not None else 0) or 0)
+        cur.execute("SELECT COUNT(1) AS cnt FROM questions WHERE team_id = ? AND status = 'queued'", (scoped_team_id,))
+        row = cur.fetchone()
+        result["questions_queued"] = int((row["cnt"] if row is not None else 0) or 0)
+        cur.execute("SELECT COUNT(1) AS cnt FROM questions WHERE team_id = ? AND status = 'in_progress'", (scoped_team_id,))
+        row = cur.fetchone()
+        result["questions_in_progress"] = int((row["cnt"] if row is not None else 0) or 0)
+
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM qa_dispatch_bridge_state s
+            JOIN questions q ON q.question_id = s.question_id
+            WHERE q.team_id = ?
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["qa_dispatch_bridge_rows"] = int((row["cnt"] if row is not None else 0) or 0)
+
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM event_deliveries d
+            JOIN thread_events e ON e.event_id = d.event_id
+            WHERE e.team_id = ? AND d.status = 'pending'
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["event_deliveries_pending"] = int((row["cnt"] if row is not None else 0) or 0)
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM event_deliveries d
+            JOIN thread_events e ON e.event_id = d.event_id
+            WHERE e.team_id = ? AND d.status = 'retry_scheduled'
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["event_deliveries_retry_scheduled"] = int((row["cnt"] if row is not None else 0) or 0)
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM event_deliveries d
+            JOIN thread_events e ON e.event_id = d.event_id
+            WHERE e.team_id = ? AND d.status = 'in_progress'
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["event_deliveries_in_progress"] = int((row["cnt"] if row is not None else 0) or 0)
+
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM team_role_runtime_status rs
+            JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
+            WHERE tr.team_id = ? AND rs.status = 'busy'
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["runtime_status_busy"] = int((row["cnt"] if row is not None else 0) or 0)
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM team_role_runtime_status rs
+            JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
+            WHERE tr.team_id = ? AND rs.status = 'free'
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["runtime_status_free"] = int((row["cnt"] if row is not None else 0) or 0)
+        cur.execute(
+            """
+            SELECT COUNT(1) AS cnt
+            FROM team_role_runtime_status rs
+            JOIN team_roles tr ON tr.team_role_id = rs.team_role_id
+            WHERE tr.team_id = ? AND rs.status NOT IN ('busy', 'free')
+            """,
+            (scoped_team_id,),
+        )
+        row = cur.fetchone()
+        result["runtime_status_pending"] = int((row["cnt"] if row is not None else 0) or 0)
+        return result
+
+    def reset_recovery_queues(
+        self,
+        *,
+        scope_mode: str = "global",
+        team_id: int | None = None,
+        now: str | None = None,
+    ) -> None:
+        self._require_write_transaction("reset_recovery_queues")
+        mode = str(scope_mode or "").strip().lower()
+        if mode not in {"global", "team"}:
+            raise ValueError(f"Unsupported recovery scope_mode: {scope_mode}")
+        scoped_team_id = int(team_id) if mode == "team" and team_id is not None else None
+        if mode == "team" and scoped_team_id is None:
+            raise ValueError("team_id is required when scope_mode='team'")
+        ts = str(now or _utc_now())
+        cur = self._conn.cursor()
+
+        if mode == "global":
+            cur.execute(
+                """
+                UPDATE questions
+                SET status = 'accepted',
+                    error_code = NULL,
+                    error_message = NULL,
+                    updated_at = ?
+                WHERE status IN ('queued', 'in_progress')
+                """,
+                (ts,),
+            )
+            cur.execute(
+                """
+                UPDATE qa_dispatch_bridge_state
+                SET attempt_count = 0,
+                    lease_expires_at = NULL,
+                    retry_not_before = NULL,
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    updated_at = ?
+                """,
+                (ts,),
+            )
+            cur.execute(
+                """
+                UPDATE event_deliveries
+                SET status = 'retry_scheduled',
+                    attempt_count = 0,
+                    next_retry_at = ?,
+                    last_attempt_at = NULL,
+                    last_error_code = NULL,
+                    last_error_message = NULL,
+                    lease_owner = NULL,
+                    lease_expires_at = NULL,
+                    updated_at = ?
+                WHERE status IN ('pending', 'retry_scheduled', 'in_progress')
+                """,
+                (ts, ts),
+            )
+            cur.execute(
+                """
+                UPDATE team_role_runtime_status
+                SET status = 'free',
+                    busy_request_id = NULL,
+                    busy_owner_user_id = NULL,
+                    busy_origin = NULL,
+                    preview_text = NULL,
+                    preview_source = NULL,
+                    busy_since = NULL,
+                    lease_expires_at = NULL,
+                    last_heartbeat_at = NULL,
+                    free_release_requested_at = NULL,
+                    free_release_delay_until = NULL,
+                    free_release_reason_pending = NULL,
+                    last_release_reason = 'recovery_reset',
+                    status_version = status_version + 1,
+                    updated_at = ?
+                WHERE status <> 'free'
+                """,
+                (ts,),
+            )
+            return
+
+        assert scoped_team_id is not None
+        cur.execute(
+            """
+            UPDATE questions
+            SET status = 'accepted',
+                error_code = NULL,
+                error_message = NULL,
+                updated_at = ?
+            WHERE team_id = ? AND status IN ('queued', 'in_progress')
+            """,
+            (ts, scoped_team_id),
+        )
+        cur.execute(
+            """
+            UPDATE qa_dispatch_bridge_state
+            SET attempt_count = 0,
+                lease_expires_at = NULL,
+                retry_not_before = NULL,
+                last_error_code = NULL,
+                last_error_message = NULL,
+                updated_at = ?
+            WHERE question_id IN (
+                SELECT question_id
+                FROM questions
+                WHERE team_id = ?
+            )
+            """,
+            (ts, scoped_team_id),
+        )
+        cur.execute(
+            """
+            UPDATE event_deliveries
+            SET status = 'retry_scheduled',
+                attempt_count = 0,
+                next_retry_at = ?,
+                last_attempt_at = NULL,
+                last_error_code = NULL,
+                last_error_message = NULL,
+                lease_owner = NULL,
+                lease_expires_at = NULL,
+                updated_at = ?
+            WHERE status IN ('pending', 'retry_scheduled', 'in_progress')
+              AND event_id IN (
+                  SELECT event_id
+                  FROM thread_events
+                  WHERE team_id = ?
+              )
+            """,
+            (ts, ts, scoped_team_id),
+        )
+        cur.execute(
+            """
+            UPDATE team_role_runtime_status
+            SET status = 'free',
+                busy_request_id = NULL,
+                busy_owner_user_id = NULL,
+                busy_origin = NULL,
+                preview_text = NULL,
+                preview_source = NULL,
+                busy_since = NULL,
+                lease_expires_at = NULL,
+                last_heartbeat_at = NULL,
+                free_release_requested_at = NULL,
+                free_release_delay_until = NULL,
+                free_release_reason_pending = NULL,
+                last_release_reason = 'recovery_reset',
+                status_version = status_version + 1,
+                updated_at = ?
+            WHERE status <> 'free'
+              AND team_role_id IN (
+                  SELECT team_role_id
+                  FROM team_roles
+                  WHERE team_id = ?
+              )
+            """,
+            (ts, scoped_team_id),
+        )
 
     def append_orchestrator_feed_item(
         self,

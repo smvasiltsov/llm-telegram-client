@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -111,6 +112,22 @@ class LTC81Stage5DispatchBridgeWorkerTests(unittest.IsolatedAsyncioTestCase):
         answer = self.storage.get_latest_answer_for_question("q-worker-1")
         self.assertIsNotNone(answer)
         self.assertEqual(answer.text if answer else None, "world")
+        events = self.storage.list_thread_events(thread_id="t-worker-1", limit=20)
+        answer_event = next(
+            (
+                item
+                for item in events
+                if item.event_type == "thread.message.created"
+                and item.direction == "answer"
+                and item.question_id == "q-worker-1"
+            ),
+            None,
+        )
+        self.assertIsNotNone(answer_event)
+        self.assertEqual(answer_event.origin_interface if answer_event else None, "qa_bridge")
+        if answer_event is not None:
+            payload = json.loads(str(answer_event.payload_json or "{}"))
+            self.assertEqual(payload.get("kind"), "role-answer")
         feed, _ = self.storage.list_orchestrator_feed(team_id=self.team_id, limit=10)
         self.assertTrue(any(item.question_id == "q-worker-1" for item in feed))
         self.assertTrue(
@@ -569,6 +586,21 @@ class LTC81Stage5DispatchBridgeWorkerTests(unittest.IsolatedAsyncioTestCase):
         children = [q for q in items if q.source_question_id == parent_question.question_id and q.origin_type == "role_dispatch"]
         self.assertEqual(len(children), 1)
         self.assertEqual(children[0].parent_answer_id, "a-dispatch-parent")
+        events = self.storage.list_thread_events(thread_id=parent_question.thread_id, limit=30)
+        child_event = next(
+            (
+                item
+                for item in events
+                if item.question_id == children[0].question_id
+                and item.direction == "question"
+                and item.event_type == "thread.message.created"
+            ),
+            None,
+        )
+        self.assertIsNotNone(child_event)
+        if child_event is not None:
+            payload = json.loads(str(child_event.payload_json or "{}"))
+            self.assertEqual(payload.get("kind"), "child-question")
 
     def test_dispatch_post_answer_plan_creates_orchestrator_events_once(self) -> None:
         with self.storage.transaction(immediate=True):

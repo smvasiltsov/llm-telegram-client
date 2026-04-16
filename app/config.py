@@ -39,6 +39,7 @@ ALLOWED_INTERFACE_RUNTIME_MODES = {"single"}
 DEFAULT_DISPATCH_MODE = "single-instance"
 ALLOWED_DISPATCH_MODES = {"single-instance", "single-runner"}
 DEFAULT_DISPATCH_IS_RUNNER = True
+DEFAULT_DISPATCH_POST_ANSWER_MAX_HOPS = 3
 DEFAULT_FREE_TRANSITION_DELAY_SEC = 0
 DEFAULT_SKILLS_TO_LLM_DELAY_SEC = 0
 
@@ -75,6 +76,7 @@ class AppConfig:
     interface_runtime_mode: str
     dispatch_mode: str
     dispatch_is_runner: bool
+    dispatch_post_answer_max_hops: int
     telegram_thin_client_enabled: bool
     telegram_api_base_url: str
     telegram_api_timeout_sec: int
@@ -143,6 +145,10 @@ def load_config(path: str | Path) -> AppConfig:
     if dispatch_mode not in ALLOWED_DISPATCH_MODES:
         dispatch_mode = DEFAULT_DISPATCH_MODE
     dispatch_is_runner = bool(dispatch_raw.get("is_runner", DEFAULT_DISPATCH_IS_RUNNER))
+    dispatch_post_answer_max_hops = max(
+        0,
+        int(dispatch_raw.get("post_answer_max_hops", DEFAULT_DISPATCH_POST_ANSWER_MAX_HOPS)),
+    )
     if dispatch_mode == "single-instance":
         dispatch_is_runner = True
     telegram_interface_raw = interface_raw.get("telegram", {}) or {}
@@ -187,6 +193,7 @@ def load_config(path: str | Path) -> AppConfig:
         interface_runtime_mode=interface_runtime_mode,
         dispatch_mode=dispatch_mode,
         dispatch_is_runner=dispatch_is_runner,
+        dispatch_post_answer_max_hops=dispatch_post_answer_max_hops,
         telegram_thin_client_enabled=telegram_thin_client_enabled,
         telegram_api_base_url=telegram_api_base_url,
         telegram_api_timeout_sec=telegram_api_timeout_sec,

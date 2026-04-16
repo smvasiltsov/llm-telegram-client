@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -208,6 +209,73 @@ class LTC77Stage5QaUseCasesTests(unittest.TestCase):
         )
         self.assertTrue(result.is_ok)
         self.assertEqual((result.value.question.target_team_role_id if result.value else None), team_role_id)
+
+    def test_create_question_publishes_thread_message_events_for_user_and_child(self) -> None:
+        storage, team_id, team_role_id = self._bootstrap()
+        user_result = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="hello from user",
+                team_role_id=team_role_id,
+                thread_id="thread-events-1",
+                question_id="question-events-1",
+                origin_type="user",
+            ),
+            idempotency_key="idem-events-1",
+        )
+        self.assertTrue(user_result.is_ok)
+        user_question = user_result.value.question if user_result.value is not None else None
+        self.assertIsNotNone(user_question)
+
+        with storage.transaction(immediate=True):
+            storage.create_answer(
+                answer_id="answer-events-1",
+                question_id="question-events-1",
+                thread_id="thread-events-1",
+                team_id=team_id,
+                team_role_id=team_role_id,
+                role_name="dev",
+                text="answer",
+            )
+
+        child_result = create_question_result(
+            storage,
+            request=QaCreateQuestionRequest(
+                team_id=team_id,
+                created_by_user_id=101,
+                text="child follow-up",
+                team_role_id=team_role_id,
+                thread_id="thread-events-1",
+                question_id="question-events-2",
+                origin_type="role_dispatch",
+                source_question_id="question-events-1",
+                parent_answer_id="answer-events-1",
+            ),
+            idempotency_key="idem-events-2",
+            scope="qa.post_answer_dispatch",
+        )
+        self.assertTrue(child_result.is_ok)
+
+        events = storage.list_thread_events(thread_id="thread-events-1", limit=10)
+        q1 = next((item for item in events if item.question_id == "question-events-1" and item.direction == "question"), None)
+        q2 = next((item for item in events if item.question_id == "question-events-2" and item.direction == "question"), None)
+        self.assertIsNotNone(q1)
+        self.assertIsNotNone(q2)
+        self.assertEqual(q1.origin_interface if q1 is not None else None, "api")
+        self.assertEqual(q2.origin_interface if q2 is not None else None, "qa_bridge")
+        if q1 is not None:
+            payload1 = json.loads(str(q1.payload_json or "{}"))
+            self.assertEqual(payload1.get("kind"), "user-question")
+            self.assertEqual(payload1.get("lineage"), {"source_question_id": None, "parent_answer_id": None})
+        if q2 is not None:
+            payload2 = json.loads(str(q2.payload_json or "{}"))
+            self.assertEqual(payload2.get("kind"), "child-question")
+            self.assertEqual(
+                payload2.get("lineage"),
+                {"source_question_id": "question-events-1", "parent_answer_id": "answer-events-1"},
+            )
 
     def test_create_question_explicit_team_role_has_priority_over_tags(self) -> None:
         storage, team_id, team_role_id = self._bootstrap()

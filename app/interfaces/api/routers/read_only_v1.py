@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime, timezone
+import json
 from typing import Any
 
 from app.application.authz import AuthzActor
@@ -16,6 +18,10 @@ from app.application.use_cases.read_api import (
     list_team_sessions_result,
     list_teams_result,
 )
+from app.application.use_cases.recovery_reset import (
+    RecoveryQueuesSnapshot,
+    reset_recovery_queues_result,
+)
 from app.application.use_cases.qa_api import (
     QaCreateQuestionRequest,
     create_question_result,
@@ -28,9 +34,21 @@ from app.application.use_cases.qa_api import (
     resolve_answer_by_question_result,
 )
 from app.application.use_cases.write_api import (
+    TeamRenameRequest,
+    MasterRoleCreateRequest,
     MasterRolePatchRequest,
+    TeamRolePrepostReplaceItem,
+    TeamRolePrepostReplaceRequest,
+    TeamRoleSkillReplaceItem,
+    TeamRoleSkillsReplaceRequest,
     bind_master_role_to_team_result,
+    create_master_role_result,
+    create_team_result,
+    delete_master_role_result,
+    delete_team_result,
+    rename_team_result,
     TeamRolePatchRequest,
+    TeamCreateRequest,
     TeamRolePrepostPutRequest,
     TeamRoleRootDirPutRequest,
     TeamRoleSkillPutRequest,
@@ -38,6 +56,8 @@ from app.application.use_cases.write_api import (
     deactivate_team_role_binding_write_result,
     patch_master_role_result,
     patch_team_role_result,
+    replace_team_role_prepost_result,
+    replace_team_role_skills_result,
     put_team_role_prepost_result,
     put_team_role_root_dir_result,
     put_team_role_skill_result,
@@ -56,9 +76,16 @@ from app.interfaces.api.schemas import (
     ApiCursorResponse,
     ApiErrorBody,
     ApiErrorResponse,
+    EventDeliveriesSummaryDTO,
+    EventDeliveryActionRequestDTO,
+    EventDeliveryDTO,
+    EventSubscriptionDTO,
+    EventSubscriptionUpsertRequestDTO,
     ApiPageMeta,
     ApiPagedResponse,
     MasterRoleCatalogItemDTO,
+    MasterRoleCreateOutcomeDTO,
+    MasterRoleCreateRequestDTO,
     MasterRolePatchOutcomeDTO,
     MasterRolePatchRequestDTO,
     MutationAckDTO,
@@ -70,22 +97,37 @@ from app.interfaces.api.schemas import (
     QaQuestionDTO,
     QaQuestionStatusDTO,
     QaThreadResponseDTO,
+    RecoveryQueuesResetRequestDTO,
+    RecoveryQueuesResetResponseDTO,
+    RecoveryQueuesResetSnapshotDTO,
     RoleDTO,
     RoleCatalogErrorDTO,
     SkillDTO,
     TeamDTO,
     TeamRolePatchOutcomeDTO,
     TeamRolePatchRequestDTO,
+    TeamRolePrepostReplaceOutcomeDTO,
+    TeamRolePrepostReplaceRequestDTO,
     TeamRolePrepostOutcomeDTO,
     TeamRolePrepostPutRequestDTO,
     TeamRoleRootDirOutcomeDTO,
     TeamRoleRootDirPutRequestDTO,
+    TeamRoleRuntimeCurrentQuestionDTO,
+    TeamRoleRuntimeOverviewDTO,
+    TeamRoleSkillReplaceRequestDTO,
+    TeamRoleSkillsReplaceOutcomeDTO,
     TeamRoleRuntimeStatusDTO,
     TeamRoleSkillOutcomeDTO,
     TeamRoleSkillPutRequestDTO,
     TeamRoleUserMutationRequestDTO,
     TeamRoleWorkingDirOutcomeDTO,
     TeamRoleWorkingDirPutRequestDTO,
+    TeamCreateOutcomeDTO,
+    TeamCreateRequestDTO,
+    TeamRenameOutcomeDTO,
+    TeamRenameRequestDTO,
+    ThreadEventTraceDTO,
+    ThreadEventDTO,
     master_role_catalog_item_to_dto,
     master_role_patch_outcome_to_dto,
     mutation_ack_to_dto,
@@ -107,6 +149,9 @@ from app.interfaces.api.schemas import (
     team_session_to_dto,
     team_role_runtime_status_to_dto,
     team_to_dto,
+    event_delivery_to_dto,
+    event_subscription_to_dto,
+    thread_event_to_dto,
 )
 
 
@@ -154,6 +199,71 @@ def build_read_only_v1_router(*, app_state: Any):
                 next_cursor=next_cursor,
             ),
         ).model_dump(mode="json")
+
+    def _parse_iso(ts: str | None) -> datetime | None:
+        value = str(ts or "").strip()
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except Exception:
+            return None
+
+    def _event_delivery_lag_ms(item) -> float | None:
+        start = _parse_iso(getattr(item, "created_at", None))
+        if start is None:
+            return None
+        end = _parse_iso(getattr(item, "delivered_at", None)) or datetime.now(timezone.utc)
+        return max(0.0, (end - start).total_seconds() * 1000.0)
+
+    def _event_delivery_to_payload(item) -> dict[str, object]:
+        payload = event_delivery_to_dto(item).model_dump(mode="json")
+        payload["lag_ms"] = _event_delivery_lag_ms(item)
+        return payload
+
+    def _resolve_thread_event_author_name(*, storage, item) -> str | None:
+        if storage is None:
+            return None
+        author_type = str(getattr(item, "author_type", "") or "").strip().lower()
+        if author_type == "user":
+            return "user"
+        if author_type != "role":
+            return None
+        candidate_answer_ids: list[str] = []
+        for raw in (
+            getattr(item, "answer_id", None),
+            getattr(item, "parent_answer_id", None),
+            (getattr(item, "source_ref_id", None) if str(getattr(item, "source_ref_type", "") or "").strip().lower() == "answer" else None),
+        ):
+            value = str(raw or "").strip()
+            if value and value not in candidate_answer_ids:
+                candidate_answer_ids.append(value)
+        for answer_id in candidate_answer_ids:
+            answer = storage.get_answer(answer_id)
+            if answer is None:
+                continue
+            role_name = str(getattr(answer, "role_name", "") or "").strip()
+            if role_name:
+                return role_name
+        return "role"
+
+    def _thread_event_to_payload(item, *, storage=None) -> dict[str, object]:
+        payload = thread_event_to_dto(item).model_dump(mode="json")
+        raw = str(payload.get("payload_json") or "").strip()
+        if not raw:
+            author_name = _resolve_thread_event_author_name(storage=storage, item=item)
+            if author_name is not None:
+                payload["author_name"] = author_name
+            return payload
+        try:
+            parsed = json.loads(raw)
+            payload["payload_json"] = json.dumps(parsed, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            pass
+        author_name = _resolve_thread_event_author_name(storage=storage, item=item)
+        if author_name is not None:
+            payload["author_name"] = author_name
+        return payload
 
     def _owner_guard(user_id: int | None) -> JSONResponse | None:
         if user_id is None:
@@ -421,6 +531,115 @@ def build_read_only_v1_router(*, app_state: Any):
         return _ok_list(runtime_status_result.value, team_role_runtime_status_to_dto)
 
     @router.get(
+        "/teams/{team_id}/runtime-status/overview",
+        response_model=list[TeamRoleRuntimeOverviewDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_team_runtime_status_overview(
+        team_id: int,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        storage_result = provide_storage_uow_dependencies(app_state)
+        if storage_result.is_error or storage_result.value is None:
+            mapped = map_result_error_to_api(storage_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        queue_result = provide_queue_status_dependencies(app_state)
+        if queue_result.is_error or queue_result.value is None:
+            mapped = map_result_error_to_api(queue_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+
+        storage = storage_result.value.storage
+        runtime_status_result = list_team_runtime_status_result(
+            storage,
+            queue_result.value.runtime_status_service,
+            team_id=team_id,
+        )
+        if runtime_status_result.is_error or runtime_status_result.value is None:
+            mapped = map_result_error_to_api(runtime_status_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+
+        roles_result = list_team_roles_result(
+            storage,
+            team_id=team_id,
+            include_inactive=False,
+            runtime=app_state.runtime,
+        )
+        if roles_result.is_error or roles_result.value is None:
+            mapped = map_result_error_to_api(roles_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+
+        status_by_team_role_id = {
+            int(item.team_role_id): item
+            for item in runtime_status_result.value
+            if int(getattr(item, "team_role_id", 0) or 0) > 0
+        }
+        items: list[TeamRoleRuntimeOverviewDTO] = []
+        for role in roles_result.value:
+            resolved_team_role_id = (
+                int(role.team_role_id)
+                if role.team_role_id is not None
+                else storage.resolve_team_role_id(team_id, int(role.role_id), ensure_exists=False)
+            )
+            if resolved_team_role_id is None:
+                continue
+            team_role_id = int(resolved_team_role_id)
+            runtime_status = status_by_team_role_id.get(team_role_id)
+            status = str(getattr(runtime_status, "status", "free") or "free")
+            if status not in {"free", "busy"}:
+                status = "free"
+            current_question = None
+            if status == "busy":
+                in_progress, _ = storage.list_qa_journal(
+                    team_id=team_id,
+                    team_role_id=team_role_id,
+                    status="in_progress",
+                    limit=1,
+                )
+                if in_progress:
+                    q = in_progress[0]
+                    current_question = TeamRoleRuntimeCurrentQuestionDTO(
+                        question_id=str(q.question_id),
+                        thread_id=str(q.thread_id),
+                        text=str(q.text or ""),
+                        status=str(q.status or "in_progress"),
+                        updated_at=str(q.updated_at or ""),
+                        source="question",
+                    )
+                elif runtime_status is not None and str(getattr(runtime_status, "preview_text", "") or "").strip():
+                    current_question = TeamRoleRuntimeCurrentQuestionDTO(
+                        question_id=None,
+                        thread_id=None,
+                        text=str(getattr(runtime_status, "preview_text", "") or ""),
+                        status=None,
+                        updated_at=str(getattr(runtime_status, "updated_at", "") or ""),
+                        source="preview",
+                    )
+            items.append(
+                TeamRoleRuntimeOverviewDTO(
+                    team_id=int(team_id),
+                    role_id=int(role.role_id),
+                    team_role_id=team_role_id,
+                    role_name=str(role.role_name),
+                    display_name=str(role.public_name()),
+                    status=status,  # type: ignore[arg-type]
+                    busy_request_id=(str(runtime_status.busy_request_id) if runtime_status and runtime_status.busy_request_id else None),
+                    busy_since=(str(runtime_status.busy_since) if runtime_status and runtime_status.busy_since else None),
+                    lease_expires_at=(str(runtime_status.lease_expires_at) if runtime_status and runtime_status.lease_expires_at else None),
+                    current_question=current_question,
+                )
+            )
+        return [item.model_dump(mode="json") for item in items]
+
+    @router.get(
         "/teams/{team_id}/sessions",
         response_model=ApiPagedResponse,
         responses={
@@ -542,6 +761,7 @@ def build_read_only_v1_router(*, app_state: Any):
                 created_by_user_id=int(effective_owner_user_id),
                 text=payload.text,
                 team_role_id=payload.team_role_id,
+                origin_interface=payload.origin_interface,
                 origin_type=payload.origin_type,
                 source_question_id=payload.source_question_id,
                 parent_answer_id=payload.parent_answer_id,
@@ -553,6 +773,7 @@ def build_read_only_v1_router(*, app_state: Any):
             provider_models=list(getattr(app_state.runtime, "provider_models", []) or []),
             provider_model_map=dict(getattr(app_state.runtime, "provider_model_map", {}) or {}),
             default_provider_id=str(getattr(app_state.runtime, "default_provider_id", "") or ""),
+            metrics_port=getattr(app_state.runtime, "metrics_port", None),
         )
         if result.is_error or result.value is None:
             mapped = map_result_error_to_api(result)
@@ -864,6 +1085,201 @@ def build_read_only_v1_router(*, app_state: Any):
         return master_role_patch_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.post(
+        "/roles",
+        response_model=MasterRoleCreateOutcomeDTO,
+        status_code=201,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def create_master_role(
+        payload: MasterRoleCreateRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = create_master_role_result(
+            deps_result.value.storage,
+            request=MasterRoleCreateRequest(
+                role_name=payload.role_name,
+                system_prompt=payload.system_prompt,
+                llm_model=payload.llm_model,
+                description=payload.description,
+                extra_instruction=payload.extra_instructions,
+            ),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return MasterRoleCreateOutcomeDTO(
+            role_id=int(result.value.role_id),
+            role_name=str(result.value.role_name),
+            llm_model=result.value.llm_model,
+            system_prompt=str(result.value.system_prompt),
+            extra_instructions=str(result.value.extra_instruction or ""),
+            description=str(result.value.description or ""),
+            is_active=bool(result.value.is_active),
+        ).model_dump(mode="json")
+
+    @router.post(
+        "/teams",
+        response_model=TeamCreateOutcomeDTO,
+        status_code=201,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def create_team(
+        payload: TeamCreateRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = create_team_result(
+            deps_result.value.storage,
+            request=TeamCreateRequest(name=payload.name),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return TeamCreateOutcomeDTO.model_validate(result.value).model_dump(mode="json")
+
+    @router.patch(
+        "/teams/{team_id}",
+        response_model=TeamRenameOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def rename_team(
+        team_id: int,
+        payload: TeamRenameRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = rename_team_result(
+            deps_result.value.storage,
+            team_id=team_id,
+            request=TeamRenameRequest(name=payload.name),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return TeamRenameOutcomeDTO.model_validate(result.value).model_dump(mode="json")
+
+    @router.delete(
+        "/teams/{team_id}",
+        status_code=204,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def delete_team(
+        team_id: int,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = delete_team_result(
+            deps_result.value.storage,
+            team_id=team_id,
+        )
+        if result.is_error:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return Response(status_code=204)
+
+    @router.delete(
+        "/roles/{role_id}",
+        status_code=204,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def delete_master_role(
+        role_id: int,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = delete_master_role_result(
+            deps_result.value.storage,
+            role_id=role_id,
+        )
+        if result.is_error:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return Response(status_code=204)
+
+    @router.post(
         "/teams/{team_id}/roles/{role_id}",
         response_model=TeamRolePatchOutcomeDTO,
         responses={
@@ -1084,6 +1500,56 @@ def build_read_only_v1_router(*, app_state: Any):
         return team_role_skill_outcome_to_dto(result.value).model_dump(mode="json")
 
     @router.put(
+        "/team-roles/{team_role_id}/skills",
+        response_model=TeamRoleSkillsReplaceOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def replace_team_role_skills(
+        team_role_id: int,
+        payload: TeamRoleSkillReplaceRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = replace_team_role_skills_result(
+            app_state.runtime,
+            deps_result.value.storage,
+            request=TeamRoleSkillsReplaceRequest(
+                team_role_id=team_role_id,
+                items=tuple(
+                    TeamRoleSkillReplaceItem(
+                        skill_id=item.skill_id,
+                        enabled=bool(item.enabled),
+                        config=item.config,
+                    )
+                    for item in payload.items
+                ),
+            ),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return TeamRoleSkillsReplaceOutcomeDTO(
+            items=[team_role_skill_outcome_to_dto(item) for item in result.value.items]
+        ).model_dump(mode="json")
+
+    @router.put(
         "/team-roles/{team_role_id}/working-dir",
         response_model=TeamRoleWorkingDirOutcomeDTO,
         responses={
@@ -1208,5 +1674,546 @@ def build_read_only_v1_router(*, app_state: Any):
             mapped = map_result_error_to_api(result)
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
         return team_role_prepost_outcome_to_dto(result.value).model_dump(mode="json")
+
+    @router.put(
+        "/team-roles/{team_role_id}/prepost",
+        response_model=TeamRolePrepostReplaceOutcomeDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def replace_team_role_prepost(
+        team_role_id: int,
+        payload: TeamRolePrepostReplaceRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        result = replace_team_role_prepost_result(
+            app_state.runtime,
+            deps_result.value.storage,
+            request=TeamRolePrepostReplaceRequest(
+                team_role_id=team_role_id,
+                items=tuple(
+                    TeamRolePrepostReplaceItem(
+                        prepost_id=item.prepost_id,
+                        enabled=bool(item.enabled),
+                        config=item.config,
+                    )
+                    for item in payload.items
+                ),
+            ),
+        )
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return TeamRolePrepostReplaceOutcomeDTO(
+            items=[team_role_prepost_outcome_to_dto(item) for item in result.value.items]
+        ).model_dump(mode="json")
+
+    @router.post(
+        "/admin/recovery/queues/reset",
+        response_model=RecoveryQueuesResetResponseDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def reset_recovery_queues(
+        payload: RecoveryQueuesResetRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        if payload.scope.mode == "team" and payload.scope.team_id is None:
+            return _error_json(
+                status_code=422,
+                payload={
+                    "code": ErrorCode.VALIDATION_INVALID_INPUT.value,
+                    "message": "scope.team_id is required when scope.mode=team",
+                    "details": {"entity": "recovery_reset", "cause": "team_scope_missing_team_id"},
+                    "retryable": False,
+                },
+            )
+        if payload.scope.mode == "global" and payload.scope.team_id is not None:
+            return _error_json(
+                status_code=422,
+                payload={
+                    "code": ErrorCode.VALIDATION_INVALID_INPUT.value,
+                    "message": "scope.team_id must be omitted when scope.mode=global",
+                    "details": {"entity": "recovery_reset", "cause": "global_scope_unexpected_team_id"},
+                    "retryable": False,
+                },
+            )
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+
+        outcome_result = reset_recovery_queues_result(
+            deps_result.value.storage,
+            scope_mode=payload.scope.mode,
+            team_id=payload.scope.team_id,
+            dry_run=bool(payload.dry_run),
+        )
+        if outcome_result.is_error or outcome_result.value is None:
+            mapped = map_result_error_to_api(outcome_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+
+        def _snapshot_to_dto(snapshot: RecoveryQueuesSnapshot) -> RecoveryQueuesResetSnapshotDTO:
+            return RecoveryQueuesResetSnapshotDTO(
+                questions_accepted=int(snapshot.questions_accepted),
+                questions_queued=int(snapshot.questions_queued),
+                questions_in_progress=int(snapshot.questions_in_progress),
+                qa_dispatch_bridge_rows=int(snapshot.qa_dispatch_bridge_rows),
+                event_deliveries_pending=int(snapshot.event_deliveries_pending),
+                event_deliveries_retry_scheduled=int(snapshot.event_deliveries_retry_scheduled),
+                event_deliveries_in_progress=int(snapshot.event_deliveries_in_progress),
+                runtime_status_busy=int(snapshot.runtime_status_busy),
+                runtime_status_free=int(snapshot.runtime_status_free),
+                runtime_status_pending=int(snapshot.runtime_status_pending),
+            )
+
+        outcome = outcome_result.value
+        return RecoveryQueuesResetResponseDTO(
+            scope=payload.scope,
+            dry_run=bool(outcome.dry_run),
+            applied=bool(outcome.applied),
+            before=_snapshot_to_dto(outcome.before),
+            after=_snapshot_to_dto(outcome.after),
+            delta=_snapshot_to_dto(outcome.delta),
+            summary=outcome.summary,
+        ).model_dump(mode="json")
+
+    @router.get(
+        "/admin/event-subscriptions",
+        response_model=list[EventSubscriptionDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def list_event_subscriptions(
+        scope: str | None = Query(default=None),
+        scope_id: str | None = Query(default=None),
+        interface_type: str | None = Query(default=None),
+        active_only: bool = Query(default=True),
+        limit: int = Query(default=200, ge=1, le=1000),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        items = deps_result.value.storage.list_event_subscriptions(
+            scope=scope,
+            scope_id=scope_id,
+            interface_type=interface_type,
+            active_only=bool(active_only),
+            limit=limit,
+        )
+        return _ok_list(items, event_subscription_to_dto)
+
+    @router.put(
+        "/admin/event-subscriptions",
+        response_model=EventSubscriptionDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def upsert_event_subscription(
+        payload: EventSubscriptionUpsertRequestDTO = Body(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        with storage.transaction(immediate=True):
+            item = storage.upsert_event_subscription(
+                scope=payload.scope,
+                scope_id=payload.scope_id,
+                interface_type=payload.interface_type,
+                target_id=payload.target_id,
+                mode=payload.mode,
+                is_active=payload.is_active,
+                options_json=payload.options_json,
+            )
+        return event_subscription_to_dto(item).model_dump(mode="json")
+
+    @router.delete(
+        "/admin/event-subscriptions/{subscription_id}",
+        status_code=204,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def delete_event_subscription(
+        subscription_id: int,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        with storage.transaction(immediate=True):
+            deleted = storage.delete_event_subscription(subscription_id)
+        if not deleted:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Event subscription not found: {subscription_id}",
+                    "details": {"entity": "event_subscription", "id": int(subscription_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return Response(status_code=204)
+
+    @router.get(
+        "/admin/thread-events",
+        response_model=list[ThreadEventDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def list_thread_events(
+        event_id: str | None = Query(default=None),
+        thread_id: str | None = Query(default=None),
+        team_id: int | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=500),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        items = deps_result.value.storage.list_thread_events(
+            event_id=event_id,
+            thread_id=thread_id,
+            team_id=team_id,
+            limit=limit,
+        )
+        return [_thread_event_to_payload(item, storage=deps_result.value.storage) for item in items]
+
+    @router.get(
+        "/admin/thread-events/trace",
+        response_model=ThreadEventTraceDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_thread_event_trace(
+        event_id: str = Query(...),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        event = storage.get_thread_event(event_id)
+        if event is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Thread event not found: {event_id}",
+                    "details": {"entity": "thread_event", "id": str(event_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        deliveries = storage.list_event_deliveries(event_id=event_id, limit=1000)
+        return {
+            "event": _thread_event_to_payload(event, storage=storage),
+            "deliveries": [_event_delivery_to_payload(item) for item in deliveries],
+        }
+
+    @router.get(
+        "/admin/event-deliveries",
+        response_model=list[EventDeliveryDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def list_event_deliveries(
+        event_id: str | None = Query(default=None),
+        interface_type: str | None = Query(default=None),
+        target_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=1000),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        items = deps_result.value.storage.list_event_deliveries(
+            event_id=event_id,
+            interface_type=interface_type,
+            target_id=target_id,
+            status=status,
+            limit=limit,
+        )
+        return [_event_delivery_to_payload(item) for item in items]
+
+    @router.get(
+        "/admin/event-deliveries/summary",
+        response_model=EventDeliveriesSummaryDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_event_deliveries_summary(
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        statuses = ("pending", "in_progress", "retry_scheduled", "delivered", "skipped", "failed_dlq")
+        counts = {name: int(storage.count_event_deliveries(status=name)) for name in statuses}
+        recent = storage.list_event_deliveries(limit=1000)
+        lags = [lag for lag in (_event_delivery_lag_ms(item) for item in recent) if lag is not None]
+        avg_lag = (sum(lags) / len(lags)) if lags else None
+        max_lag = max(lags) if lags else None
+        return EventDeliveriesSummaryDTO(
+            total=int(storage.count_event_deliveries()),
+            pending=counts["pending"],
+            in_progress=counts["in_progress"],
+            retry_scheduled=counts["retry_scheduled"],
+            delivered=counts["delivered"],
+            skipped=counts["skipped"],
+            failed_dlq=counts["failed_dlq"],
+            avg_lag_ms=avg_lag,
+            max_lag_ms=max_lag,
+        ).model_dump(mode="json")
+
+    @router.post(
+        "/admin/event-deliveries/{delivery_id}/retry",
+        response_model=EventDeliveryDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def retry_event_delivery(
+        delivery_id: int,
+        payload: EventDeliveryActionRequestDTO | None = Body(default=None),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        req = payload or EventDeliveryActionRequestDTO()
+        with storage.transaction(immediate=True):
+            item = storage.requeue_event_delivery(delivery_id, reset_attempt_count=bool(req.reset_attempt_count))
+        if item is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Event delivery not found: {delivery_id}",
+                    "details": {"entity": "event_delivery", "id": int(delivery_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return _event_delivery_to_payload(item)
+
+    @router.post(
+        "/admin/event-deliveries/{delivery_id}/skip",
+        response_model=EventDeliveryDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def skip_event_delivery(
+        delivery_id: int,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        with storage.transaction(immediate=True):
+            item = storage.skip_event_delivery(delivery_id)
+        if item is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Event delivery not found: {delivery_id}",
+                    "details": {"entity": "event_delivery", "id": int(delivery_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return _event_delivery_to_payload(item)
+
+    @router.post(
+        "/admin/event-deliveries/{delivery_id}/dlq-requeue",
+        response_model=EventDeliveryDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            422: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def requeue_dlq_event_delivery(
+        delivery_id: int,
+        payload: EventDeliveryActionRequestDTO | None = Body(default=None),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        current = storage.get_event_delivery(delivery_id)
+        if current is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Event delivery not found: {delivery_id}",
+                    "details": {"entity": "event_delivery", "id": int(delivery_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        if str(current.status) != "failed_dlq":
+            return _error_json(
+                status_code=422,
+                payload={
+                    "code": ErrorCode.VALIDATION_INVALID_INPUT.value,
+                    "message": f"Delivery is not in DLQ state: {current.status}",
+                    "details": {"entity": "event_delivery", "id": int(delivery_id), "cause": "status_invalid"},
+                    "retryable": False,
+                },
+            )
+        with storage.transaction(immediate=True):
+            req = payload or EventDeliveryActionRequestDTO()
+            item = storage.requeue_event_delivery(delivery_id, reset_attempt_count=bool(req.reset_attempt_count))
+        if item is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Event delivery not found: {delivery_id}",
+                    "details": {"entity": "event_delivery", "id": int(delivery_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return _event_delivery_to_payload(item)
 
     return router

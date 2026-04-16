@@ -33,7 +33,7 @@ class _FakeMetricsPort:
 
 class _FakeSkillsRegistry:
     def __init__(self) -> None:
-        self._known = {"fs.list_dir": object()}
+        self._known = {"fs.list_dir": object(), "fs.read_file": object()}
 
     def get(self, skill_id: str):
         return self._known.get(skill_id)
@@ -41,7 +41,7 @@ class _FakeSkillsRegistry:
 
 class _FakePrepostRegistry:
     def __init__(self) -> None:
-        self._known = {"echo": object()}
+        self._known = {"echo": object(), "trim": object()}
 
     def get(self, prepost_id: str):
         return self._known.get(prepost_id)
@@ -241,6 +241,88 @@ class LTC74WriteFastApiContractTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["enabled"])
 
+    def test_bulk_replace_skills_full_replace_and_empty_clear(self) -> None:
+        client = self._client()
+        _, _, team_role_id = self._team_and_role(client)
+        full = client.put(
+            f"/api/v1/team-roles/{team_role_id}/skills",
+            headers={"X-Owner-User-Id": "700"},
+            json={
+                "items": [
+                    {"skill_id": "fs.list_dir", "enabled": True, "config": {"root_dir": "/tmp"}},
+                    {"skill_id": "fs.read_file", "enabled": False, "config": {"x": 1}},
+                ]
+            },
+        )
+        self.assertEqual(full.status_code, 200)
+        self.assertEqual(len(full.json()["items"]), 2)
+        clear = client.put(
+            f"/api/v1/team-roles/{team_role_id}/skills",
+            headers={"X-Owner-User-Id": "700"},
+            json={"items": []},
+        )
+        self.assertEqual(clear.status_code, 200)
+        self.assertEqual(clear.json()["items"], [])
+
+    def test_bulk_replace_prepost_full_replace_and_empty_clear(self) -> None:
+        client = self._client()
+        _, _, team_role_id = self._team_and_role(client)
+        full = client.put(
+            f"/api/v1/team-roles/{team_role_id}/prepost",
+            headers={"X-Owner-User-Id": "700"},
+            json={
+                "items": [
+                    {"prepost_id": "echo", "enabled": True, "config": {"x": 1}},
+                    {"prepost_id": "trim", "enabled": False, "config": {"y": 2}},
+                ]
+            },
+        )
+        self.assertEqual(full.status_code, 200)
+        self.assertEqual(len(full.json()["items"]), 2)
+        clear = client.put(
+            f"/api/v1/team-roles/{team_role_id}/prepost",
+            headers={"X-Owner-User-Id": "700"},
+            json={"items": []},
+        )
+        self.assertEqual(clear.status_code, 200)
+        self.assertEqual(clear.json()["items"], [])
+
+    def test_bulk_replace_duplicate_ids_return_422(self) -> None:
+        client = self._client()
+        _, _, team_role_id = self._team_and_role(client)
+        skill_dup = client.put(
+            f"/api/v1/team-roles/{team_role_id}/skills",
+            headers={"X-Owner-User-Id": "700"},
+            json={"items": [{"skill_id": "fs.list_dir"}, {"skill_id": "fs.list_dir"}]},
+        )
+        prepost_dup = client.put(
+            f"/api/v1/team-roles/{team_role_id}/prepost",
+            headers={"X-Owner-User-Id": "700"},
+            json={"items": [{"prepost_id": "echo"}, {"prepost_id": "echo"}]},
+        )
+        self.assertEqual(skill_dup.status_code, 422)
+        self.assertEqual(skill_dup.json()["error"]["code"], "validation.invalid_input")
+        self.assertEqual(prepost_dup.status_code, 422)
+        self.assertEqual(prepost_dup.json()["error"]["code"], "validation.invalid_input")
+
+    def test_bulk_replace_unknown_ids_return_404(self) -> None:
+        client = self._client()
+        _, _, team_role_id = self._team_and_role(client)
+        skill_unknown = client.put(
+            f"/api/v1/team-roles/{team_role_id}/skills",
+            headers={"X-Owner-User-Id": "700"},
+            json={"items": [{"skill_id": "fs.unknown"}]},
+        )
+        prepost_unknown = client.put(
+            f"/api/v1/team-roles/{team_role_id}/prepost",
+            headers={"X-Owner-User-Id": "700"},
+            json={"items": [{"prepost_id": "unknown"}]},
+        )
+        self.assertEqual(skill_unknown.status_code, 404)
+        self.assertEqual(skill_unknown.json()["error"]["code"], "storage.not_found")
+        self.assertEqual(prepost_unknown.status_code, 404)
+        self.assertEqual(prepost_unknown.json()["error"]["code"], "storage.not_found")
+
     def test_put_working_dir_returns_200(self) -> None:
         client = self._client()
         _, _, team_role_id = self._team_and_role(client)
@@ -267,23 +349,138 @@ class LTC74WriteFastApiContractTests(unittest.TestCase):
         self.assertEqual(body["team_role_id"], team_role_id)
         self.assertEqual(body["root_dir"], "/tmp/root")
 
+    def test_create_master_role_returns_201(self) -> None:
+        client = self._client()
+        response = client.post(
+            "/api/v1/roles",
+            headers={"X-Owner-User-Id": "700"},
+            json={
+                "role_name": "api_created_role",
+                "system_prompt": "You are api-created role",
+                "llm_model": "gpt-4o-mini",
+                "description": "desc",
+                "extra_instructions": "extra",
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["role_name"], "api_created_role")
+        self.assertTrue(body["is_active"])
+
+    def test_create_master_role_duplicate_returns_409(self) -> None:
+        client = self._client()
+        payload = {
+            "role_name": "duplicate_role",
+            "system_prompt": "sp",
+            "llm_model": "gpt-4o-mini",
+        }
+        first = client.post("/api/v1/roles", headers={"X-Owner-User-Id": "700"}, json=payload)
+        second = client.post("/api/v1/roles", headers={"X-Owner-User-Id": "700"}, json=payload)
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["error"]["code"], "conflict.already_exists")
+
+    def test_create_master_role_invalid_payload_returns_422(self) -> None:
+        client = self._client()
+        response = client.post(
+            "/api/v1/roles",
+            headers={"X-Owner-User-Id": "700"},
+            json={"role_name": "   ", "system_prompt": "sp", "llm_model": "m"},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "validation.invalid_input")
+
+    def test_create_team_returns_201(self) -> None:
+        client = self._client()
+        response = client.post(
+            "/api/v1/teams",
+            headers={"X-Owner-User-Id": "700"},
+            json={"name": "API Team"},
+        )
+        self.assertEqual(response.status_code, 201)
+        body = response.json()
+        self.assertEqual(body["name"], "API Team")
+        self.assertTrue(str(body["public_id"]).startswith("team-"))
+
+    def test_create_team_invalid_payload_returns_422(self) -> None:
+        client = self._client()
+        response = client.post(
+            "/api/v1/teams",
+            headers={"X-Owner-User-Id": "700"},
+            json={"name": " "},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "validation.invalid_input")
+
+    def test_rename_team_returns_200(self) -> None:
+        client = self._client()
+        team_id, _, _ = self._team_and_role(client)
+        response = client.patch(
+            f"/api/v1/teams/{team_id}",
+            headers={"X-Owner-User-Id": "700"},
+            json={"name": "Renamed Team"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["name"], "Renamed Team")
+
+    def test_rename_team_invalid_payload_returns_422(self) -> None:
+        client = self._client()
+        team_id, _, _ = self._team_and_role(client)
+        response = client.patch(
+            f"/api/v1/teams/{team_id}",
+            headers={"X-Owner-User-Id": "700"},
+            json={"name": "  "},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "validation.invalid_input")
+
+    def test_delete_team_returns_204(self) -> None:
+        client = self._client()
+        created = client.post("/api/v1/teams", headers={"X-Owner-User-Id": "700"}, json={"name": "Disposable Team"})
+        self.assertEqual(created.status_code, 201)
+        team_id = int(created.json()["team_id"])
+        deleted = client.request("DELETE", f"/api/v1/teams/{team_id}", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(deleted.status_code, 204)
+
+    def test_delete_master_role_returns_204(self) -> None:
+        client = self._client()
+        created = client.post(
+            "/api/v1/roles",
+            headers={"X-Owner-User-Id": "700"},
+            json={"role_name": "disposable_master_role", "system_prompt": "sp", "llm_model": "m"},
+        )
+        self.assertEqual(created.status_code, 201)
+        role_id = int(created.json()["role_id"])
+        deleted = client.request("DELETE", f"/api/v1/roles/{role_id}", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(deleted.status_code, 204)
+
     def test_owner_authz_401_for_write_endpoints(self) -> None:
         client = self._client()
         team_id, role_id, team_role_id = self._team_and_role(client)
         checks = [
+            ("post", "/api/v1/roles", {"role_name": "r1", "system_prompt": "sp", "llm_model": "m"}),
+            ("post", "/api/v1/teams", {"name": "t1"}),
+            ("patch", f"/api/v1/teams/{team_id}", {"name": "t2"}),
+            ("delete", f"/api/v1/teams/{team_id}", None),
+            ("delete", f"/api/v1/roles/{role_id}", None),
             ("patch", f"/api/v1/team-roles/{team_role_id}", {"enabled": False}),
             ("post", f"/api/v1/team-roles/{team_role_id}/reset-session", {"telegram_user_id": 700}),
             ("delete", f"/api/v1/team-roles/{team_role_id}", {"telegram_user_id": 700}),
             ("put", f"/api/v1/team-roles/{team_role_id}/skills/fs.list_dir", {"enabled": True}),
+            ("put", f"/api/v1/team-roles/{team_role_id}/skills", {"items": []}),
             ("put", f"/api/v1/team-roles/{team_role_id}/working-dir", {"working_dir": "/tmp/work"}),
             ("put", f"/api/v1/team-roles/{team_role_id}/root-dir", {"root_dir": "/tmp/root"}),
             ("put", f"/api/v1/team-roles/{team_role_id}/prepost/echo", {"enabled": True}),
+            ("put", f"/api/v1/team-roles/{team_role_id}/prepost", {"items": []}),
         ]
         for method, path, payload in checks:
             headers = {}
             if method in {"post", "delete"}:
                 headers["Idempotency-Key"] = "idem-authz"
-            response = client.request(method.upper(), path, headers=headers, json=payload)
+            kwargs = {"headers": headers}
+            if payload is not None:
+                kwargs["json"] = payload
+            response = client.request(method.upper(), path, **kwargs)
             self.assertEqual(response.status_code, 401)
             self.assertEqual(response.json()["error"]["code"], "auth.unauthorized")
 
@@ -291,25 +488,38 @@ class LTC74WriteFastApiContractTests(unittest.TestCase):
         client = self._client()
         team_id, role_id, team_role_id = self._team_and_role(client)
         checks = [
+            ("post", "/api/v1/roles", {"role_name": "r1", "system_prompt": "sp", "llm_model": "m"}),
+            ("post", "/api/v1/teams", {"name": "t1"}),
+            ("patch", f"/api/v1/teams/{team_id}", {"name": "t2"}),
+            ("delete", f"/api/v1/teams/{team_id}", None),
+            ("delete", f"/api/v1/roles/{role_id}", None),
             ("patch", f"/api/v1/team-roles/{team_role_id}", {"enabled": False}),
             ("post", f"/api/v1/team-roles/{team_role_id}/reset-session", {"telegram_user_id": 700}),
             ("delete", f"/api/v1/team-roles/{team_role_id}", {"telegram_user_id": 700}),
             ("put", f"/api/v1/team-roles/{team_role_id}/skills/fs.list_dir", {"enabled": True}),
+            ("put", f"/api/v1/team-roles/{team_role_id}/skills", {"items": []}),
             ("put", f"/api/v1/team-roles/{team_role_id}/working-dir", {"working_dir": "/tmp/work"}),
             ("put", f"/api/v1/team-roles/{team_role_id}/root-dir", {"root_dir": "/tmp/root"}),
             ("put", f"/api/v1/team-roles/{team_role_id}/prepost/echo", {"enabled": True}),
+            ("put", f"/api/v1/team-roles/{team_role_id}/prepost", {"items": []}),
         ]
         for method, path, payload in checks:
             headers = {"X-Owner-User-Id": "701"}
             if method in {"post", "delete"}:
                 headers["Idempotency-Key"] = "idem-authz"
-            response = client.request(method.upper(), path, headers=headers, json=payload)
+            kwargs = {"headers": headers}
+            if payload is not None:
+                kwargs["json"] = payload
+            response = client.request(method.upper(), path, **kwargs)
             self.assertEqual(response.status_code, 403)
             self.assertEqual(response.json()["error"]["code"], "auth.unauthorized")
 
     def test_write_endpoints_return_404_not_found(self) -> None:
         client = self._client()
         headers = {"X-Owner-User-Id": "700"}
+        rename_team_404 = client.patch("/api/v1/teams/999999", headers=headers, json={"name": "x"})
+        delete_team_404 = client.request("DELETE", "/api/v1/teams/999999", headers=headers)
+        delete_role_404 = client.request("DELETE", "/api/v1/roles/999999", headers=headers)
         patch_404 = client.patch("/api/v1/team-roles/999999", headers=headers, json={"enabled": False})
         reset_404 = client.post(
             "/api/v1/team-roles/999999/reset-session",
@@ -323,12 +533,34 @@ class LTC74WriteFastApiContractTests(unittest.TestCase):
             json={"telegram_user_id": 700},
         )
         skill_404 = client.put("/api/v1/team-roles/999999/skills/fs.list_dir", headers=headers, json={"enabled": True})
+        skills_bulk_404 = client.put("/api/v1/team-roles/999999/skills", headers=headers, json={"items": []})
         working_404 = client.put("/api/v1/team-roles/999999/working-dir", headers=headers, json={"working_dir": "/tmp/work"})
         root_404 = client.put("/api/v1/team-roles/999999/root-dir", headers=headers, json={"root_dir": "/tmp/root"})
         prepost_404 = client.put("/api/v1/team-roles/999999/prepost/echo", headers=headers, json={"enabled": True})
-        for response in (patch_404, reset_404, delete_404, skill_404, working_404, root_404, prepost_404):
+        prepost_bulk_404 = client.put("/api/v1/team-roles/999999/prepost", headers=headers, json={"items": []})
+        for response in (
+            rename_team_404,
+            delete_team_404,
+            delete_role_404,
+            patch_404,
+            reset_404,
+            delete_404,
+            skill_404,
+            skills_bulk_404,
+            working_404,
+            root_404,
+            prepost_404,
+            prepost_bulk_404,
+        ):
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.json()["error"]["code"], "storage.not_found")
+
+    def test_delete_master_role_returns_409_when_role_in_use(self) -> None:
+        client = self._client()
+        _, role_id, _ = self._team_and_role(client)
+        response = client.request("DELETE", f"/api/v1/roles/{role_id}", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "conflict.already_exists")
 
     def test_write_endpoints_return_422_validation(self) -> None:
         client = self._client()
@@ -383,6 +615,9 @@ class LTC74WriteFastApiContractTests(unittest.TestCase):
         client = self._client(dispatch_mode="single-runner", dispatch_is_runner=False)
         _, _, team_role_id = self._team_and_role(client)
         checks = [
+            ("patch", f"/api/v1/teams/{team_id}", {"name": "x"}, {}),
+            ("delete", f"/api/v1/teams/{team_id}", None, {}),
+            ("delete", f"/api/v1/roles/{role_id}", None, {}),
             ("patch", f"/api/v1/team-roles/{team_role_id}", {"enabled": False}, {}),
             (
                 "post",
@@ -397,13 +632,18 @@ class LTC74WriteFastApiContractTests(unittest.TestCase):
                 {"Idempotency-Key": "idem-non-runner"},
             ),
             ("put", f"/api/v1/team-roles/{team_role_id}/skills/fs.list_dir", {"enabled": True}, {}),
+            ("put", f"/api/v1/team-roles/{team_role_id}/skills", {"items": []}, {}),
             ("put", f"/api/v1/team-roles/{team_role_id}/working-dir", {"working_dir": "/tmp/work"}, {}),
             ("put", f"/api/v1/team-roles/{team_role_id}/root-dir", {"root_dir": "/tmp/root"}, {}),
             ("put", f"/api/v1/team-roles/{team_role_id}/prepost/echo", {"enabled": True}, {}),
+            ("put", f"/api/v1/team-roles/{team_role_id}/prepost", {"items": []}, {}),
         ]
         for method, path, payload, extra_headers in checks:
             headers = {"X-Owner-User-Id": "700", **extra_headers}
-            response = client.request(method.upper(), path, headers=headers, json=payload)
+            kwargs = {"headers": headers}
+            if payload is not None:
+                kwargs["json"] = payload
+            response = client.request(method.upper(), path, **kwargs)
             self.assertEqual(response.status_code, 409)
             body = response.json()
             self.assertEqual(body["error"]["code"], "runtime_non_runner_reject")
