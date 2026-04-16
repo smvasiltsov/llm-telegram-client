@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.application.contracts.result import Result
+from app.application.use_cases.read_api import ProviderCatalogItem, ProviderModelCatalogItem
 from app.models import Role, RoleCatalogError, RoleCatalogItem, TeamRole, TeamRoleRuntimeStatus, TeamSessionView, UserRoleSession
 
 _IMPORT_ERROR: Exception | None = None
@@ -19,6 +20,7 @@ try:
         delete_request_to_params,
         list_request_to_params,
         operation_result_to_dto,
+        provider_catalog_item_to_dto,
         role_catalog_error_to_dto,
         role_catalog_item_to_dto,
         reset_request_to_params,
@@ -219,6 +221,24 @@ class LTC48ApiSchemaDtoTests(unittest.TestCase):
         self.assertIsInstance(role_catalog_item_to_dto(catalog_item), RoleCatalogItemDTO)
         self.assertIsInstance(role_catalog_error_to_dto(catalog_error), RoleCatalogErrorDTO)
         self.assertIsInstance(team_session_to_dto(session), TeamSessionDTO)
+
+    def test_provider_catalog_adapter_to_dto(self) -> None:
+        value = ProviderCatalogItem(
+            provider_id="codex-api",
+            name="Codex API",
+            auth_mode="header",
+            capabilities={"send_message": True},
+            default_model="codex-api:gpt-5",
+            is_default_provider=True,
+            models=[
+                ProviderModelCatalogItem(model_id="gpt-5", label="GPT-5", full_id="codex-api:gpt-5"),
+            ],
+        )
+        dto = provider_catalog_item_to_dto(value)
+        self.assertEqual(dto.provider_id, "codex-api")
+        self.assertEqual(dto.default_model, "codex-api:gpt-5")
+        self.assertTrue(dto.is_default_provider)
+        self.assertEqual([item.full_id for item in dto.models], ["codex-api:gpt-5"])
 
 
 if __name__ == "__main__":

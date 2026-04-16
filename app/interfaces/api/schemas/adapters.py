@@ -14,7 +14,7 @@ from app.application.use_cases.write_api import (
     TeamRoleWorkingDirOutcome,
 )
 from app.application.use_cases.qa_api import QaCreateQuestionOutcome, QaQuestionStatus
-from app.application.use_cases.read_api import RegistryItem
+from app.application.use_cases.read_api import ProviderCatalogItem, RegistryItem
 from app.models import (
     EventDelivery,
     EventSubscription,
@@ -51,6 +51,8 @@ from .entities import (
     EventSubscriptionDTO,
     ThreadEventDTO,
     PrePostProcessingToolDTO,
+    ProviderCatalogItemDTO,
+    ProviderModelCatalogDTO,
     TeamBindingDTO,
     RoleLinkedItemDTO,
     SkillDTO,
@@ -269,6 +271,21 @@ def prepost_processing_tool_to_dto(value: RegistryItem) -> PrePostProcessingTool
         name=value.name,
         description=value.description,
         source=value.source,
+    )
+
+
+def provider_catalog_item_to_dto(value: ProviderCatalogItem) -> ProviderCatalogItemDTO:
+    return ProviderCatalogItemDTO(
+        provider_id=value.provider_id,
+        name=value.name,
+        auth_mode=value.auth_mode,
+        capabilities=dict(value.capabilities),
+        default_model=value.default_model,
+        is_default_provider=bool(value.is_default_provider),
+        models=[
+            ProviderModelCatalogDTO(model_id=item.model_id, label=item.label, full_id=item.full_id)
+            for item in value.models
+        ],
     )
 
 

@@ -11,6 +11,7 @@ from app.application.observability import ensure_correlation_id, get_correlation
 from app.application.use_cases.read_api import (
     list_master_roles_catalog_result,
     list_prepost_processing_tools_result,
+    list_providers_catalog_result,
     list_roles_catalog_errors_result,
     list_skills_result,
     list_team_roles_result,
@@ -90,6 +91,7 @@ from app.interfaces.api.schemas import (
     MasterRolePatchRequestDTO,
     MutationAckDTO,
     PrePostProcessingToolDTO,
+    ProviderCatalogItemDTO,
     QaAnswerDTO,
     QaCreateQuestionRequestDTO,
     QaCreateQuestionResponseDTO,
@@ -132,6 +134,7 @@ from app.interfaces.api.schemas import (
     master_role_patch_outcome_to_dto,
     mutation_ack_to_dto,
     prepost_processing_tool_to_dto,
+    provider_catalog_item_to_dto,
     qa_answer_to_dto,
     qa_create_question_outcome_to_dto,
     qa_orchestrator_feed_item_to_dto,
@@ -358,6 +361,28 @@ def build_read_only_v1_router(*, app_state: Any):
             mapped = map_result_error_to_api(result)
             return _error_json(status_code=mapped.status_code, payload=mapped.payload)
         return _ok_list(result.value, prepost_processing_tool_to_dto)
+
+    @router.get(
+        "/providers/catalog",
+        response_model=list[ProviderCatalogItemDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_providers_catalog(
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        result = list_providers_catalog_result(app_state.runtime)
+        if result.is_error or result.value is None:
+            mapped = map_result_error_to_api(result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        return _ok_list(result.value, provider_catalog_item_to_dto)
 
     @router.get(
         "/teams",

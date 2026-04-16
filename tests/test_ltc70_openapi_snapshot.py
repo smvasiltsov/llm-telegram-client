@@ -63,6 +63,7 @@ class LTC70OpenApiSnapshotTests(unittest.TestCase):
             "/api/v1/answers/{answer_id}": ("get",),
             "/api/v1/orchestrator/feed": ("get",),
             "/api/v1/prepost_processing_tools": ("get",),
+            "/api/v1/providers/catalog": ("get",),
             "/api/v1/questions": ("post",),
             "/api/v1/questions/{question_id}": ("get",),
             "/api/v1/questions/{question_id}/answer": ("get",),

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from app.application.use_cases.read_api import (
+    list_providers_catalog_result,
     list_roles_catalog_errors_result,
     list_roles_catalog_result,
     list_team_sessions_result,
@@ -96,6 +97,56 @@ class LTC72ReadApiExtensionUseCasesTests(unittest.TestCase):
         result = list_team_sessions_result(storage, team_id=999999, limit=10, offset=0)
         self.assertTrue(result.is_error)
         self.assertEqual((result.error.code if result.error else None), "storage.not_found")
+
+    def test_list_providers_catalog_result_returns_grouped_provider_models(self) -> None:
+        runtime = SimpleNamespace(
+            provider_registry={
+                "codex": SimpleNamespace(
+                    label="Codex API",
+                    auth_mode="header",
+                    capabilities={"send_message": True, "create_session": True},
+                ),
+                "ollama": SimpleNamespace(
+                    label="Ollama",
+                    auth_mode="none",
+                    capabilities={"send_message": True},
+                ),
+            },
+            provider_models=[
+                SimpleNamespace(provider_id="ollama", model_id="qwen3", label="Qwen 3", full_id="ollama:qwen3"),
+                SimpleNamespace(provider_id="codex", model_id="gpt-5", label="GPT-5", full_id="codex:gpt-5"),
+                SimpleNamespace(provider_id="codex", model_id="gpt-4.1", label="GPT-4.1", full_id="codex:gpt-4.1"),
+            ],
+            default_provider_id="codex",
+        )
+        result = list_providers_catalog_result(runtime)
+        self.assertTrue(result.is_ok)
+        items = result.value or []
+        self.assertEqual([item.provider_id for item in items], ["codex", "ollama"])
+        codex = next(item for item in items if item.provider_id == "codex")
+        self.assertEqual(codex.name, "Codex API")
+        self.assertEqual(codex.auth_mode, "header")
+        self.assertEqual(codex.default_model, "codex:gpt-4.1")
+        self.assertTrue(codex.is_default_provider)
+        self.assertEqual([item.full_id for item in codex.models], ["codex:gpt-4.1", "codex:gpt-5"])
+
+    def test_list_providers_catalog_result_includes_models_without_registry_entry(self) -> None:
+        runtime = SimpleNamespace(
+            provider_registry={},
+            provider_models=[
+                SimpleNamespace(provider_id="standalone", model_id="m1", label="Model 1", full_id="standalone:m1"),
+            ],
+            default_provider_id="standalone",
+        )
+        result = list_providers_catalog_result(runtime)
+        self.assertTrue(result.is_ok)
+        items = result.value or []
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0].provider_id, "standalone")
+        self.assertEqual(items[0].name, "standalone")
+        self.assertEqual(items[0].auth_mode, "none")
+        self.assertEqual(items[0].default_model, "standalone:m1")
+        self.assertTrue(items[0].is_default_provider)
 
 
 if __name__ == "__main__":

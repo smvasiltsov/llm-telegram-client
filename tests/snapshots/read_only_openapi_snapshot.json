@@ -3,6 +3,7 @@
     "/api/v1/answers/{answer_id}",
     "/api/v1/orchestrator/feed",
     "/api/v1/prepost_processing_tools",
+    "/api/v1/providers/catalog",
     "/api/v1/qa-journal",
     "/api/v1/questions",
     "/api/v1/questions/{question_id}",
@@ -50,6 +51,15 @@
       ]
     },
     "/api/v1/prepost_processing_tools": {
+      "get": [
+        "200",
+        "401",
+        "403",
+        "422",
+        "500"
+      ]
+    },
+    "/api/v1/providers/catalog": {
       "get": [
         "200",
         "401",

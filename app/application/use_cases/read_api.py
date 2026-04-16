@@ -28,6 +28,24 @@ class RegistryItem:
     source: str | None
 
 
+@dataclass(frozen=True)
+class ProviderModelCatalogItem:
+    model_id: str
+    label: str
+    full_id: str
+
+
+@dataclass(frozen=True)
+class ProviderCatalogItem:
+    provider_id: str
+    name: str
+    auth_mode: str
+    capabilities: dict[str, bool]
+    default_model: str | None
+    is_default_provider: bool
+    models: list[ProviderModelCatalogItem]
+
+
 def list_teams_result(storage: Storage) -> Result[list]:
     try:
         return Result.ok(storage.list_teams())
@@ -251,6 +269,89 @@ def list_skills_result(runtime: Any) -> Result[list[RegistryItem]]:
             fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
             fallback_message="Failed to list skills",
             fallback_details={"entity": "skills_registry", "cause": "list"},
+        )
+
+
+def list_providers_catalog_result(runtime: Any) -> Result[list[ProviderCatalogItem]]:
+    try:
+        provider_registry = dict(getattr(runtime, "provider_registry", {}) or {})
+        provider_models = list(getattr(runtime, "provider_models", []) or [])
+        default_provider_id = str(getattr(runtime, "default_provider_id", "") or "").strip()
+
+        by_provider: dict[str, ProviderCatalogItem] = {}
+        for raw_provider_id, provider in provider_registry.items():
+            provider_id = str(raw_provider_id or "").strip()
+            if not provider_id:
+                continue
+            raw_capabilities = getattr(provider, "capabilities", {}) or {}
+            capabilities: dict[str, bool] = {}
+            if isinstance(raw_capabilities, dict):
+                capabilities = {str(key): bool(value) for key, value in raw_capabilities.items()}
+            by_provider[provider_id] = ProviderCatalogItem(
+                provider_id=provider_id,
+                name=str(getattr(provider, "label", "") or provider_id),
+                auth_mode=str(getattr(provider, "auth_mode", "") or "none"),
+                capabilities=capabilities,
+                default_model=None,
+                is_default_provider=provider_id == default_provider_id,
+                models=[],
+            )
+
+        seen_by_provider: dict[str, set[str]] = {}
+        for model in provider_models:
+            provider_id = str(getattr(model, "provider_id", "") or "").strip()
+            model_id = str(getattr(model, "model_id", "") or "").strip()
+            if not provider_id or not model_id:
+                continue
+            full_id = str(getattr(model, "full_id", "") or f"{provider_id}:{model_id}")
+            dedupe_key = full_id
+            provider_seen = seen_by_provider.setdefault(provider_id, set())
+            if dedupe_key in provider_seen:
+                continue
+            provider_seen.add(dedupe_key)
+            item = by_provider.get(provider_id)
+            if item is None:
+                item = ProviderCatalogItem(
+                    provider_id=provider_id,
+                    name=provider_id,
+                    auth_mode="none",
+                    capabilities={},
+                    default_model=None,
+                    is_default_provider=provider_id == default_provider_id,
+                    models=[],
+                )
+                by_provider[provider_id] = item
+            item.models.append(
+                ProviderModelCatalogItem(
+                    model_id=model_id,
+                    label=str(getattr(model, "label", "") or model_id),
+                    full_id=full_id,
+                )
+            )
+
+        items = []
+        for provider_id in sorted(by_provider.keys()):
+            item = by_provider[provider_id]
+            models = sorted(item.models, key=lambda model: model.full_id)
+            default_model = models[0].full_id if models else None
+            items.append(
+                ProviderCatalogItem(
+                    provider_id=item.provider_id,
+                    name=item.name,
+                    auth_mode=item.auth_mode,
+                    capabilities=dict(item.capabilities),
+                    default_model=default_model,
+                    is_default_provider=item.is_default_provider,
+                    models=models,
+                )
+            )
+        return Result.ok(items)
+    except Exception as exc:
+        return Result.fail_from_exception(
+            exc,
+            fallback_code=ErrorCode.INTERNAL_UNEXPECTED,
+            fallback_message="Failed to list providers catalog",
+            fallback_details={"entity": "provider_catalog", "cause": "list"},
         )
 
 

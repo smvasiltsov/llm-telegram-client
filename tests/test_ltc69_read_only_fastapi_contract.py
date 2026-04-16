@@ -150,6 +150,24 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
                     "p3": {"entrypoint": "prepost.c:make"},
                 },
             ),
+            provider_registry={
+                "codex": SimpleNamespace(
+                    label="Codex API",
+                    auth_mode="header",
+                    capabilities={"send_message": True, "create_session": True},
+                ),
+                "ollama": SimpleNamespace(
+                    label="Ollama",
+                    auth_mode="none",
+                    capabilities={"send_message": True},
+                ),
+            },
+            provider_models=[
+                SimpleNamespace(provider_id="codex", model_id="gpt-5", label="GPT-5", full_id="codex:gpt-5"),
+                SimpleNamespace(provider_id="codex", model_id="gpt-4.1", label="GPT-4.1", full_id="codex:gpt-4.1"),
+                SimpleNamespace(provider_id="ollama", model_id="qwen3", label="Qwen 3", full_id="ollama:qwen3"),
+            ],
+            default_provider_id="codex",
         )
         app = self._builder(runtime)
         return TestClient(app)
@@ -239,6 +257,20 @@ class LTC69ReadOnlyFastApiContractTests(unittest.TestCase):
         payload = response.json()
         self.assertIsInstance(payload, list)
         self.assertIn("status", payload[0])
+
+    def test_get_providers_catalog_returns_providers_with_models(self) -> None:
+        client = self._client()
+        response = client.get("/api/v1/providers/catalog", headers={"X-Owner-User-Id": "700"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIsInstance(payload, list)
+        self.assertEqual([item["provider_id"] for item in payload], ["codex", "ollama"])
+        codex = payload[0]
+        self.assertEqual(codex["name"], "Codex API")
+        self.assertEqual(codex["auth_mode"], "header")
+        self.assertEqual(codex["default_model"], "codex:gpt-4.1")
+        self.assertEqual([item["full_id"] for item in codex["models"]], ["codex:gpt-4.1", "codex:gpt-5"])
+        self.assertTrue(codex["is_default_provider"])
 
     def test_missing_team_returns_unified_error_shape(self) -> None:
         client = self._client()

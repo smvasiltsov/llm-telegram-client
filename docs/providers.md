@@ -38,6 +38,37 @@
 
 Хранение истории ведётся всегда, отправка зависит от `enabled`.
 
+## Read API: провайдеры и модели
+Для получения единого каталога провайдеров и моделей используйте:
+- `GET /api/v1/providers/catalog`
+
+Endpoint возвращает:
+- список провайдеров (`provider_id`, `name`, `auth_mode`, `capabilities`);
+- список моделей каждого провайдера (`model_id`, `label`, `full_id`);
+- `default_model` для провайдера (первая модель в отсортированном списке);
+- `is_default_provider` для провайдера по `runtime.default_provider_id`.
+
+Пример ответа:
+```json
+[
+  {
+    "provider_id": "codex-api",
+    "name": "Codex API",
+    "auth_mode": "header",
+    "capabilities": {
+      "send_message": true,
+      "create_session": true
+    },
+    "default_model": "codex-api:gpt-4.1",
+    "is_default_provider": true,
+    "models": [
+      { "model_id": "gpt-4.1", "label": "GPT-4.1", "full_id": "codex-api:gpt-4.1" },
+      { "model_id": "gpt-5", "label": "GPT-5", "full_id": "codex-api:gpt-5" }
+    ]
+  }
+]
+```
+
 ## Пример: Ollama
 ```json
 {

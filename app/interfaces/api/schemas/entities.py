@@ -166,6 +166,22 @@ class PrePostProcessingToolDTO(ApiSchema):
     source: str | None
 
 
+class ProviderModelCatalogDTO(ApiSchema):
+    model_id: str
+    label: str
+    full_id: str
+
+
+class ProviderCatalogItemDTO(ApiSchema):
+    provider_id: str
+    name: str
+    auth_mode: str
+    capabilities: dict[str, bool] = Field(default_factory=dict)
+    default_model: str | None = None
+    is_default_provider: bool = False
+    models: list[ProviderModelCatalogDTO] = Field(default_factory=list)
+
+
 class TeamRolePatchRequestDTO(ApiSchema):
     enabled: bool | None = None
     is_active: bool | None = None

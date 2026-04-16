@@ -9,6 +9,7 @@ try:
     from app.interfaces.api.schemas import (
         ApiPagedResponse,
         OperationResultDTO,
+        ProviderCatalogItemDTO,
         QaCreateQuestionRequestDTO,
         RoleDTO,
         TeamRoleRuntimeStatusDTO,
@@ -189,6 +190,35 @@ class LTC48ApiSchemaContractTests(unittest.TestCase):
                 text="hello",
                 target_team_role_id=7,
             )
+
+    def test_provider_catalog_shape_contract(self) -> None:
+        dto = ProviderCatalogItemDTO(
+            provider_id="codex-api",
+            name="Codex API",
+            auth_mode="header",
+            capabilities={"send_message": True, "create_session": True},
+            default_model="codex-api:gpt-5",
+            is_default_provider=True,
+            models=[
+                {"model_id": "gpt-5", "label": "GPT-5", "full_id": "codex-api:gpt-5"},
+                {"model_id": "gpt-4.1", "label": "GPT-4.1", "full_id": "codex-api:gpt-4.1"},
+            ],
+        )
+        self.assertEqual(
+            dto.model_dump(mode="json"),
+            {
+                "provider_id": "codex-api",
+                "name": "Codex API",
+                "auth_mode": "header",
+                "capabilities": {"send_message": True, "create_session": True},
+                "default_model": "codex-api:gpt-5",
+                "is_default_provider": True,
+                "models": [
+                    {"model_id": "gpt-5", "label": "GPT-5", "full_id": "codex-api:gpt-5"},
+                    {"model_id": "gpt-4.1", "label": "GPT-4.1", "full_id": "codex-api:gpt-4.1"},
+                ],
+            },
+        )
 
 
 if __name__ == "__main__":
