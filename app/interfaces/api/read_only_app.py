@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from time import monotonic
 
 from app.application.contracts import NoopMetricsPort, build_operation_labels
@@ -17,10 +18,25 @@ from app.interfaces.api.schemas import ApiErrorBody, ApiErrorResponse
 logger = logging.getLogger("api")
 
 
+def _resolve_cors_origins() -> list[str]:
+    # Comma-separated list, e.g. "app://obsidian.md,http://localhost:3000"
+    raw = str(os.getenv("API_CORS_ALLOWED_ORIGINS", "") or "").strip()
+    if raw:
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    return [
+        "app://obsidian.md",
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
 def build_read_only_fastapi_app(runtime) -> object:
     try:
         from fastapi import FastAPI, Request
         from fastapi.responses import JSONResponse
+        from starlette.middleware.cors import CORSMiddleware
     except Exception as exc:  # pragma: no cover - runtime dependency gap
         raise RuntimeError(
             "FastAPI dependencies are unavailable. Install `fastapi` and `uvicorn` to run read-only API."
@@ -31,6 +47,16 @@ def build_read_only_fastapi_app(runtime) -> object:
         version="0.1.0",
     )
     attach_runtime_dependencies_to_app_state(app.state, runtime)
+    cors_origins = _resolve_cors_origins()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Correlation-Id"],
+    )
+    logger.info("api_cors_enabled origins=%s", cors_origins)
 
     def _resolve_metrics_port():
         direct = getattr(app.state, "metrics_port", None)

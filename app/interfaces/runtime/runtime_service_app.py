@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 
 from app.application.authz import AuthzActor
 from app.application.observability import correlation_scope, ensure_correlation_id
@@ -15,9 +16,24 @@ from app.interfaces.api.thread_event_outbox_dispatcher import build_thread_event
 logger = logging.getLogger("runtime_service")
 
 
+def _resolve_cors_origins() -> list[str]:
+    raw = str(os.getenv("RUNTIME_CORS_ALLOWED_ORIGINS", "") or "").strip()
+    if raw:
+        return [item.strip() for item in raw.split(",") if item.strip()]
+    # Keep parity with read-only API defaults for local tooling.
+    return [
+        "app://obsidian.md",
+        "http://localhost",
+        "http://127.0.0.1",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
+
 def build_runtime_service_fastapi_app(runtime) -> object:
     try:
         from fastapi import FastAPI, Header, Response
+        from starlette.middleware.cors import CORSMiddleware
     except Exception as exc:  # pragma: no cover - runtime dependency gap
         raise RuntimeError(
             "FastAPI dependencies are unavailable. Install `fastapi` and `uvicorn` to run runtime service API."
@@ -28,6 +44,16 @@ def build_runtime_service_fastapi_app(runtime) -> object:
         version="0.1.0",
     )
     attach_runtime_dependencies_to_app_state(app.state, runtime)
+    cors_origins = _resolve_cors_origins()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Correlation-Id"],
+    )
+    logger.info("runtime_service_cors_enabled origins=%s", cors_origins)
 
     @app.middleware("http")
     async def _correlation_middleware(request, call_next):  # noqa: ANN001
