@@ -548,3 +548,61 @@ class EventDeliveriesSummaryDTO(ApiSchema):
     failed_dlq: int
     avg_lag_ms: float | None = None
     max_lag_ms: float | None = None
+
+
+class PlanRunDTO(ApiSchema):
+    plan_run_id: str
+    team_id: int
+    thread_id: str
+    goal: str
+    status: str
+    current_step_id: str | None = None
+    current_step_order: int | None = None
+    total_steps: int
+    completed_steps: int
+    created_at: str
+    updated_at: str
+    completed_at: str | None = None
+
+
+class PlanStepDTO(ApiSchema):
+    step_id: str
+    order: int
+    title: str
+    description: str | None = None
+    status: str
+    summary: str | None = None
+    artifacts: list[str | dict[str, object]] = Field(default_factory=list)
+    test_commands: list[str] = Field(default_factory=list)
+    started_at: str | None = None
+    reported_at: str | None = None
+    approved_at: str | None = None
+    done_at: str | None = None
+
+
+class PlanRunViewDTO(ApiSchema):
+    plan_run: PlanRunDTO
+    steps: list[PlanStepDTO] = Field(default_factory=list)
+    events: list[dict[str, object]] = Field(default_factory=list)
+    ui: dict[str, object] = Field(default_factory=dict)
+
+
+class PlanRunTeamRoleRefDTO(ApiSchema):
+    team_role_id: int | None = None
+    role_id: int | None = None
+    role_name: str | None = None
+    display_name: str | None = None
+
+
+class ActivePlanRunDTO(ApiSchema):
+    plan_run_id: str
+    team_id: int
+    thread_id: str
+    goal: str
+    status: str
+    current_step_id: str | None = None
+    current_step_order: int | None = None
+    total_steps: int
+    completed_steps: int
+    updated_at: str
+    team_role: PlanRunTeamRoleRefDTO | None = None

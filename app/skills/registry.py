@@ -31,6 +31,13 @@ class SkillRegistry:
     def get(self, skill_id: str) -> SkillRecord | None:
         return self._records.get(skill_id)
 
+    def unregister(self, skill_id: str) -> bool:
+        key = str(skill_id or "").strip()
+        if not key:
+            return False
+        removed = self._records.pop(key, None)
+        return removed is not None
+
     def register(self, skill: SkillProtocol, manifest: dict[str, Any] | None = None) -> SkillRecord:
         spec = skill.describe()
         effective_manifest = manifest or {

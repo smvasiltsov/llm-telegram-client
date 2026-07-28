@@ -12,6 +12,7 @@ from app.application.authz import OwnerOnlyAuthzService
 from app.application.contracts import LoggingMetricsPort
 from app.application.dependencies import build_runtime_dependency_provider
 from app.config import AppConfig
+from app.interfaces.api.thread_event_outbox_dispatcher import TelegramBotApiDeliveryAdapter
 from app.interfaces.telegram.adapter import build_telegram_application
 from app.interfaces.api import build_read_only_fastapi_app
 from app.llm_executor import LLMExecutor
@@ -38,10 +39,32 @@ from app.tools import BashTool, ToolMCPAdapter, ToolRegistry, ToolService
 logger = logging.getLogger("bot")
 
 
+def _build_thread_event_delivery_adapters(
+    *,
+    config: AppConfig,
+    storage: Storage,
+) -> dict[str, Any]:
+    adapters: dict[str, Any] = {}
+    if not config.thread_event_delivery_enabled:
+        return adapters
+    for interface_type in config.thread_event_delivery_adapters:
+        if interface_type != "telegram":
+            logger.warning("thread event delivery adapter is not supported: %s", interface_type)
+            continue
+        token = str(config.telegram_bot_token or "").strip()
+        if not token:
+            logger.warning("thread event telegram delivery adapter skipped: telegram_bot_token is empty")
+            continue
+        adapters["telegram"] = TelegramBotApiDeliveryAdapter(bot_token=token, storage=storage)
+    return adapters
+
+
 def build_application(
     config: AppConfig,
     runtime: RuntimeContext,
 ) -> Any:
+    if not str(config.telegram_bot_token or "").strip():
+        raise ValueError("telegram_bot_token is required to build Telegram application")
     return build_telegram_application(config.telegram_bot_token, runtime)
 
 
@@ -170,7 +193,6 @@ def build_runtime(
                 allowed_workdirs=allowed_workdirs or [default_cwd],
             )
         )
-
     tool_service = ToolService(tool_registry)
     tool_mcp_adapter = ToolMCPAdapter(tool_service)
     prepost_processing_registry = PrePostProcessingRegistry()
@@ -196,6 +218,23 @@ def build_runtime(
             logger.warning("role_catalog issue path=%s reason=%s", issue.path, issue.reason)
     if export_result.skipped_by_marker:
         logger.info("role_catalog export skipped by marker")
+    thread_event_delivery_adapters = _build_thread_event_delivery_adapters(
+        config=config,
+        storage=storage,
+    )
+    interface_configs = {
+        "telegram": {
+            "thin_client_enabled": bool(config.telegram_thin_client_enabled),
+            "api_base_url": str(config.telegram_api_base_url),
+            "api_timeout_sec": int(config.telegram_api_timeout_sec),
+        }
+    }
+    interface_secrets = {
+        "telegram": {
+            "bot_token": str(config.telegram_bot_token or "").strip(),
+        }
+    }
+    event_bus_delivery_interfaces = tuple(sorted(thread_event_delivery_adapters.keys()))
     runtime = RuntimeContext(
         bot_username=bot_username,
         storage=storage,
@@ -235,6 +274,7 @@ def build_runtime(
         tools_bash_enabled=tools_bash_enabled,
         tools_bash_password=tools_bash_password,
         tools_bash_safe_commands=list(config.tools_bash_safe_commands),
+        tools_bash_allowed_workdirs=[str(path) for path in allowed_workdirs] if tools_bash_enabled else [],
         pending_bash_auth={},
         bash_cwd_by_user={},
         tool_mcp_adapter=tool_mcp_adapter,
@@ -248,16 +288,15 @@ def build_runtime(
         free_transition_delay_sec=config.free_transition_delay_sec,
         skills_to_llm_delay_sec=config.skills_to_llm_delay_sec,
         role_catalog=role_catalog,
+        interface_configs=interface_configs,
+        interface_secrets=interface_secrets,
+        thread_event_delivery_adapters=thread_event_delivery_adapters,
+        event_bus_delivery_interfaces=event_bus_delivery_interfaces,
         dispatch_mode=config.dispatch_mode,
         dispatch_is_runner=config.dispatch_is_runner,
         qa_post_answer_max_hops=config.dispatch_post_answer_max_hops,
-        telegram_thin_client_enabled=config.telegram_thin_client_enabled,
-        telegram_api_base_url=config.telegram_api_base_url,
-        telegram_api_timeout_sec=config.telegram_api_timeout_sec,
         queue_backend="in-memory",
         started_at=datetime.now(timezone.utc).isoformat(),
     )
-    setattr(runtime, "telegram_bot_token", str(config.telegram_bot_token or ""))
-    setattr(runtime, "telegram_event_bus_delivery_enabled", True)
     runtime.dependency_provider = build_runtime_dependency_provider(runtime)
     return runtime

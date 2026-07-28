@@ -276,53 +276,131 @@ class LTC73WriteApiUseCasesTests(unittest.TestCase):
 
     def test_put_working_dir_requires_absolute_path_and_updates_team_role(self) -> None:
         storage, _, _, team_role_id = self._bootstrap()
-        runtime = SimpleNamespace()
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            runtime = SimpleNamespace(tools_bash_allowed_workdirs=[str(base)])
+            workdir = base / "work"
         ok = put_team_role_working_dir_result(
-            runtime,
-            storage,
-            request=TeamRoleWorkingDirPutRequest(
-                team_role_id=team_role_id,
-                working_dir="/tmp/work",
-            ),
-        )
+                runtime,
+                storage,
+                request=TeamRoleWorkingDirPutRequest(
+                    team_role_id=team_role_id,
+                    working_dir=str(workdir),
+                ),
+            )
         bad = put_team_role_working_dir_result(
-            runtime,
-            storage,
-            request=TeamRoleWorkingDirPutRequest(
-                team_role_id=team_role_id,
-                working_dir="relative/path",
-            ),
-        )
+                runtime,
+                storage,
+                request=TeamRoleWorkingDirPutRequest(
+                    team_role_id=team_role_id,
+                    working_dir="relative/path",
+                ),
+            )
         self.assertTrue(ok.is_ok)
         self.assertTrue(bad.is_error)
         self.assertEqual((bad.error.code if bad.error else None), "validation.invalid_input")
         assert ok.value is not None
-        self.assertEqual(ok.value.working_dir, "/tmp/work")
+        self.assertEqual(ok.value.working_dir, str(workdir.resolve()))
+        self.assertTrue(workdir.exists())
+        self.assertTrue(workdir.is_dir())
+
+    def test_put_working_dir_rejects_path_outside_allowlist(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        with tempfile.TemporaryDirectory() as td_allowed, tempfile.TemporaryDirectory() as td_other:
+            runtime = SimpleNamespace(tools_bash_allowed_workdirs=[td_allowed])
+            outside = Path(td_other) / "work"
+            result = put_team_role_working_dir_result(
+                runtime,
+                storage,
+                request=TeamRoleWorkingDirPutRequest(
+                    team_role_id=team_role_id,
+                    working_dir=str(outside),
+                ),
+            )
+        self.assertTrue(result.is_error)
+        self.assertEqual((result.error.code if result.error else None), "validation.invalid_input")
+
+    def test_put_working_dir_rejects_existing_file_path(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            file_path = base / "not-a-dir"
+            file_path.write_text("x", encoding="utf-8")
+            runtime = SimpleNamespace(tools_bash_allowed_workdirs=[str(base)])
+            result = put_team_role_working_dir_result(
+                runtime,
+                storage,
+                request=TeamRoleWorkingDirPutRequest(
+                    team_role_id=team_role_id,
+                    working_dir=str(file_path),
+                ),
+            )
+        self.assertTrue(result.is_error)
+        self.assertEqual((result.error.code if result.error else None), "validation.invalid_input")
 
     def test_put_root_dir_requires_absolute_path(self) -> None:
         storage, _, _, team_role_id = self._bootstrap()
-        runtime = SimpleNamespace()
-        ok = put_team_role_root_dir_result(
-            runtime,
-            storage,
-            request=TeamRoleRootDirPutRequest(
-                team_role_id=team_role_id,
-                root_dir="/tmp/root",
-            ),
-        )
-        bad = put_team_role_root_dir_result(
-            runtime,
-            storage,
-            request=TeamRoleRootDirPutRequest(
-                team_role_id=team_role_id,
-                root_dir="relative/path",
-            ),
-        )
-        self.assertTrue(ok.is_ok)
-        self.assertTrue(bad.is_error)
-        self.assertEqual((bad.error.code if bad.error else None), "validation.invalid_input")
-        assert ok.value is not None
-        self.assertEqual(ok.value.root_dir, "/tmp/root")
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            runtime = SimpleNamespace(tools_bash_allowed_workdirs=[str(base)])
+            rootdir = base / "root"
+            ok = put_team_role_root_dir_result(
+                runtime,
+                storage,
+                request=TeamRoleRootDirPutRequest(
+                    team_role_id=team_role_id,
+                    root_dir=str(rootdir),
+                ),
+            )
+            bad = put_team_role_root_dir_result(
+                runtime,
+                storage,
+                request=TeamRoleRootDirPutRequest(
+                    team_role_id=team_role_id,
+                    root_dir="relative/path",
+                ),
+            )
+            self.assertTrue(ok.is_ok)
+            self.assertTrue(bad.is_error)
+            self.assertEqual((bad.error.code if bad.error else None), "validation.invalid_input")
+            assert ok.value is not None
+            self.assertEqual(ok.value.root_dir, str(rootdir.resolve()))
+            self.assertTrue(rootdir.exists())
+            self.assertTrue(rootdir.is_dir())
+
+    def test_put_root_dir_rejects_path_outside_allowlist(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        with tempfile.TemporaryDirectory() as td_allowed, tempfile.TemporaryDirectory() as td_other:
+            runtime = SimpleNamespace(tools_bash_allowed_workdirs=[td_allowed])
+            outside = Path(td_other) / "root"
+            result = put_team_role_root_dir_result(
+                runtime,
+                storage,
+                request=TeamRoleRootDirPutRequest(
+                    team_role_id=team_role_id,
+                    root_dir=str(outside),
+                ),
+            )
+        self.assertTrue(result.is_error)
+        self.assertEqual((result.error.code if result.error else None), "validation.invalid_input")
+
+    def test_put_root_dir_rejects_existing_file_path(self) -> None:
+        storage, _, _, team_role_id = self._bootstrap()
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            file_path = base / "not-a-dir"
+            file_path.write_text("x", encoding="utf-8")
+            runtime = SimpleNamespace(tools_bash_allowed_workdirs=[str(base)])
+            result = put_team_role_root_dir_result(
+                runtime,
+                storage,
+                request=TeamRoleRootDirPutRequest(
+                    team_role_id=team_role_id,
+                    root_dir=str(file_path),
+                ),
+            )
+        self.assertTrue(result.is_error)
+        self.assertEqual((result.error.code if result.error else None), "validation.invalid_input")
 
     def test_replace_team_role_skills_full_replace_and_empty_clear(self) -> None:
         storage, _, _, team_role_id = self._bootstrap()

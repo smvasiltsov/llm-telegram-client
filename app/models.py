@@ -341,3 +341,58 @@ class EventSubscription:
     options_json: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass
+class PlanRun:
+    plan_run_id: str
+    team_id: int
+    thread_id: str
+    created_by_user_id: int | None
+    actor_role: str | None
+    goal: str
+    status: str
+    require_manual_approval: bool
+    current_step_order: int | None
+    current_step_id: str | None
+    total_steps: int
+    completed_steps: int
+    failed_step_id: str | None
+    cancelled_reason: str | None
+    created_at: str
+    updated_at: str
+    completed_at: str | None
+
+
+@dataclass
+class PlanStep:
+    plan_run_id: str
+    step_id: str
+    step_order: int
+    title: str
+    description: str | None
+    status: str
+    summary: str | None
+    artifacts_json: str | None
+    test_commands_json: str | None
+    assignee_role: str | None
+    started_at: str | None
+    reported_at: str | None
+    approved_at: str | None
+    done_at: str | None
+    updated_at: str
+
+
+@dataclass
+class PlanEvent:
+    event_id: str
+    plan_run_id: str
+    step_id: str | None
+    event_type: str
+    from_status: str | None
+    to_status: str | None
+    actor_type: str
+    actor_id: str | None
+    payload_json: str | None
+    idempotency_key: str | None
+    created_at: str

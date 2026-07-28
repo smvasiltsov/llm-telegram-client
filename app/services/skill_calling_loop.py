@@ -10,7 +10,7 @@ from app.llm_providers import ProviderUserField
 from app.llm_router import MissingUserField
 from app.models import Role
 from app.services.prompt_builder import build_llm_payload_json, provider_id_from_model, resolve_provider_model
-from app.services.skill_response import SkillCallRequest, parse_skill_response
+from app.services.skill_response import SkillCallRequest, SkillResponseParseError, parse_skill_response_with_error
 from app.skills.service import SkillService
 from app.storage import Storage
 from skills_sdk.contract import SkillContext, SkillResult
@@ -200,7 +200,29 @@ class SkillCallingLoop:
                 raw_response = step_result.response_text
                 session_id = step_result.session_id
             raw_responses.append(raw_response)
-            parsed = parse_skill_response(raw_response)
+            parsed, parse_error = parse_skill_response_with_error(raw_response)
+            if parsed is None and parse_error is not None:
+                execution = self._build_response_validation_error(
+                    chain_id=session_id,
+                    step_index=step_index,
+                    user_id=user_id,
+                    chat_id=chat_id,
+                    role=role,
+                    parse_error=parse_error,
+                )
+                executed_skills.append(execution)
+                skill_history.append(
+                    {
+                        "skill_id": execution.skill_id,
+                        "ok": execution.ok,
+                        "status": execution.status,
+                        "output": execution.output,
+                        "error": execution.error_text,
+                    }
+                )
+                if on_skill_progress is not None:
+                    on_skill_progress(execution.error_text or parse_error.message)
+                continue
             if parsed is None:
                 fallback_text = raw_response.strip() or "Assistant response could not be parsed."
                 return SkillLoopResult(
@@ -440,7 +462,8 @@ class SkillCallingLoop:
 
         record = enabled_entry["record"]
         config = enabled_entry["config"]
-        config_errors = record.instance.validate_config(config)
+        effective_config = self._augment_skill_config(skill_id=request.skill_id, config=config)
+        config_errors = record.instance.validate_config(effective_config)
         if config_errors:
             logger.info(
                 "skill loop invalid config chat_id=%s user_id=%s role=%s step=%s skill_id=%s errors=%s",
@@ -459,7 +482,7 @@ class SkillCallingLoop:
                 role=role,
                 skill_id=request.skill_id,
                 arguments=request.arguments,
-                config=config,
+                config=effective_config,
                 status="invalid_config",
                 error_text="; ".join(str(item) for item in config_errors),
             )
@@ -472,6 +495,11 @@ class SkillCallingLoop:
             role_id=role.role_id,
             role_name=role.role_name,
         )
+        effective_arguments = self._augment_skill_arguments(
+            skill_id=request.skill_id,
+            arguments=request.arguments,
+            team_id=chat_id,
+        )
         try:
             logger.info(
                 "skill loop execute chat_id=%s user_id=%s role=%s step=%s skill_id=%s",
@@ -482,7 +510,7 @@ class SkillCallingLoop:
                 request.skill_id,
             )
             result = await asyncio.wait_for(
-                asyncio.to_thread(record.instance.run, skill_ctx, request.arguments, config),
+                asyncio.to_thread(record.instance.run, skill_ctx, effective_arguments, effective_config),
                 timeout=timeout_sec,
             )
         except asyncio.TimeoutError:
@@ -493,8 +521,8 @@ class SkillCallingLoop:
                 chat_id=chat_id,
                 role=role,
                 skill_id=request.skill_id,
-                arguments=request.arguments,
-                config=config,
+                arguments=effective_arguments,
+                config=effective_config,
                 status="timeout",
                 error_text=f"Skill '{request.skill_id}' timed out after {timeout_sec} seconds.",
             )
@@ -514,8 +542,8 @@ class SkillCallingLoop:
                 chat_id=chat_id,
                 role=role,
                 skill_id=request.skill_id,
-                arguments=request.arguments,
-                config=config,
+                arguments=effective_arguments,
+                config=effective_config,
                 status="exception",
                 error_text=str(exc),
             )
@@ -528,8 +556,8 @@ class SkillCallingLoop:
                 chat_id=chat_id,
                 role=role,
                 skill_id=request.skill_id,
-                arguments=request.arguments,
-                config=config,
+                arguments=effective_arguments,
+                config=effective_config,
                 status="invalid_result",
                 error_text="Skill did not return SkillResult.",
             )
@@ -542,8 +570,8 @@ class SkillCallingLoop:
                 chat_id=chat_id,
                 role_id=role.role_id,
                 skill_id=request.skill_id,
-                arguments=request.arguments,
-                config=config,
+                arguments=effective_arguments,
+                config=effective_config,
                 status="ok" if result.ok else "error",
                 ok=result.ok,
                 error_text=result.error,
@@ -568,6 +596,22 @@ class SkillCallingLoop:
             error_text=result.error,
         )
 
+    @staticmethod
+    def _augment_skill_arguments(*, skill_id: str, arguments: dict[str, Any], team_id: int) -> dict[str, Any]:
+        if skill_id != "plan_supervisor":
+            return arguments
+        augmented = dict(arguments or {})
+        augmented["team_id"] = int(team_id)
+        augmented["thread_id"] = f"chat:{int(team_id)}"
+        return augmented
+
+    def _augment_skill_config(self, *, skill_id: str, config: dict[str, Any]) -> dict[str, Any]:
+        if skill_id != "plan_supervisor":
+            return config
+        augmented = dict(config or {})
+        augmented["database_path"] = self._storage.db_path
+        return augmented
+
     def _log_error_result(
         self,
         *,
@@ -581,7 +625,9 @@ class SkillCallingLoop:
         config: dict[str, Any] | None,
         status: str,
         error_text: str,
+        output: dict[str, Any] | None = None,
     ) -> SkillExecutionRecord:
+        result_output = output if isinstance(output, dict) else {}
         with self._storage.transaction(immediate=True):
             self._storage.log_skill_run(
                 chain_id=chain_id,
@@ -595,15 +641,52 @@ class SkillCallingLoop:
                 status=status,
                 ok=False,
                 error_text=error_text,
-                output={},
+                output=result_output,
             )
         return SkillExecutionRecord(
             step_index=step_index,
             skill_id=skill_id,
             ok=False,
             status=status,
-            output={},
+            output=result_output,
             error_text=error_text,
+        )
+
+    def _build_response_validation_error(
+        self,
+        *,
+        chain_id: str,
+        step_index: int,
+        user_id: int,
+        chat_id: int,
+        role: Role,
+        parse_error: SkillResponseParseError,
+    ) -> SkillExecutionRecord:
+        message = (
+            f"Assistant skill response validation failed: {parse_error.message}"
+            + (f" Hint: {parse_error.hint}" if parse_error.hint else "")
+        )
+        return self._log_error_result(
+            chain_id=chain_id,
+            step_index=step_index,
+            user_id=user_id,
+            chat_id=chat_id,
+            role=role,
+            skill_id="__response_validation__",
+            arguments={},
+            config=None,
+            status="response_validation_error",
+            error_text=message,
+            output={
+                "type": "skill_response_error",
+                "error": {
+                    "code": parse_error.code,
+                    "message": parse_error.message,
+                    "detected_type": parse_error.detected_type,
+                    "hint": parse_error.hint,
+                    "raw_excerpt": parse_error.raw_excerpt,
+                },
+            },
         )
 
     @staticmethod

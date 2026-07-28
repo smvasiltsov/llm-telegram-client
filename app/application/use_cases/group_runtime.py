@@ -58,7 +58,12 @@ def prepare_group_buffer_plan(
     try:
         refresh_role_catalog(runtime=runtime, storage=storage)
         with storage.transaction(immediate=True):
-            team_id = storage.upsert_telegram_team_binding(chat_id, chat_title, is_active=True)
+            team_id = storage.upsert_team_binding_for_interface(
+                interface_type="telegram",
+                external_id=chat_id,
+                external_title=chat_title,
+                is_active=True,
+            )
             seed_team_roles(storage, team_id)
 
         roles_for_group = storage.list_roles_for_team(team_id)
@@ -159,7 +164,7 @@ def build_group_flush_plan(
 ) -> Result[GroupFlushPlan]:
     try:
         refresh_role_catalog(runtime=runtime, storage=storage)
-        team_id = storage.resolve_team_id_by_telegram_chat(data.chat_id)
+        team_id = storage.resolve_team_id_by_binding(interface_type="telegram", external_id=data.chat_id)
         if team_id is None:
             return Result.ok(GroupFlushPlan(action="skip", team_id=None))
 

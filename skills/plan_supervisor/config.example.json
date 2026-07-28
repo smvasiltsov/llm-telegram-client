@@ -1,0 +1,6 @@
+{
+  "emit_thread_events": true,
+  "directive_start_template": "План принят. Приступай к шагу {step_index}/{total_steps}: {step_title}. По окончанию вызови report_step и укажи summary до 200 символов. Затем ожидай следующую директиву.",
+  "directive_next_template": "Шаг принят. Приступай к шагу {step_index}/{total_steps}: {step_title}. По окончанию вызови report_step и укажи summary до 200 символов. Затем ожидай следующую директиву.",
+  "directive_done_template": "План завершен. Все шаги выполнены и приняты."
+}

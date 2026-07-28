@@ -101,8 +101,11 @@ class TelegramBotApiDeliveryAdapter:
             import httpx  # type: ignore
         except Exception as exc:  # pragma: no cover - runtime dependency gap
             raise RuntimeError("telegram_delivery_httpx_missing") from exc
+        target_raw = str(delivery.target_id)
+        if target_raw.startswith("chat:"):
+            target_raw = target_raw.split(":", 1)[1]
         try:
-            chat_id = int(str(delivery.target_id))
+            chat_id = int(target_raw)
         except Exception:
             raise RuntimeError(f"invalid_telegram_target:{delivery.target_id}") from None
         url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
@@ -172,10 +175,6 @@ class ThreadEventOutboxDispatcher:
         adapters: dict[str, Any] = {}
         if isinstance(raw, dict):
             adapters.update({str(key): value for key, value in raw.items() if key})
-        if "telegram" not in adapters:
-            token = str(getattr(self._runtime, "telegram_bot_token", "") or "").strip()
-            if token:
-                adapters["telegram"] = TelegramBotApiDeliveryAdapter(bot_token=token, storage=self._storage)
         return adapters
 
     @property

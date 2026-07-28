@@ -45,6 +45,25 @@ class StorageTeamCompatibilityTests(unittest.TestCase):
             self.assertEqual(roles[0].public_name(), "developer")
             self.assertTrue(storage.group_role_name_exists(group.group_id, "developer"))
 
+    def test_generic_binding_helpers_match_telegram_wrappers(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            with storage.transaction(immediate=True):
+                team_id = storage.upsert_team_binding_for_interface(
+                    interface_type="telegram",
+                    external_id=-8002,
+                    external_title="Team B",
+                    is_active=True,
+                )
+            self.assertEqual(storage.resolve_team_id_by_binding(interface_type="telegram", external_id=-8002), team_id)
+            self.assertEqual(storage.resolve_team_id_by_telegram_chat(-8002), team_id)
+            self.assertEqual(storage.resolve_binding_external_id_by_team(team_id=team_id, interface_type="telegram"), "-8002")
+
+            with storage.transaction(immediate=True):
+                storage.set_team_binding_active(interface_type="telegram", external_id=-8002, is_active=False)
+            binding = storage.get_team_binding(interface_type="telegram", external_id="-8002")
+            self.assertFalse(binding.is_active)
+
 
 if __name__ == "__main__":
     unittest.main()

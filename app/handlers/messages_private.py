@@ -133,11 +133,16 @@ def _resolve_tools_bash_password(context: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 def _resolve_team_id_for_chat(storage: Storage, chat_id: int) -> int:
-    team_id = storage.resolve_team_id_by_telegram_chat(chat_id)
+    team_id = storage.resolve_team_id_by_binding(interface_type="telegram", external_id=chat_id)
     if team_id is not None:
         return team_id
     with storage.transaction(immediate=True):
-        return storage.upsert_telegram_team_binding(chat_id, None, is_active=True)
+        return storage.upsert_team_binding_for_interface(
+            interface_type="telegram",
+            external_id=chat_id,
+            external_title=None,
+            is_active=True,
+        )
 
 
 def _set_provider_user_field_from_pending_state(storage: Storage, state: dict[str, object], value: str) -> None:

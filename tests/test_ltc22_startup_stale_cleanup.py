@@ -95,6 +95,37 @@ class LTC22StartupStaleCleanupTests(unittest.TestCase):
             self.assertEqual(status.status if status else None, "free")
             self.assertEqual(status.last_release_reason if status else None, "lease_expired_cleanup")
 
+    def test_build_runtime_works_without_telegram_token_and_keeps_delivery_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            db_path = tmp / "startup_no_telegram.sqlite3"
+            config_path = tmp / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "database_path": str(db_path),
+                        "encryption_key": "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=",
+                        "owner_user_id": 1,
+                        "thread_events": {"delivery": {"enabled": False, "adapters": ["telegram"]}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_config(config_path)
+            runtime = build_runtime(
+                config=config,
+                bot_username="bot",
+                tools_bash_password="",
+                providers_dir=(Path.cwd() / "llm_providers").resolve(),
+                plugins_dir=(Path.cwd() / "plugins").resolve(),
+                prepost_processing_dir=(Path.cwd() / "prepost_processing").resolve(),
+                skills_dir=(Path.cwd() / "skills").resolve(),
+                base_cwd=tmp,
+            )
+            self.assertEqual(getattr(runtime, "telegram_bot_token", None), "")
+            self.assertFalse(bool(getattr(runtime, "telegram_event_bus_delivery_enabled", True)))
+            self.assertEqual(getattr(runtime, "thread_event_delivery_adapters", None), {})
+
 
 if __name__ == "__main__":
     unittest.main()

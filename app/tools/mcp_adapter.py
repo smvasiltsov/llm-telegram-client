@@ -40,6 +40,11 @@ class ToolMCPAdapter:
             chat_id=chat_id,
             source="mcp",
             request_id=request_id,
+            metadata={
+                "team_id": tool_input.get("team_id"),
+                "thread_id": tool_input.get("thread_id"),
+                "actor_role": tool_input.get("actor_role"),
+            },
         )
         result = await self._tool_service.execute(tool_name, tool_input, ctx)
         return {

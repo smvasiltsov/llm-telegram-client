@@ -31,6 +31,47 @@ class ConfigInterfaceRuntimeTests(unittest.TestCase):
             self.assertTrue(loaded.dispatch_is_runner)
             self.assertEqual(loaded.free_transition_delay_sec, 0)
             self.assertEqual(loaded.skills_to_llm_delay_sec, 0)
+            self.assertFalse(loaded.thread_event_delivery_enabled)
+            self.assertEqual(loaded.thread_event_delivery_adapters, [])
+
+    def test_telegram_token_is_optional(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "config.json"
+            cfg.write_text(
+                json.dumps(
+                    {
+                        "database_path": "./db.sqlite3",
+                        "encryption_key": "k",
+                        "owner_user_id": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = load_config(cfg)
+            self.assertEqual(loaded.telegram_bot_token, "")
+
+    def test_thread_event_delivery_config_is_loaded(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "config.json"
+            cfg.write_text(
+                json.dumps(
+                    {
+                        "database_path": "./db.sqlite3",
+                        "encryption_key": "k",
+                        "owner_user_id": 1,
+                        "thread_events": {
+                            "delivery": {
+                                "enabled": True,
+                                "adapters": ["telegram", " custom "],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            loaded = load_config(cfg)
+            self.assertTrue(loaded.thread_event_delivery_enabled)
+            self.assertEqual(loaded.thread_event_delivery_adapters, ["telegram", "custom"])
 
     def test_interface_runtime_mode_falls_back_to_single_when_invalid(self) -> None:
         with tempfile.TemporaryDirectory() as td:

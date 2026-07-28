@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -69,6 +69,7 @@ class RuntimeContext:
     tools_bash_enabled: bool
     tools_bash_password: str
     tools_bash_safe_commands: list[str]
+    tools_bash_allowed_workdirs: list[str]
     pending_bash_auth: dict[int, dict[str, Any]]
     bash_cwd_by_user: dict[int, str]
     tool_mcp_adapter: ToolMCPAdapter
@@ -82,15 +83,68 @@ class RuntimeContext:
     free_transition_delay_sec: int
     skills_to_llm_delay_sec: int
     role_catalog: RoleCatalog
+    interface_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    interface_secrets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    thread_event_delivery_adapters: dict[str, Any] = field(default_factory=dict)
+    event_bus_delivery_interfaces: tuple[str, ...] = ()
     dispatch_mode: str = "single-instance"
     dispatch_is_runner: bool = True
     qa_post_answer_max_hops: int = 3
-    telegram_thin_client_enabled: bool = True
-    telegram_api_base_url: str = "http://127.0.0.1:8080"
-    telegram_api_timeout_sec: int = 30
     queue_backend: str = "in-memory"
     started_at: str | None = None
     dependency_provider: "RuntimeDependencyProvider | None" = None
+
+    def get_interface_config(self, interface_id: str) -> dict[str, Any]:
+        key = str(interface_id or "").strip().lower()
+        if not key:
+            return {}
+        raw = self.interface_configs.get(key)
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def get_interface_secret(self, interface_id: str, key: str, default: Any = None) -> Any:
+        iface = str(interface_id or "").strip().lower()
+        item_key = str(key or "").strip()
+        if not iface or not item_key:
+            return default
+        raw = self.interface_secrets.get(iface)
+        if not isinstance(raw, dict):
+            return default
+        return raw.get(item_key, default)
+
+    def get_interface_config_value(self, interface_id: str, key: str, default: Any = None) -> Any:
+        iface = str(interface_id or "").strip().lower()
+        item_key = str(key or "").strip()
+        if not iface or not item_key:
+            return default
+        raw = self.interface_configs.get(iface)
+        if not isinstance(raw, dict):
+            return default
+        return raw.get(item_key, default)
+
+    @property
+    def telegram_thin_client_enabled(self) -> bool:
+        return bool(self.get_interface_config_value("telegram", "thin_client_enabled", True))
+
+    @property
+    def telegram_api_base_url(self) -> str:
+        value = self.get_interface_config_value("telegram", "api_base_url", "http://127.0.0.1:8080")
+        return str(value or "").strip() or "http://127.0.0.1:8080"
+
+    @property
+    def telegram_api_timeout_sec(self) -> int:
+        value = self.get_interface_config_value("telegram", "api_timeout_sec", 30)
+        try:
+            return max(1, int(value))
+        except (TypeError, ValueError):
+            return 30
+
+    @property
+    def telegram_bot_token(self) -> str:
+        return str(self.get_interface_secret("telegram", "bot_token", "") or "").strip()
+
+    @property
+    def telegram_event_bus_delivery_enabled(self) -> bool:
+        return "telegram" in {str(item).strip().lower() for item in self.event_bus_delivery_interfaces}
 
     def to_bot_data(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -99,6 +153,7 @@ class RuntimeContext:
                 "mode": self.dispatch_mode,
                 "is_runner": bool(self.dispatch_is_runner),
             },
+            "interface_configs": dict(self.interface_configs),
             "telegram_runtime_thin_client_enabled": bool(self.telegram_thin_client_enabled),
             "telegram_runtime_api_base_url": self.telegram_api_base_url,
         }

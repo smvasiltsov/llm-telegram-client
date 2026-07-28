@@ -721,7 +721,7 @@ def put_team_role_working_dir_result(
     request: TeamRoleWorkingDirPutRequest,
 ) -> Result[TeamRoleWorkingDirOutcome]:
     try:
-        normalized = _normalize_absolute_path(request.working_dir, field_name="working_dir")
+        normalized = _normalize_team_role_directory(runtime, request.working_dir, field_name="working_dir")
         with storage.transaction(immediate=True):
             team_role = storage.get_team_role_by_id(request.team_role_id)
             storage.set_team_role_working_dir(team_role.team_id, team_role.role_id, normalized)
@@ -755,7 +755,7 @@ def put_team_role_root_dir_result(
     request: TeamRoleRootDirPutRequest,
 ) -> Result[TeamRoleRootDirOutcome]:
     try:
-        normalized = _normalize_absolute_path(request.root_dir, field_name="root_dir")
+        normalized = _normalize_team_role_directory(runtime, request.root_dir, field_name="root_dir")
         with storage.transaction(immediate=True):
             team_role = storage.get_team_role_by_id(request.team_role_id)
             storage.set_team_role_root_dir(team_role.team_id, team_role.role_id, normalized)
@@ -1553,3 +1553,40 @@ def _normalize_absolute_path(raw_value: str, *, field_name: str) -> str:
     if not Path(value).is_absolute():
         raise ValueError(f"{field_name} must be an absolute path")
     return value
+
+
+def _normalize_team_role_directory(runtime: Any, raw_value: str, *, field_name: str) -> str:
+    normalized = _normalize_absolute_path(raw_value, field_name=field_name)
+    target = Path(normalized).expanduser().resolve(strict=False)
+    allowed_workdirs = _resolve_runtime_allowed_workdirs(runtime)
+
+    if allowed_workdirs and not any(_is_within_path(target, base) for base in allowed_workdirs):
+        raise ValueError(f"{field_name} is not inside allowed_workdirs: {target}")
+
+    if target.exists():
+        if not target.is_dir():
+            raise ValueError(f"{field_name} must be a directory: {target}")
+        return str(target)
+
+    if not allowed_workdirs:
+        raise ValueError(f"{field_name} directory not found: {target}")
+
+    target.mkdir(parents=True, exist_ok=True)
+    return str(target)
+
+
+def _resolve_runtime_allowed_workdirs(runtime: Any) -> list[Path]:
+    raw_items = getattr(runtime, "tools_bash_allowed_workdirs", None)
+    if not isinstance(raw_items, list):
+        return []
+    result: list[Path] = []
+    for item in raw_items:
+        value = str(item or "").strip()
+        if not value:
+            continue
+        result.append(Path(value).expanduser().resolve(strict=False))
+    return result
+
+
+def _is_within_path(path: Path, base: Path) -> bool:
+    return path == base or base in path.parents

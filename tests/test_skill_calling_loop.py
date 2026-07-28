@@ -335,6 +335,74 @@ class SkillCallingLoopTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(executor.contents[1].startswith("SKILL_RESULT:\n"))
             self.assertIn('"skill_id": "echo.skill"', executor.contents[1])
 
+    async def test_loop_returns_response_validation_error_to_llm_for_malformed_skill_call(self) -> None:
+        with TemporaryDirectory() as td:
+            storage = Storage(Path(td) / "test.sqlite3")
+            group = storage.upsert_group(-1011, "g")
+            role = storage.upsert_role(
+                role_name="skill_role_validation_retry",
+                description="d",
+                base_system_prompt="sp",
+                extra_instruction="ei",
+                llm_model=None,
+                is_active=True,
+            )
+            storage.ensure_group_role(group.group_id, role.role_id)
+            storage.upsert_role_skill(group.group_id, role.role_id, "echo.skill", enabled=True, config={})
+
+            registry = SkillRegistry()
+            registry.register(EchoSkill())
+            service = SkillService(registry)
+            executor = FakeLLMExecutor(
+                responses=[
+                    '{"type":"skill_call","skill_call":{"skill_id":"echo.skill","arguments":{"text":"hello"}}',
+                    json.dumps(
+                        {
+                            "type": "skill_call",
+                            "skill_call": {
+                                "skill_id": "echo.skill",
+                                "arguments": {"text": "hello"},
+                            },
+                        }
+                    ),
+                    json.dumps({"type": "final_answer", "answer": {"text": "done"}}),
+                ]
+            )
+            loop = SkillCallingLoop(
+                storage=storage,
+                llm_executor=executor,
+                session_resolver=FakeSessionResolver(),
+                skills_service=service,
+                provider_models=[FakeModel(full_id="provider:model")],
+                provider_model_map={"provider:model": FakeModel(full_id="provider:model")},
+                provider_registry={},
+                followup_mode="compact",
+            )
+
+            result = await loop.run(
+                team_id=group.team_id,
+                user_id=42,
+                role=role,
+                session_token="token",
+                user_text="say hello",
+                reply_text=None,
+                actor_username="user",
+                trigger_type="mention_role",
+                mentioned_roles=["skill_role_validation_retry"],
+                recipient="skill_role_validation_retry",
+                max_steps=4,
+            )
+
+            self.assertEqual(result.status, "final_answer")
+            self.assertEqual(result.final_answer_text, "done")
+            self.assertEqual(len(result.executed_skills), 2)
+            self.assertEqual(result.executed_skills[0].status, "response_validation_error")
+            self.assertEqual(result.executed_skills[0].skill_id, "__response_validation__")
+            self.assertEqual(result.executed_skills[0].output["type"], "skill_response_error")
+            self.assertEqual(result.executed_skills[1].skill_id, "echo.skill")
+            self.assertTrue(executor.contents[1].startswith("SKILL_RESULT:\n"))
+            self.assertIn('"type": "skill_response_error"', executor.contents[1])
+
     async def test_loop_stops_on_repeated_same_skill_call(self) -> None:
         with TemporaryDirectory() as td:
             storage = Storage(Path(td) / "test.sqlite3")

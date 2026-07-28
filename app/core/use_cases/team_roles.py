@@ -40,7 +40,7 @@ def list_telegram_groups(storage: Storage) -> list[TelegramGroupRef]:
 
 
 def resolve_team_id(storage: Storage, group_id: int) -> int:
-    team_id = storage.resolve_team_id_by_telegram_chat(group_id)
+    team_id = storage.resolve_team_id_by_binding(interface_type="telegram", external_id=group_id)
     if team_id is None:
         raise ValueError(f"Telegram group binding not found: {group_id}")
     return team_id

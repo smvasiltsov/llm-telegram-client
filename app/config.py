@@ -80,6 +80,8 @@ class AppConfig:
     telegram_thin_client_enabled: bool
     telegram_api_base_url: str
     telegram_api_timeout_sec: int
+    thread_event_delivery_enabled: bool
+    thread_event_delivery_adapters: list[str]
     free_transition_delay_sec: int
     skills_to_llm_delay_sec: int
 
@@ -119,6 +121,8 @@ def load_config(path: str | Path) -> AppConfig:
     interface_raw = raw.get("interface", {}) or {}
     dispatch_raw = raw.get("dispatch", {}) or {}
     runtime_status_raw = raw.get("runtime_status", {}) or {}
+    thread_events_raw = raw.get("thread_events", {}) or {}
+    delivery_raw = thread_events_raw.get("delivery", {}) or {}
 
     safe_commands_raw = bash_raw.get("safe_commands")
     if safe_commands_raw is None:
@@ -155,9 +159,13 @@ def load_config(path: str | Path) -> AppConfig:
     telegram_thin_client_enabled = bool(telegram_interface_raw.get("thin_client_enabled", True))
     telegram_api_base_url = str(telegram_interface_raw.get("api_base_url", "http://127.0.0.1:8080")).strip() or "http://127.0.0.1:8080"
     telegram_api_timeout_sec = max(1, int(telegram_interface_raw.get("api_timeout_sec", 30)))
+    delivery_adapters_raw = delivery_raw.get("adapters", [])
+    if not isinstance(delivery_adapters_raw, list):
+        delivery_adapters_raw = []
+    delivery_adapters = [str(item).strip().lower() for item in delivery_adapters_raw if str(item).strip()]
 
     return AppConfig(
-        telegram_bot_token=raw["telegram_bot_token"],
+        telegram_bot_token=str(raw.get("telegram_bot_token", "") or "").strip(),
         database_path=raw.get("database_path", "./bot.sqlite3"),
         encryption_key=raw["encryption_key"],
         llm_timeout_sec=int(llm_raw.get("timeout_sec", 600)),
@@ -197,6 +205,8 @@ def load_config(path: str | Path) -> AppConfig:
         telegram_thin_client_enabled=telegram_thin_client_enabled,
         telegram_api_base_url=telegram_api_base_url,
         telegram_api_timeout_sec=telegram_api_timeout_sec,
+        thread_event_delivery_enabled=bool(delivery_raw.get("enabled", False)),
+        thread_event_delivery_adapters=delivery_adapters,
         free_transition_delay_sec=max(0, int(runtime_status_raw.get("free_transition_delay_sec", DEFAULT_FREE_TRANSITION_DELAY_SEC))),
         skills_to_llm_delay_sec=max(0, int(runtime_status_raw.get("skills_to_llm_delay_sec", DEFAULT_SKILLS_TO_LLM_DELAY_SEC))),
     )

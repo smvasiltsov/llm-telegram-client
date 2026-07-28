@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from app.services.skill_response import parse_skill_response
+from app.services.skill_response import parse_skill_response, parse_skill_response_with_error
 
 
 class SkillResponseParserTests(unittest.TestCase):
@@ -71,6 +71,22 @@ class SkillResponseParserTests(unittest.TestCase):
         self.assertIsNone(parse_skill_response('{"type":"final_answer","answer":{}}'))
         self.assertIsNone(parse_skill_response('{"type":"skill_call","skill_call":{"arguments":{}}}'))
         self.assertIsNone(parse_skill_response('{"type":"skill_call","skill_call":{"skill_id":"fs.read_file","arguments":[]}}'))
+
+    def test_reports_malformed_skill_call_json(self) -> None:
+        parsed, error = parse_skill_response_with_error(
+            '{"type":"skill_call","skill_call":{"skill_id":"plan_supervisor","arguments":{"command":"start_plan"}}'
+        )
+        self.assertIsNone(parsed)
+        assert error is not None
+        self.assertEqual(error.code, "malformed_json")
+
+    def test_reports_invalid_skill_call_arguments_shape(self) -> None:
+        parsed, error = parse_skill_response_with_error(
+            '{"type":"skill_call","skill_call":{"skill_id":"fs.read_file","arguments":[]}}'
+        )
+        self.assertIsNone(parsed)
+        assert error is not None
+        self.assertEqual(error.code, "invalid_arguments")
 
 
 if __name__ == "__main__":

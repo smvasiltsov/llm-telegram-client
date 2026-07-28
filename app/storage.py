@@ -16,6 +16,9 @@ from app.models import (
     AuthToken,
     EventDelivery,
     EventSubscription,
+    PlanEvent,
+    PlanRun,
+    PlanStep,
     Group,
     GroupRole,
     QaAnswer,
@@ -64,9 +67,10 @@ QA_STATUSES: set[str] = {"accepted", "queued", "in_progress", "answered", "faile
 
 class Storage:
     def __init__(self, db_path: str | Path) -> None:
+        self._db_path = str(db_path)
         # Autocommit mode: write statements persist immediately unless wrapped by explicit BEGIN/COMMIT.
         # This is required for UoW-only transaction control and to avoid implicit sqlite transactions.
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False, isolation_level=None)
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
         self._role_catalog: RoleCatalog | None = None
         self._tx_depth = 0
@@ -74,6 +78,10 @@ class Storage:
         self._logger = logging.getLogger("bot")
         self._enforce_write_uow = False
         self._init_schema()
+
+    @property
+    def db_path(self) -> str:
+        return self._db_path
 
     def enable_write_uow_guard(self) -> None:
         """Enable strict runtime guard for domain write paths."""
@@ -638,6 +646,74 @@ class Storage:
             )
             """
         )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_runs (
+                plan_run_id TEXT PRIMARY KEY,
+                team_id INTEGER NOT NULL,
+                thread_id TEXT NOT NULL,
+                created_by_user_id INTEGER,
+                actor_role TEXT,
+                goal TEXT NOT NULL,
+                status TEXT NOT NULL,
+                require_manual_approval INTEGER NOT NULL DEFAULT 1,
+                current_step_order INTEGER,
+                current_step_id TEXT,
+                total_steps INTEGER NOT NULL,
+                completed_steps INTEGER NOT NULL DEFAULT 0,
+                failed_step_id TEXT,
+                cancelled_reason TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY (team_id) REFERENCES teams(team_id),
+                CHECK (status IN ('active', 'completed', 'failed', 'cancelled'))
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_steps (
+                plan_run_id TEXT NOT NULL,
+                step_id TEXT NOT NULL,
+                step_order INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL,
+                summary TEXT,
+                artifacts_json TEXT,
+                test_commands_json TEXT,
+                assignee_role TEXT,
+                started_at TEXT,
+                reported_at TEXT,
+                approved_at TEXT,
+                done_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (plan_run_id, step_id),
+                FOREIGN KEY (plan_run_id) REFERENCES plan_runs(plan_run_id),
+                CHECK (status IN ('pending', 'in_progress', 'reported', 'approval_requested', 'approved', 'rejected', 'done', 'blocked'))
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS plan_events (
+                event_id TEXT PRIMARY KEY,
+                plan_run_id TEXT NOT NULL,
+                step_id TEXT,
+                event_type TEXT NOT NULL,
+                from_status TEXT,
+                to_status TEXT,
+                actor_type TEXT NOT NULL,
+                actor_id TEXT,
+                payload_json TEXT,
+                idempotency_key TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (plan_run_id) REFERENCES plan_runs(plan_run_id),
+                FOREIGN KEY (plan_run_id, step_id) REFERENCES plan_steps(plan_run_id, step_id)
+            )
+            """
+        )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_chain_step ON skill_runs(chain_id, step_index, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_skill_runs_skill_created ON skill_runs(skill_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_team_role_runtime_status_status ON team_role_runtime_status(status)")
@@ -709,6 +785,20 @@ class Storage:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_event_deliveries_event ON event_deliveries(event_id, created_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plan_runs_team_updated ON plan_runs(team_id, updated_at DESC, plan_run_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plan_runs_thread_updated ON plan_runs(thread_id, updated_at DESC, plan_run_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plan_runs_status_updated ON plan_runs(status, updated_at DESC, plan_run_id DESC)")
+        cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_steps_order ON plan_steps(plan_run_id, step_order)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plan_steps_status_order ON plan_steps(plan_run_id, status, step_order)")
+        cur.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_events_idempotency
+            ON plan_events(idempotency_key)
+            WHERE idempotency_key IS NOT NULL AND idempotency_key <> ''
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plan_events_run_created ON plan_events(plan_run_id, created_at DESC, event_id DESC)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_plan_events_step_created ON plan_events(plan_run_id, step_id, created_at DESC, event_id DESC)")
         self._conn.commit()
 
         # Backwards-compatible migrations for existing DBs
@@ -1992,64 +2082,100 @@ class Storage:
             return None
         return self.get_team(int(row["team_id"]))
 
-    def resolve_team_id_by_telegram_chat(self, chat_id: int) -> int | None:
-        team = self.get_team_by_binding(interface_type="telegram", external_id=str(chat_id))
+    def resolve_team_id_by_binding(self, *, interface_type: str, external_id: str | int) -> int | None:
+        team = self.get_team_by_binding(
+            interface_type=str(interface_type).strip().lower(),
+            external_id=str(external_id).strip(),
+        )
         if team is None:
             return None
         return team.team_id
 
-    def resolve_telegram_chat_id_by_team_id(self, team_id: int) -> int | None:
+    def resolve_binding_external_id_by_team(self, *, team_id: int, interface_type: str) -> str | None:
         cur = self._conn.cursor()
         cur.execute(
             """
             SELECT external_id
             FROM team_bindings
-            WHERE team_id = ? AND interface_type = 'telegram' AND is_active = 1
+            WHERE team_id = ? AND interface_type = ? AND is_active = 1
             ORDER BY external_id
             LIMIT 1
             """,
-            (team_id,),
+            (team_id, str(interface_type).strip().lower()),
         )
         row = cur.fetchone()
         if not row:
             return None
-        try:
-            return int(row["external_id"])
-        except Exception:
-            return None
+        return str(row["external_id"])
 
-    def upsert_telegram_team_binding(self, chat_id: int, title: str | None, *, is_active: bool = True) -> int:
-        team = self.get_team_by_binding(interface_type="telegram", external_id=str(chat_id))
+    def upsert_team_binding_for_interface(
+        self,
+        *,
+        interface_type: str,
+        external_id: str | int,
+        external_title: str | None,
+        is_active: bool = True,
+    ) -> int:
+        interface_name = str(interface_type).strip().lower()
+        external_key = str(external_id).strip()
+        team = self.get_team_by_binding(interface_type=interface_name, external_id=external_key)
         if team is None:
-            public_id = f"team-tg-{chat_id}"
-            team = self.upsert_team(name=title, public_id=public_id, is_active=is_active, ext_json=None)
+            public_id = f"team-tg-{external_key}" if interface_name == "telegram" else f"team-{interface_name}-{external_key}"
+            team = self.upsert_team(name=external_title, public_id=public_id, is_active=is_active, ext_json=None)
         else:
             team = self.upsert_team(
-                name=title if title is not None else team.name,
+                name=external_title if external_title is not None else team.name,
                 public_id=team.public_id,
                 is_active=is_active,
                 ext_json=team.ext_json,
             )
         self.upsert_team_binding(
             team_id=team.team_id,
-            interface_type="telegram",
-            external_id=str(chat_id),
-            external_title=title,
+            interface_type=interface_name,
+            external_id=external_key,
+            external_title=external_title,
             is_active=is_active,
         )
         return team.team_id
 
-    def set_telegram_team_binding_active(self, chat_id: int, is_active: bool) -> None:
-        self._require_write_transaction('set_telegram_team_binding_active')
+    def set_team_binding_active(self, *, interface_type: str, external_id: str | int, is_active: bool) -> None:
+        self._require_write_transaction('set_team_binding_active')
         now = _utc_now()
         cur = self._conn.cursor()
         cur.execute(
             """
             UPDATE team_bindings
             SET is_active = ?, updated_at = ?
-            WHERE interface_type = 'telegram' AND external_id = ?
+            WHERE interface_type = ? AND external_id = ?
             """,
-            (1 if is_active else 0, now, str(chat_id)),
+            (1 if is_active else 0, now, str(interface_type).strip().lower(), str(external_id)),
+        )
+
+    def resolve_team_id_by_telegram_chat(self, chat_id: int) -> int | None:
+        return self.resolve_team_id_by_binding(interface_type="telegram", external_id=chat_id)
+
+    def resolve_telegram_chat_id_by_team_id(self, team_id: int) -> int | None:
+        raw = self.resolve_binding_external_id_by_team(team_id=team_id, interface_type="telegram")
+        if raw is None:
+            return None
+        try:
+            return int(raw)
+        except Exception:
+            return None
+
+    def upsert_telegram_team_binding(self, chat_id: int, title: str | None, *, is_active: bool = True) -> int:
+        return self.upsert_team_binding_for_interface(
+            interface_type="telegram",
+            external_id=chat_id,
+            external_title=title,
+            is_active=is_active,
+        )
+
+    def set_telegram_team_binding_active(self, chat_id: int, is_active: bool) -> None:
+        self.set_team_binding_active(
+            interface_type="telegram",
+            external_id=chat_id,
+            is_active=is_active,
         )
 
     def get_skill_run(self, run_id: int) -> SkillRun | None:
@@ -6191,6 +6317,351 @@ class Storage:
         if record is None:
             raise RuntimeError("Failed to upsert qa_idempotency")
         return record
+
+    @staticmethod
+    def _row_to_plan_run(row: sqlite3.Row) -> PlanRun:
+        return PlanRun(
+            plan_run_id=str(row["plan_run_id"]),
+            team_id=int(row["team_id"]),
+            thread_id=str(row["thread_id"]),
+            created_by_user_id=int(row["created_by_user_id"]) if row["created_by_user_id"] is not None else None,
+            actor_role=row["actor_role"],
+            goal=str(row["goal"]),
+            status=str(row["status"]),
+            require_manual_approval=bool(int(row["require_manual_approval"] or 0)),
+            current_step_order=int(row["current_step_order"]) if row["current_step_order"] is not None else None,
+            current_step_id=row["current_step_id"],
+            total_steps=int(row["total_steps"]),
+            completed_steps=int(row["completed_steps"]),
+            failed_step_id=row["failed_step_id"],
+            cancelled_reason=row["cancelled_reason"],
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+            completed_at=row["completed_at"],
+        )
+
+    @staticmethod
+    def _row_to_plan_step(row: sqlite3.Row) -> PlanStep:
+        return PlanStep(
+            plan_run_id=str(row["plan_run_id"]),
+            step_id=str(row["step_id"]),
+            step_order=int(row["step_order"]),
+            title=str(row["title"]),
+            description=row["description"],
+            status=str(row["status"]),
+            summary=row["summary"],
+            artifacts_json=row["artifacts_json"],
+            test_commands_json=row["test_commands_json"],
+            assignee_role=row["assignee_role"],
+            started_at=row["started_at"],
+            reported_at=row["reported_at"],
+            approved_at=row["approved_at"],
+            done_at=row["done_at"],
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    def _row_to_plan_event(row: sqlite3.Row) -> PlanEvent:
+        return PlanEvent(
+            event_id=str(row["event_id"]),
+            plan_run_id=str(row["plan_run_id"]),
+            step_id=row["step_id"],
+            event_type=str(row["event_type"]),
+            from_status=row["from_status"],
+            to_status=row["to_status"],
+            actor_type=str(row["actor_type"]),
+            actor_id=row["actor_id"],
+            payload_json=row["payload_json"],
+            idempotency_key=row["idempotency_key"],
+            created_at=str(row["created_at"]),
+        )
+
+    def create_plan_run(
+        self,
+        *,
+        plan_run_id: str,
+        team_id: int,
+        thread_id: str,
+        goal: str,
+        total_steps: int,
+        created_by_user_id: int | None = None,
+        actor_role: str | None = None,
+        require_manual_approval: bool = True,
+    ) -> PlanRun:
+        self._require_write_transaction("create_plan_run")
+        self.get_team(int(team_id))
+        now = _utc_now()
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO plan_runs (
+                plan_run_id, team_id, thread_id, created_by_user_id, actor_role, goal, status,
+                require_manual_approval, current_step_order, current_step_id, total_steps,
+                completed_steps, failed_step_id, cancelled_reason, created_at, updated_at, completed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, NULL, ?, 0, NULL, NULL, ?, ?, NULL)
+            """,
+            (
+                str(plan_run_id),
+                int(team_id),
+                str(thread_id),
+                int(created_by_user_id) if created_by_user_id is not None else None,
+                actor_role,
+                str(goal),
+                1 if require_manual_approval else 0,
+                int(total_steps),
+                now,
+                now,
+            ),
+        )
+        created = self.get_plan_run(str(plan_run_id))
+        if created is None:
+            raise RuntimeError("Failed to create plan run")
+        return created
+
+    def get_plan_run(self, plan_run_id: str) -> PlanRun | None:
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM plan_runs WHERE plan_run_id = ? LIMIT 1", (str(plan_run_id),))
+        row = cur.fetchone()
+        return None if row is None else self._row_to_plan_run(row)
+
+    def list_plan_runs(
+        self, *, team_id: int | None = None, thread_id: str | None = None, status: str | None = None, limit: int = 100
+    ) -> list[PlanRun]:
+        safe_limit = max(1, min(int(limit), 500))
+        where: list[str] = []
+        binds: list[object] = []
+        if team_id is not None:
+            where.append("team_id = ?")
+            binds.append(int(team_id))
+        if thread_id is not None:
+            where.append("thread_id = ?")
+            binds.append(str(thread_id))
+        if status is not None:
+            where.append("status = ?")
+            binds.append(str(status))
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        cur = self._conn.cursor()
+        cur.execute(
+            f"SELECT * FROM plan_runs {where_sql} ORDER BY updated_at DESC, plan_run_id DESC LIMIT ?",
+            (*binds, safe_limit),
+        )
+        return [self._row_to_plan_run(row) for row in cur.fetchall()]
+
+    def set_plan_run_current_step(self, plan_run_id: str, *, step_id: str | None, step_order: int | None) -> None:
+        self._require_write_transaction("set_plan_run_current_step")
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE plan_runs
+            SET current_step_id = ?, current_step_order = ?, updated_at = ?
+            WHERE plan_run_id = ?
+            """,
+            (step_id, step_order, _utc_now(), str(plan_run_id)),
+        )
+
+    def update_plan_run_status(
+        self, plan_run_id: str, *, status: str, failed_step_id: str | None = None, cancelled_reason: str | None = None
+    ) -> PlanRun:
+        self._require_write_transaction("update_plan_run_status")
+        now = _utc_now()
+        completed_at = now if status in {"completed", "failed", "cancelled"} else None
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            UPDATE plan_runs
+            SET status = ?, failed_step_id = ?, cancelled_reason = ?, completed_at = ?, updated_at = ?
+            WHERE plan_run_id = ?
+            """,
+            (str(status), failed_step_id, cancelled_reason, completed_at, now, str(plan_run_id)),
+        )
+        got = self.get_plan_run(str(plan_run_id))
+        if got is None:
+            raise ValueError(f"Plan run not found: {plan_run_id}")
+        return got
+
+    def create_plan_steps(self, plan_run_id: str, items: list[tuple[str, int, str, str | None]]) -> list[PlanStep]:
+        self._require_write_transaction("create_plan_steps")
+        now = _utc_now()
+        cur = self._conn.cursor()
+        for step_id, step_order, title, description in items:
+            cur.execute(
+                """
+                INSERT INTO plan_steps (
+                    plan_run_id, step_id, step_order, title, description, status, summary,
+                    artifacts_json, test_commands_json, assignee_role, started_at, reported_at,
+                    approved_at, done_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'pending', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?)
+                """,
+                (str(plan_run_id), str(step_id), int(step_order), str(title), description, now),
+            )
+        return self.list_plan_steps(str(plan_run_id))
+
+    def get_plan_step(self, plan_run_id: str, step_id: str) -> PlanStep | None:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM plan_steps WHERE plan_run_id = ? AND step_id = ? LIMIT 1",
+            (str(plan_run_id), str(step_id)),
+        )
+        row = cur.fetchone()
+        return None if row is None else self._row_to_plan_step(row)
+
+    def list_plan_steps(self, plan_run_id: str) -> list[PlanStep]:
+        cur = self._conn.cursor()
+        cur.execute(
+            "SELECT * FROM plan_steps WHERE plan_run_id = ? ORDER BY step_order ASC",
+            (str(plan_run_id),),
+        )
+        return [self._row_to_plan_step(row) for row in cur.fetchall()]
+
+    def set_plan_step_status(
+        self,
+        plan_run_id: str,
+        step_id: str,
+        *,
+        to_status: str,
+        summary: str | None = None,
+        artifacts_json: str | None = None,
+        test_commands_json: str | None = None,
+    ) -> PlanStep:
+        self._require_write_transaction("set_plan_step_status")
+        now = _utc_now()
+        cur = self._conn.cursor()
+        current = self.get_plan_step(str(plan_run_id), str(step_id))
+        if current is None:
+            raise ValueError(f"Plan step not found: {plan_run_id}/{step_id}")
+        started_at = current.started_at if to_status != "in_progress" else (current.started_at or now)
+        reported_at = current.reported_at if to_status not in {"reported", "approval_requested", "approved", "rejected", "done"} else (
+            current.reported_at or now
+        )
+        approved_at = current.approved_at if to_status not in {"approved", "done"} else (current.approved_at or now)
+        done_at = current.done_at if to_status != "done" else (current.done_at or now)
+        cur.execute(
+            """
+            UPDATE plan_steps
+            SET status = ?, summary = COALESCE(?, summary), artifacts_json = COALESCE(?, artifacts_json),
+                test_commands_json = COALESCE(?, test_commands_json), started_at = ?, reported_at = ?,
+                approved_at = ?, done_at = ?, updated_at = ?
+            WHERE plan_run_id = ? AND step_id = ?
+            """,
+            (
+                str(to_status),
+                summary,
+                artifacts_json,
+                test_commands_json,
+                started_at,
+                reported_at,
+                approved_at,
+                done_at,
+                now,
+                str(plan_run_id),
+                str(step_id),
+            ),
+        )
+        updated = self.get_plan_step(str(plan_run_id), str(step_id))
+        if updated is None:
+            raise RuntimeError("Failed to update plan step status")
+        return updated
+
+    def create_plan_event(
+        self,
+        *,
+        plan_run_id: str,
+        event_type: str,
+        actor_type: str,
+        step_id: str | None = None,
+        from_status: str | None = None,
+        to_status: str | None = None,
+        actor_id: str | None = None,
+        payload_json: str | None = None,
+        idempotency_key: str | None = None,
+        event_id: str | None = None,
+    ) -> PlanEvent:
+        self._require_write_transaction("create_plan_event")
+        key = str(idempotency_key or "").strip() or None
+        if key is not None:
+            existing = self.get_plan_event_by_idempotency(key)
+            if existing is not None:
+                return existing
+        now = _utc_now()
+        resolved_event_id = str(event_id or secrets.token_hex(16))
+        cur = self._conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO plan_events (
+                event_id, plan_run_id, step_id, event_type, from_status, to_status,
+                actor_type, actor_id, payload_json, idempotency_key, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                resolved_event_id,
+                str(plan_run_id),
+                step_id,
+                str(event_type),
+                from_status,
+                to_status,
+                str(actor_type),
+                actor_id,
+                payload_json,
+                key,
+                now,
+            ),
+        )
+        created = self.get_plan_event(resolved_event_id)
+        if created is None:
+            raise RuntimeError("Failed to create plan event")
+        return created
+
+    def get_plan_event(self, event_id: str) -> PlanEvent | None:
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM plan_events WHERE event_id = ? LIMIT 1", (str(event_id),))
+        row = cur.fetchone()
+        return None if row is None else self._row_to_plan_event(row)
+
+    def get_plan_event_by_idempotency(self, idempotency_key: str) -> PlanEvent | None:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            return None
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM plan_events WHERE idempotency_key = ? LIMIT 1", (key,))
+        row = cur.fetchone()
+        return None if row is None else self._row_to_plan_event(row)
+
+    def list_plan_events(self, plan_run_id: str, *, step_id: str | None = None, limit: int = 200) -> list[PlanEvent]:
+        safe_limit = max(1, min(int(limit), 1000))
+        cur = self._conn.cursor()
+        if step_id is None:
+            cur.execute(
+                """
+                SELECT * FROM plan_events
+                WHERE plan_run_id = ?
+                ORDER BY created_at DESC, event_id DESC
+                LIMIT ?
+                """,
+                (str(plan_run_id), safe_limit),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT * FROM plan_events
+                WHERE plan_run_id = ? AND step_id = ?
+                ORDER BY created_at DESC, event_id DESC
+                LIMIT ?
+                """,
+                (str(plan_run_id), str(step_id), safe_limit),
+            )
+        return [self._row_to_plan_event(row) for row in cur.fetchall()]
+
+    def delete_plan_run(self, plan_run_id: str) -> None:
+        self._require_write_transaction("delete_plan_run")
+        resolved_plan_run_id = str(plan_run_id)
+        current = self.get_plan_run(resolved_plan_run_id)
+        if current is None:
+            raise ValueError(f"Plan run not found: {resolved_plan_run_id}")
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM plan_events WHERE plan_run_id = ?", (resolved_plan_run_id,))
+        cur.execute("DELETE FROM plan_steps WHERE plan_run_id = ?", (resolved_plan_run_id,))
+        cur.execute("DELETE FROM plan_runs WHERE plan_run_id = ?", (resolved_plan_run_id,))
 
     def get_thread_event(self, event_id: str) -> ThreadEvent | None:
         cur = self._conn.cursor()

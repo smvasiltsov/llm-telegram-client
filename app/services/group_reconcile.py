@@ -101,10 +101,15 @@ async def build_reconcile_active_groups_plan(bot: Bot, storage: Storage) -> Reco
 def apply_reconcile_active_groups_writes(storage: Storage, writes: tuple[ReconcileWrite, ...]) -> None:
     for write in writes:
         if write.action == "set_binding_active":
-            storage.set_telegram_team_binding_active(write.chat_id, write.is_active)
+            storage.set_team_binding_active(interface_type="telegram", external_id=write.chat_id, is_active=write.is_active)
             continue
         if write.action == "upsert_binding":
-            storage.upsert_telegram_team_binding(write.chat_id, write.title, is_active=write.is_active)
+            storage.upsert_team_binding_for_interface(
+                interface_type="telegram",
+                external_id=write.chat_id,
+                external_title=write.title,
+                is_active=write.is_active,
+            )
             continue
         raise ValueError(f"Unsupported reconcile write action: {write.action}")
 

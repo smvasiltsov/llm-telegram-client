@@ -1,5 +1,5 @@
 {
-  "telegram_bot_token": "REPLACE_ME",
+  "telegram_bot_token": "",
   "database_path": "./bot.sqlite3",
   "encryption_key": "REPLACE_ME_FERNET_KEY",
   "owner_user_id": 1234567890,
@@ -64,6 +64,12 @@
       "api_base_url": "http://127.0.0.1:8080",
       "api_timeout_sec": 30,
       "thin_client_enabled": true
+    }
+  },
+  "thread_events": {
+    "delivery": {
+      "enabled": false,
+      "adapters": []
     }
   },
   "dispatch": {

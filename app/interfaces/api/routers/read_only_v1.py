@@ -65,6 +65,7 @@ from app.application.use_cases.write_api import (
     put_team_role_working_dir_result,
     reset_team_role_session_write_result,
 )
+from app.services.plan_supervisor import PlanSupervisorService
 from app.interfaces.api.dependencies import (
     provide_authz_dependencies,
     provide_runtime_dispatch_health,
@@ -114,6 +115,11 @@ from app.interfaces.api.schemas import (
     TeamRolePrepostPutRequestDTO,
     TeamRoleRootDirOutcomeDTO,
     TeamRoleRootDirPutRequestDTO,
+    PlanRunDTO,
+    ActivePlanRunDTO,
+    PlanRunTeamRoleRefDTO,
+    PlanRunViewDTO,
+    PlanStepDTO,
     TeamRoleRuntimeCurrentQuestionDTO,
     TeamRoleRuntimeOverviewDTO,
     TeamRoleSkillReplaceRequestDTO,
@@ -267,6 +273,53 @@ def build_read_only_v1_router(*, app_state: Any):
         if author_name is not None:
             payload["author_name"] = author_name
         return payload
+
+    def _json_loads(raw: str | None, default: object) -> object:
+        text = str(raw or "").strip()
+        if not text:
+            return default
+        try:
+            return json.loads(text)
+        except Exception:
+            return default
+
+    def _plan_run_payload(item) -> dict[str, object]:
+        return PlanRunDTO(
+            plan_run_id=str(item.plan_run_id),
+            team_id=int(item.team_id),
+            thread_id=str(item.thread_id),
+            goal=str(item.goal),
+            status=str(item.status),
+            current_step_id=(str(item.current_step_id) if item.current_step_id is not None else None),
+            current_step_order=(int(item.current_step_order) if item.current_step_order is not None else None),
+            total_steps=int(item.total_steps),
+            completed_steps=int(item.completed_steps),
+            created_at=str(item.created_at),
+            updated_at=str(item.updated_at),
+            completed_at=(str(item.completed_at) if item.completed_at is not None else None),
+        ).model_dump(mode="json")
+
+    def _plan_step_payload(item) -> dict[str, object]:
+        artifacts_raw = _json_loads(item.artifacts_json, [])
+        if not isinstance(artifacts_raw, list):
+            artifacts_raw = []
+        test_commands_raw = _json_loads(item.test_commands_json, [])
+        if not isinstance(test_commands_raw, list):
+            test_commands_raw = []
+        return PlanStepDTO(
+            step_id=str(item.step_id),
+            order=int(item.step_order),
+            title=str(item.title),
+            description=(str(item.description) if item.description is not None else None),
+            status=str(item.status),
+            summary=(str(item.summary) if item.summary is not None else None),
+            artifacts=artifacts_raw,
+            test_commands=[str(x) for x in test_commands_raw],
+            started_at=(str(item.started_at) if item.started_at is not None else None),
+            reported_at=(str(item.reported_at) if item.reported_at is not None else None),
+            approved_at=(str(item.approved_at) if item.approved_at is not None else None),
+            done_at=(str(item.done_at) if item.done_at is not None else None),
+        ).model_dump(mode="json")
 
     def _owner_guard(user_id: int | None) -> JSONResponse | None:
         if user_id is None:
@@ -1941,6 +1994,248 @@ def build_read_only_v1_router(*, app_state: Any):
                     "code": ErrorCode.QA_NOT_FOUND.value,
                     "message": f"Event subscription not found: {subscription_id}",
                     "details": {"entity": "event_subscription", "id": int(subscription_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return Response(status_code=204)
+
+    @router.get(
+        "/plan-runs",
+        response_model=list[ActivePlanRunDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def list_active_plan_runs(
+        team_id: int = Query(...),
+        team_role: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        try:
+            storage.get_team(int(team_id))
+        except Exception:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Team not found: {team_id}",
+                    "details": {"entity": "team", "id": int(team_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+
+        role_filter_name: str | None = None
+        if team_role is not None and str(team_role).strip():
+            try:
+                role_obj = storage.get_role_for_team_by_name(int(team_id), str(team_role).strip())
+                role_filter_name = str(role_obj.role_name).strip().lower()
+            except Exception:
+                return []
+
+        runs = storage.list_plan_runs(team_id=int(team_id), status="active", limit=int(limit))
+        items: list[dict[str, object]] = []
+        for run in runs:
+            actor_role = str(run.actor_role or "").strip()
+            actor_role_lower = actor_role.lower()
+            if role_filter_name is not None and actor_role_lower != role_filter_name:
+                continue
+
+            team_role_ref: dict[str, object] | None = None
+            if actor_role:
+                try:
+                    role_obj = storage.get_role_for_team_by_name(int(team_id), actor_role)
+                    team_role_id = storage.resolve_team_role_id(int(team_id), int(role_obj.role_id))
+                    display_name = storage.get_team_role_name(int(team_id), int(role_obj.role_id))
+                    team_role_ref = PlanRunTeamRoleRefDTO(
+                        team_role_id=(int(team_role_id) if team_role_id is not None else None),
+                        role_id=int(role_obj.role_id),
+                        role_name=str(role_obj.role_name),
+                        display_name=str(display_name),
+                    ).model_dump(mode="json")
+                except Exception:
+                    team_role_ref = PlanRunTeamRoleRefDTO(
+                        team_role_id=None,
+                        role_id=None,
+                        role_name=actor_role,
+                        display_name=actor_role,
+                    ).model_dump(mode="json")
+
+            items.append(
+                ActivePlanRunDTO(
+                    plan_run_id=str(run.plan_run_id),
+                    team_id=int(run.team_id),
+                    thread_id=str(run.thread_id),
+                    goal=str(run.goal),
+                    status=str(run.status),
+                    current_step_id=(str(run.current_step_id) if run.current_step_id is not None else None),
+                    current_step_order=(int(run.current_step_order) if run.current_step_order is not None else None),
+                    total_steps=int(run.total_steps),
+                    completed_steps=int(run.completed_steps),
+                    updated_at=str(run.updated_at),
+                    team_role=team_role_ref,
+                ).model_dump(mode="json")
+            )
+        return items
+
+    @router.get(
+        "/plan-runs/{plan_run_id}",
+        response_model=PlanRunDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_plan_run(
+        plan_run_id: str,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        item = storage.get_plan_run(plan_run_id)
+        if item is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Plan run not found: {plan_run_id}",
+                    "details": {"entity": "plan_run", "id": str(plan_run_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return _plan_run_payload(item)
+
+    @router.get(
+        "/plan-runs/{plan_run_id}/steps",
+        response_model=list[PlanStepDTO],
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_plan_run_steps(
+        plan_run_id: str,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        run = storage.get_plan_run(plan_run_id)
+        if run is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Plan run not found: {plan_run_id}",
+                    "details": {"entity": "plan_run", "id": str(plan_run_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        return [_plan_step_payload(item) for item in storage.list_plan_steps(plan_run_id)]
+
+    @router.get(
+        "/plan-runs/{plan_run_id}/view",
+        response_model=PlanRunViewDTO,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def get_plan_run_view(
+        plan_run_id: str,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        run = storage.get_plan_run(plan_run_id)
+        if run is None:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Plan run not found: {plan_run_id}",
+                    "details": {"entity": "plan_run", "id": str(plan_run_id), "cause": "not_found"},
+                    "retryable": False,
+                },
+            )
+        service = PlanSupervisorService(storage)
+        return service.get_plan_ui_projection(plan_run_id)
+
+    @router.delete(
+        "/plan-runs/{plan_run_id}",
+        status_code=204,
+        responses={
+            401: {"model": ApiErrorResponse},
+            403: {"model": ApiErrorResponse},
+            404: {"model": ApiErrorResponse},
+            409: {"model": ApiErrorResponse},
+            500: {"model": ApiErrorResponse},
+        },
+    )
+    def delete_plan_run(
+        plan_run_id: str,
+        x_owner_user_id: int | None = Header(default=None, alias="X-Owner-User-Id"),
+        owner_user_id: int | None = Query(default=None),
+    ):
+        denied = _owner_guard(owner_user_id if owner_user_id is not None else x_owner_user_id)
+        if denied is not None:
+            return denied
+        blocked = _runtime_write_guard()
+        if blocked is not None:
+            return blocked
+        deps_result = provide_storage_uow_dependencies(app_state)
+        if deps_result.is_error or deps_result.value is None:
+            mapped = map_result_error_to_api(deps_result)
+            return _error_json(status_code=mapped.status_code, payload=mapped.payload)
+        storage = deps_result.value.storage
+        try:
+            with storage.transaction(immediate=True):
+                storage.delete_plan_run(plan_run_id)
+        except ValueError:
+            return _error_json(
+                status_code=404,
+                payload={
+                    "code": ErrorCode.QA_NOT_FOUND.value,
+                    "message": f"Plan run not found: {plan_run_id}",
+                    "details": {"entity": "plan_run", "id": str(plan_run_id), "cause": "not_found"},
                     "retryable": False,
                 },
             )

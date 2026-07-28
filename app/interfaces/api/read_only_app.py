@@ -25,11 +25,22 @@ def _resolve_cors_origins() -> list[str]:
         return [item.strip() for item in raw.split(",") if item.strip()]
     return [
         "app://obsidian.md",
+        "capacitor://localhost",
+        "ionic://localhost",
+        "http://localhost:8080",
+        "https://localhost",
+        "https://127.0.0.1",
         "http://localhost",
         "http://127.0.0.1",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
+
+
+def _resolve_cors_origin_regex() -> str | None:
+    # Optional regex for custom app/webview schemes, e.g. r"^(app|capacitor)://.*$"
+    raw = str(os.getenv("API_CORS_ALLOWED_ORIGIN_REGEX", "") or "").strip()
+    return raw or None
 
 
 def build_read_only_fastapi_app(runtime) -> object:
@@ -48,15 +59,17 @@ def build_read_only_fastapi_app(runtime) -> object:
     )
     attach_runtime_dependencies_to_app_state(app.state, runtime)
     cors_origins = _resolve_cors_origins()
+    cors_origin_regex = _resolve_cors_origin_regex()
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
+        allow_origin_regex=cors_origin_regex,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["X-Correlation-Id"],
     )
-    logger.info("api_cors_enabled origins=%s", cors_origins)
+    logger.info("api_cors_enabled origins=%s origin_regex=%s", cors_origins, cors_origin_regex)
 
     def _resolve_metrics_port():
         direct = getattr(app.state, "metrics_port", None)

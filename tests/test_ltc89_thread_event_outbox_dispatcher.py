@@ -160,6 +160,15 @@ class LTC89ThreadEventOutboxDispatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(name == "deliveries_failed" for name, _, _ in metrics.increments))
         self.assertTrue(any(name == "dlq_size" for name, _, _ in metrics.observes))
 
+    async def test_dispatcher_does_not_auto_register_telegram_adapter_from_runtime_token(self) -> None:
+        runtime = SimpleNamespace(
+            storage=self.storage,
+            metrics_port=_MetricsCapture(),
+            telegram_bot_token="123:abc",
+        )
+        dispatcher = ThreadEventOutboxDispatcher(runtime=runtime)
+        self.assertEqual(dispatcher._adapters, {})
+
     async def test_telegram_adapter_formats_sender_and_skips_duplicate_child_question(self) -> None:
         sent_payloads: list[dict[str, object]] = []
 
@@ -250,6 +259,56 @@ class LTC89ThreadEventOutboxDispatcherTests(unittest.IsolatedAsyncioTestCase):
         sent_text = str(sent_payloads[0].get("text") or "")
         self.assertIn("<b>dev</b>", sent_text)
         self.assertIn("\n\n", sent_text)
+
+    async def test_telegram_adapter_accepts_chat_prefixed_target_id(self) -> None:
+        sent_payloads: list[dict[str, object]] = []
+
+        class _FakeResponse:
+            def __init__(self) -> None:
+                self.status_code = 200
+                self.text = "ok"
+
+            def json(self):
+                return {"ok": True}
+
+        class _FakeClient:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
+                _ = (args, kwargs)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                _ = (exc_type, exc, tb)
+                return False
+
+            async def post(self, _url: str, json=None, headers=None):  # noqa: ANN001
+                _ = headers
+                sent_payloads.append(dict(json or {}))
+                return _FakeResponse()
+
+        fake_httpx = SimpleNamespace(AsyncClient=_FakeClient)
+        with patch.dict(sys.modules, {"httpx": fake_httpx}):
+            with self.storage.transaction(immediate=True):
+                event = self.storage.create_thread_event(
+                    team_id=self.team_id,
+                    thread_id="chat:-10089",
+                    event_type="thread.message.created",
+                    author_type="system",
+                    direction="answer",
+                    origin_interface="telegram",
+                    payload_json='{"kind":"plan-supervisor-directive","text":"directive"}',
+                )
+                delivery = self.storage.enqueue_event_delivery(
+                    event_id=event.event_id,
+                    interface_type="telegram",
+                    target_id="chat:-10089",
+                )
+            adapter = TelegramBotApiDeliveryAdapter(bot_token="123:abc", storage=self.storage)
+            await adapter.deliver(event=event, delivery=delivery, idempotency_key="k-chat")
+
+        self.assertEqual(len(sent_payloads), 1)
+        self.assertEqual(int(sent_payloads[0]["chat_id"]), -10089)
 
 
 if __name__ == "__main__":
